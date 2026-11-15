@@ -224,6 +224,13 @@ mod tests {
         assert!(repos.windows(2).all(|w| w[0].text_lines < w[1].text_lines));
     }
 
+    /// A global git config defining a smudge filter that touches `marker`.
+    /// Forward slashes, because backslashes are escapes in git config values.
+    fn smudge_config(marker: &Path) -> String {
+        let marker = marker.display().to_string().replace('\\', "/");
+        format!("[filter \"evil\"]\n\tsmudge = \"touch '{marker}' && cat\"\n")
+    }
+
     fn run(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
@@ -246,10 +253,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("filter-ran");
         let global = tmp.path().join("gitconfig");
-        let smudge = format!(
-            "[filter \"evil\"]\n\tsmudge = \"touch '{}' && cat\"\n",
-            marker.display()
-        );
+        let smudge = smudge_config(&marker);
         std::fs::write(&global, smudge).unwrap();
 
         let src = tmp.path().join("src");
@@ -311,10 +315,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("filter-ran");
         let global = tmp.path().join("gitconfig");
-        let smudge = format!(
-            "[filter \"evil\"]\n\tsmudge = \"touch '{}' && cat\"\n",
-            marker.display()
-        );
+        let smudge = smudge_config(&marker);
         std::fs::write(&global, smudge).unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir(&src).unwrap();
