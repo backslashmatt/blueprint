@@ -1,0 +1,11 @@
+[package]
+name = "blueprint-model"
+description = "Types for the architecture model: nodes, edges, levels, diffs. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
