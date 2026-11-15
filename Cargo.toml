@@ -1,4 +1,6 @@
 [workspace]
+# Spikes are throwaway experiments with their own lockfiles; they are not product crates.
+exclude = ["spikes"]
 resolver = "3"
 members = [
     "crates/model",

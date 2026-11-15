@@ -1,0 +1,17 @@
+[package]
+name = "gpui-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway M0 spike (issue #13): can GPUI meet the REQUIREMENTS §4 rendering budgets?"
+license = "MIT OR Apache-2.0"
+
+# Standalone: not part of the product workspace.
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+memory-stats = "1"
+
+[profile.release]
+debug = "line-tables-only"
