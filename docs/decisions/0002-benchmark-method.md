@@ -33,9 +33,11 @@ In a 4-CPU Linux container, `cli_process_start` (≈1.2 ms), comparing two build
 
 A real slowdown of about 0.9 ms (one extra `exec`) measured +77% and failed. The previous design, with a 2 ms noise floor, would have passed it.
 
+First CI run (PR #20, `ubuntu-24.04`, 2 CPUs): `cli_process_start` 0.45 ms against base 0.46 ms (−1.4%); I/O floor 0.25 / 17.4 / 285 ms for small / medium / large.
+
 ## Limits
 
-- The §4 reference machine is a 4-core, 16 GB laptop; a hosted runner may be smaller. Budgets are judged on the CI number, which is conservative if the runner is slower.
+- The §4 reference machine is a 4-core, 16 GB laptop. The `ubuntu-24.04` hosted runner for this private repository reports **2 logical CPUs** (first CI run, PR #20). Budgets are judged on the CI number, which is conservative for single-threaded work and pessimistic for parallel work such as indexing; parallel budgets will be reported with the CPU count beside them.
 - The margin between measured noise (±3.4%) and the gate (5%) is narrow. Confirmation re-runs make a spurious failure unlikely, not impossible.
 - Frame-time budgets need the instrumented UI build (§9.3, M3) and are not measured here.
 
