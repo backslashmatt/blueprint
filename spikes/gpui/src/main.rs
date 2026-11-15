@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, Context, FontWeight, HighlightStyle, Hsla, PathBuilder, Pixels,
+    App, Bounds, Context, FontWeight, HighlightStyle, Hsla, PathBuilder, Pixels,
     Render, ScrollStrategy, SharedString, StyledText, UniformListScrollHandle, Window,
     WindowBounds, WindowOptions, canvas, div, fill, point, prelude::*, px, rgb, size,
     uniform_list,
@@ -317,7 +317,7 @@ impl Spike {
                         })
                         .collect()
                 })
-                .track_scroll(self.scroll.clone())
+                .track_scroll(&self.scroll)
                 .size_full(),
             )
             // An empty canvas painted last marks the end of the frame's paint.
@@ -465,7 +465,7 @@ fn main() {
     let out = flag("--out");
     let hold_ms = flag("--hold-ms").and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let opened = cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), focus: true, ..Default::default() },

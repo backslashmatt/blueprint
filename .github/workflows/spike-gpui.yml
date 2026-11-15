@@ -17,6 +17,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # GPUI comes from Zed's git repository; the git CLI fetches it more reliably than libgit2.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   spike:

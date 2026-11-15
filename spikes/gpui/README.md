@@ -20,4 +20,4 @@ Environment switches used while investigating:
 
 On Linux without a desktop, run it with `xvfb-run.sh`: Xvfb plus openbox. GPUI's X11 backend starts its frame loop only once a window manager reports the window as visible.
 
-`patches/xattr` is a one-line fix that GPUI 0.2.2 needs to build against current `libc` on Linux.
+GPUI is pinned to a revision of Zed's main branch. The crates.io release (0.2.2) has no accessibility support, and needed a vendored `xattr` fix to build. Its numbers are recorded on issue #13.
