@@ -1,0 +1,2 @@
+# Byte-stable text on every platform: snapshot and fixture tests compare exact bytes.
+* text=auto eol=lf
