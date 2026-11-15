@@ -16,6 +16,8 @@ struct Graph {
     /// Package name -> names of its normal (non-dev, non-build) dependencies.
     deps: BTreeMap<String, BTreeSet<String>>,
     workspace: BTreeSet<String>,
+    /// Manifest paths of every workspace member.
+    manifests: Vec<String>,
 }
 
 impl Graph {
@@ -35,12 +37,26 @@ impl Graph {
         let meta: Value = serde_json::from_slice(&out.stdout).expect("parse metadata");
 
         let mut names = BTreeMap::new();
+        let mut paths = BTreeMap::new();
         for p in meta["packages"].as_array().expect("packages") {
+            paths.insert(
+                p["id"].as_str().expect("id").to_owned(),
+                p["manifest_path"]
+                    .as_str()
+                    .expect("manifest_path")
+                    .to_owned(),
+            );
             names.insert(
                 p["id"].as_str().expect("id").to_owned(),
                 p["name"].as_str().expect("name").to_owned(),
             );
         }
+        let manifests = meta["workspace_members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .map(|id| paths[id.as_str().expect("id")].clone())
+            .collect();
         let workspace = meta["workspace_members"]
             .as_array()
             .expect("members")
@@ -68,7 +84,11 @@ impl Graph {
                 .or_insert_with(BTreeSet::new)
                 .extend(normal);
         }
-        Graph { deps, workspace }
+        Graph {
+            deps,
+            workspace,
+            manifests,
+        }
     }
 
     fn direct_workspace_deps(&self, krate: &str) -> BTreeSet<String> {
@@ -168,22 +188,19 @@ fn engine_has_no_ui_dependency() {
 
 #[test]
 fn every_crate_inherits_workspace_lints() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    for dir in [
-        "crates/model",
-        "crates/engine",
-        "crates/protocol",
-        "crates/cli",
-        "crates/ui",
-        "crates/app",
-        "bench",
-        "xtask",
-    ] {
-        let manifest =
-            std::fs::read_to_string(root.join(dir).join("Cargo.toml")).expect("read manifest");
-        assert!(
-            manifest.contains("[lints]\nworkspace = true"),
-            "{dir}/Cargo.toml does not inherit workspace lints"
-        );
+    let g = Graph::load();
+    assert!(
+        g.manifests.len() >= 8,
+        "expected every workspace crate, got {:?}",
+        g.manifests
+    );
+    for manifest_path in &g.manifests {
+        let manifest = std::fs::read_to_string(manifest_path).expect("read manifest");
+        // Compare trimmed lines so the check does not depend on line endings.
+        let lines: Vec<&str> = manifest.lines().map(str::trim).collect();
+        let inherits = lines
+            .windows(2)
+            .any(|w| w == ["[lints]", "workspace = true"]);
+        assert!(inherits, "{manifest_path} does not inherit workspace lints");
     }
 }
