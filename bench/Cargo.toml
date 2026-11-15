@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "bp-bench"
+path = "src/bin/bp-bench.rs"
+
 [dependencies]
 blueprint-engine.workspace = true
 serde = { version = "1", features = ["derive"] }
