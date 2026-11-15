@@ -1,0 +1,5 @@
+# GPUI main is built by Zed with Rust 1.98.1 and uses APIs newer than the workspace toolchain.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
