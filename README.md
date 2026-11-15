@@ -14,7 +14,7 @@ crates/
   cli/        Headless front end; the `bp` binary.
   ui/         View state and rendering. Depends on `protocol` only.
   app/        Platform shell: windows, menus, packaging.
-bench/        Benchmarks for the budgets in REQUIREMENTS §4.
+bench/        Benchmarks for the budgets in REQUIREMENTS §4 (see docs/benchmarks.md).
 xtask/        Repository tooling. Its tests enforce the crate layering rules.
 docs/            User documentation (`cli.md`) and decision records (`decisions/`).
 ```
