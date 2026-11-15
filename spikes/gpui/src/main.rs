@@ -28,7 +28,7 @@ const NODES: usize = 5_000;
 const EDGES: usize = 10_000;
 const LINES: usize = 50_000;
 const ANIMATED_FRAMES: usize = 300;
-const INPUTS: usize = 30;
+const INPUTS: usize = 200;
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
@@ -106,6 +106,7 @@ struct Spike {
     rec: Rc<RefCell<Recorder>>,
     out: Option<String>,
     hold_ms: u64,
+    rng: Lcg,
     // Graph state.
     nodes: Rc<Vec<(f32, f32)>>,
     edges: Rc<Vec<(usize, usize)>>,
@@ -150,6 +151,7 @@ impl Spike {
             rec: Rc::default(),
             out,
             hold_ms,
+            rng: Lcg(7),
             nodes: Rc::new(nodes),
             edges: Rc::new(edges),
             offset: (0.0, 0.0),
@@ -199,11 +201,21 @@ impl Spike {
         }
     }
 
-    /// Simulates one input event arriving 30 ms from now: the state change an
-    /// input handler would make, timed until the next paint completes.
+    /// Simulates one input event arriving after a random delay (20-37 ms, so
+    /// samples spread over a whole 60 Hz frame instead of locking to vsync):
+    /// the state change an input handler would make, timed until the next
+    /// paint completes. A new input never overwrites one not yet painted.
     fn schedule_input(&mut self, cx: &mut Context<Self>) {
+        let delay = 20 + self.rng.below(17);
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(30)).await;
+            cx.background_executor().timer(Duration::from_millis(delay)).await;
+            loop {
+                let pending = this.update(cx, |s, _| s.rec.borrow().input_at.is_some()).unwrap_or(false);
+                if !pending {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(1)).await;
+            }
             let _ = this.update(cx, |s, cx| {
                 let Phase::Input(n) = s.phase else { return };
                 if n == INPUTS {
@@ -308,7 +320,7 @@ impl Spike {
                         .map(|ix| {
                             let (text, hl) = &lines[ix];
                             let row = div().h(px(18.0)).text_size(px(13.0));
-                            let row = if std::env::var_os("SPIKE_NO_FONT").is_some() { row } else { row.font_family(std::env::var("SPIKE_FONT").unwrap_or_else(|_| "monospace".into())) };
+                            let row = if std::env::var_os("SPIKE_NO_FONT").is_some() { row } else { row.font_family(std::env::var("SPIKE_FONT").unwrap_or_else(|_| default_mono_font().into())) };
                             if std::env::var_os("SPIKE_NO_HL").is_some() {
                                 row.child(text.clone())
                             } else {
@@ -351,6 +363,18 @@ impl Render for Spike {
             Scenario::Text => self.text(cx).into_any_element(),
         };
         div().size_full().bg(rgb(0xffffff)).child(body)
+    }
+}
+
+/// A concrete monospace family per platform: GPUI does not resolve the
+/// generic `monospace` name (DR 0003).
+fn default_mono_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "DejaVu Sans Mono"
     }
 }
 
@@ -422,13 +446,12 @@ fn stats(xs: &[f64]) -> String {
     v.sort_by(f64::total_cmp);
     let pct = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
     format!(
-        "{{\"n\": {}, \"p50\": {:.3}, \"p95\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}, \"over_16ms\": {}}}",
+        "{{\"n\": {}, \"p50\": {:.3}, \"p95\": {:.3}, \"p99\": {:.3}, \"max\": {:.3}}}",
         v.len(),
         pct(0.5),
         pct(0.95),
         pct(0.99),
         v[v.len() - 1],
-        v.iter().filter(|x| **x > 16.0).count()
     )
 }
 
@@ -468,7 +491,11 @@ fn main() {
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let opened = cx.open_window(
-            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), focus: true, ..Default::default() },
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), focus: true,
+                // No 30 fps throttle when the CI window is not focused (DR 0003 review).
+                inactive_frame_interval: None,
+                ..Default::default()
+            },
             |_, cx| cx.new(|_| Spike::new(scenario, out.clone(), hold_ms)),
         );
         if let Err(e) = opened {
@@ -478,9 +505,10 @@ fn main() {
         cx.activate(true);
         // Safety net: never hang CI.
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_secs(120)).await;
+            cx.background_executor().timer(Duration::from_secs(170)).await;
             eprintln!("gpui-spike: timed out");
-            let _ = cx.update(|cx| cx.quit());
+            // Exit non-zero so CI cannot mistake a hung scene for a pass.
+            std::process::exit(3);
         })
         .detach();
     });
