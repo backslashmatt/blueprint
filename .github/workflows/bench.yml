@@ -1,0 +1,72 @@
+# Benchmarks (REQUIREMENTS §9.3). Every run builds the commit under test and its base
+# (the PR's base, or the previous main commit on a push) and measures both on the same
+# runner, interleaved, then checks the section 4 budgets. Method: docs/decisions/0002.
+name: Bench
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The PR's base, or the main commit before this push. Empty for a manual run.
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+jobs:
+  bench:
+    name: bench (linux x64)
+    # The fixed runner class (DR 0002).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the commit under test
+        run: cargo build --release --locked -p blueprint-cli -p blueprint-bench
+      - name: Build the base commit
+        id: base
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No base commit; budgets only."; exit 0
+          fi
+          git fetch --quiet --depth 1 origin "$BASE_SHA"
+          git worktree add --detach ../base "$BASE_SHA"
+          (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/base" cargo build --release --locked -p blueprint-cli)
+          echo "args=--base-bp target/base/release/bp --base-commit $BASE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Cache reference repositories
+        uses: actions/cache@v4
+        with:
+          path: bench/repos
+          key: refrepos-v2-${{ hashFiles('bench/repos.json') }}
+      - name: Fetch reference repositories (read only; nothing in them is run)
+        run: target/release/bp-bench fetch
+      - name: Run benchmarks
+        run: >
+          target/release/bp-bench run --bp target/release/bp ${{ steps.base.outputs.args }}
+          --commit ${{ github.sha }} --out bench-results.json --summary bench-summary.md
+      - name: Publish table to the job summary
+        if: always()
+        run: cat bench-summary.md >> "$GITHUB_STEP_SUMMARY" || echo "No summary was written." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: |
+            bench-results.json
+            bench-summary.md
+          if-no-files-found: warn
