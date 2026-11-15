@@ -1,6 +1,6 @@
 # 0003: UI toolkit — GPUI from Zed main, pinned
 
-**Status:** accepted, 2026-11-15. **Issues:** #13 (spike), #14. **Evidence:** PR #21 (`spikes/gpui`, `.github/workflows/spike-gpui.yml`).
+**Status:** proposed, 2026-11-15. **Not accepted** until (a) the owner answers the licence question in #33, and (b) the corrected re-measurement listed on #13 confirms or refutes the input-latency gap. **Issues:** #13 (spike), #14. **Evidence:** PR #21 (`spikes/gpui`, `.github/workflows/spike-gpui.yml`).
 
 ## Context
 
@@ -10,9 +10,9 @@
 
 1. **GPUI 0.2.2 from crates.io.** **Rejected.** It has no accessibility support at all (no AccessKit, no platform accessibility code), which fails §5.5. It was published in October 2025, and building it now needs a vendored fix to `xattr`.
 2. **GPUI from Zed's main branch, pinned to a git revision.** **Chosen.**
-   - It has AccessKit integration (`role()`, `aria_label()`, and the macOS, Windows and Unix adapters), renders through wgpu, and has web and iOS back ends, so §5.1's later targets stay open.
-   - All 22 Zed crates it reaches are Apache-2.0.
-3. **Slint.** It has accessibility, but its licence is GPL-3.0 or Slint's own royalty-free or commercial licence, which needs the owner (§8.1). Not pursued, because option 2 passes.
+   - Its source includes AccessKit integration (`role()`, `aria_label()`, and the macOS, Windows and Unix adapters), but the spike has **not exercised** it. It renders through Metal on macOS, Direct3D 11 on Windows and wgpu on Linux and web, and it has web and iOS back ends, so §5.1's later targets stay open.
+   - The 20 Zed crates it reaches are Apache-2.0, and the zed-industries forks are MIT or Apache. **However**, the transitive set includes crates under licences not on §8.1's list: about 22 `Unicode-3.0` crates (`icu_*`, `zerovec` and others) and `tiny-keccak` (`CC0-1.0`). It also includes unreleased git pins of `wgpu` and `naga`. The owner decides (#33).
+3. **Slint.** It has accessibility, but its licence is GPL-3.0 or Slint's own royalty-free or commercial licence, which needs the owner (§8.1). Not yet evaluated. §5.2 requires evaluating it if GPUI fails, and the input-latency gap below may count as such a failure.
 4. **A custom `wgpu` renderer** with `winit` and `accesskit`. Kept as the fallback if a revisit trigger below fires.
 
 ## Decision
@@ -38,8 +38,10 @@ Spike run 43691383463 on GitHub-hosted runners, with no real GPU on Linux or Win
 
 ## Limits: what this does not show
 
-- **Input latency** was measured from a timer-driven state change to the end of the next paint, not from a real OS event to the presented frame. On macOS and Windows it lands just over one 60 Hz frame (17–22 ms). §9.3's instrumented input-to-present measurement arrives with the app in M3.
-- **Windows' ~32 ms frame interval** is most likely the hosted runner's virtual display refreshing at about 30 Hz. That is not verified.
+- **Input latency** was measured from a timer-driven state change to the end of the next CPU paint. That leaves out OS event delivery and GPU present, and successive samples land at nearly the same vsync phase, so it is a lower bound. Even so, it is over budget on macOS and Windows (p50 17–20 ms).
+- **Frame-interval tails miss 60 fps:** p95 is 20 ms on macOS and 43–48 ms on the software renderers.
+- **The cold start was not truly cold.** Later scenes ran with warm caches. The text scenes used a fallback font, and the path-edge timeouts happened only under software rasterisers.
+- **Windows' ~32 ms frame interval** is most likely GPUI's throttle for inactive windows (`inactive_frame_interval`, ~30 fps). The spike's window probably was not focused on the runner. Windows 60 fps is therefore untested.
 - **Linux and Windows have no real GPU in CI.** Accessibility was seen initialising on Linux (`org.a11y.Bus`) but has not been checked end to end with a screen reader.
 - Visual quality and smoothness need human eyes: see #31.
 
