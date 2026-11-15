@@ -16,7 +16,7 @@ crates/
   app/        Platform shell: windows, menus, packaging.
 bench/        Benchmarks for the budgets in REQUIREMENTS §4.
 xtask/        Repository tooling. Its tests enforce the crate layering rules.
-docs/decisions/  Decision records.
+docs/            User documentation (`cli.md`) and decision records (`decisions/`).
 ```
 
 ## Building and checking
@@ -30,4 +30,4 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`unsafe` is forbidden, and `unwrap`, `expect` and `panic!` are denied outside tests (workspace lints in `Cargo.toml`).
+`unsafe` is forbidden. `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!` and `dbg!` are denied (workspace lints in `Cargo.toml`); `clippy.toml` allows the first three in tests, and an xtask test fails if any source outside `tests/` switches one of these lints off.

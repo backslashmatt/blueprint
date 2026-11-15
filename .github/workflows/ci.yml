@@ -7,9 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Superseded runs on the same branch are cancelled to save minutes (see issue #15).
+# Superseded PR runs are cancelled to save minutes (see issue #15).
 concurrency:
-  group: ci-${{ github.ref }}
+  # PR runs share a group per branch, so a new push cancels the old run. Pushes to main get a group
+  # per commit, so every commit on main is checked.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -47,6 +49,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
