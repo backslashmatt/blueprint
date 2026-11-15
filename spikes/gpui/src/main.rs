@@ -254,19 +254,34 @@ impl Spike {
                     point(o.x + px((x + offset.0) * scale), o.y + px((y + offset.1) * scale))
                 };
                 let visible = |p: gpui::Point<Pixels>| bounds.contains(&p);
-                let mut path = PathBuilder::stroke(px(1.0));
-                let mut drawn = 0;
-                for &(a, b) in edges.iter() {
-                    let (pa, pb) = (to_screen(nodes[a]), to_screen(nodes[b]));
-                    if visible(pa) || visible(pb) {
-                        path.move_to(pa);
-                        path.line_to(pb);
-                        drawn += 1;
+                if std::env::var_os("SPIKE_EDGES_QUADS").is_some() {
+                    // Orthogonal routing: each edge is a horizontal then a
+                    // vertical segment, drawn as two 1 px quads.
+                    let edge = rgb(0x8899aa);
+                    for &(a, b) in edges.iter() {
+                        let (pa, pb) = (to_screen(nodes[a]), to_screen(nodes[b]));
+                        if visible(pa) || visible(pb) {
+                            let (x0, x1) = if pa.x < pb.x { (pa.x, pb.x) } else { (pb.x, pa.x) };
+                            let (y0, y1) = if pa.y < pb.y { (pa.y, pb.y) } else { (pb.y, pa.y) };
+                            window.paint_quad(fill(Bounds::new(point(x0, pa.y), size(x1 - x0 + px(1.0), px(1.0))), edge));
+                            window.paint_quad(fill(Bounds::new(point(pb.x, y0), size(px(1.0), y1 - y0 + px(1.0))), edge));
+                        }
                     }
-                }
-                if drawn > 0 {
-                    if let Ok(p) = path.build() {
-                        window.paint_path(p, rgb(0x8899aa));
+                } else {
+                    let mut path = PathBuilder::stroke(px(1.0));
+                    let mut drawn = 0;
+                    for &(a, b) in edges.iter() {
+                        let (pa, pb) = (to_screen(nodes[a]), to_screen(nodes[b]));
+                        if visible(pa) || visible(pb) {
+                            path.move_to(pa);
+                            path.line_to(pb);
+                            drawn += 1;
+                        }
+                    }
+                    if drawn > 0 {
+                        if let Ok(p) = path.build() {
+                            window.paint_path(p, rgb(0x8899aa));
+                        }
                     }
                 }
                 let side = px(8.0 * scale.max(0.25));
@@ -292,11 +307,13 @@ impl Spike {
                     range
                         .map(|ix| {
                             let (text, hl) = &lines[ix];
-                            div()
-                                .h(px(18.0))
-                                .font_family("monospace")
-                                .text_size(px(13.0))
-                                .child(StyledText::new(text.clone()).with_highlights(hl.clone()))
+                            let row = div().h(px(18.0)).text_size(px(13.0));
+                            let row = if std::env::var_os("SPIKE_NO_FONT").is_some() { row } else { row.font_family(std::env::var("SPIKE_FONT").unwrap_or_else(|_| "monospace".into())) };
+                            if std::env::var_os("SPIKE_NO_HL").is_some() {
+                                row.child(text.clone())
+                            } else {
+                                row.child(StyledText::new(text.clone()).with_highlights(hl.clone()))
+                            }
                         })
                         .collect()
                 })
@@ -318,6 +335,15 @@ impl Spike {
 
 impl Render for Spike {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::env::var_os("SPIKE_DEBUG").is_some() {
+            let phase = match self.phase {
+                Phase::Starting => "starting".to_string(),
+                Phase::Animating(k) => format!("animating {k}"),
+                Phase::Input(n) => format!("input {n}"),
+                Phase::Done => "done".into(),
+            };
+            eprintln!("render: {phase} at {:?}", START.get().map(|s| s.elapsed()));
+        }
         self.rec.borrow_mut().begin_frame();
         self.step(window, cx);
         let body = match self.scenario {
@@ -425,6 +451,7 @@ fn report(scenario: Scenario, r: &Recorder) -> String {
 
 fn main() {
     START.get_or_init(Instant::now);
+    env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scenario = match args.first().map(String::as_str) {
         Some("graph") => Scenario::Graph,
