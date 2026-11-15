@@ -1,17 +1,27 @@
 //! The architecture model (REQUIREMENTS §3): levels, nodes, edges and
 //! confidence. This crate does no I/O and depends on no other workspace crate.
+//! Its JSON form is documented in `docs/model-json.md`.
+
+use serde::{Deserialize, Serialize};
+
+pub mod graph;
+pub use graph::{Edge, EdgeKind, Model, ModelError, Node, NodeId, NodeKind};
 
 /// One of the four fixed levels of the model hierarchy (§3.1).
-/// Drilling down moves exactly one level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Drilling down moves exactly one level. Serialised as `"L1"` to `"L4"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Level {
     /// L1: a deployable or publishable unit (app, service, library).
+    #[serde(rename = "L1")]
     System,
     /// L2: a package, namespace or directory with a public surface.
+    #[serde(rename = "L2")]
     Module,
     /// L3: a type, or a file-level group of functions.
+    #[serde(rename = "L3")]
     Component,
     /// L4: a function or method, and its lines.
+    #[serde(rename = "L4")]
     Code,
 }
 
@@ -52,7 +62,9 @@ impl Level {
 
 /// How sure the analyser is of a node or edge (§3.2). Ordered from least to
 /// most certain, so the weakest confidence of a roll-up is its minimum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Serialised as `"unknown"`, `"inferred"` or `"exact"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Confidence {
     /// Not analysed, for example an unsupported language.
     Unknown,

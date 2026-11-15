@@ -3,3 +3,7 @@
 
 /// Version of the protocol. Bumped on any incompatible change.
 pub const PROTOCOL_VERSION: u32 = 0;
+
+/// The architecture model types, re-exported so front ends depend on
+/// `protocol` only (REQUIREMENTS §5.3).
+pub use blueprint_model as model;
