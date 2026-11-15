@@ -1,27 +1,48 @@
 # The model's JSON form
 
-`bp model --json` (M1) prints a `Model`. All collections are sorted, so the same model always serialises to the same bytes; snapshot tests rely on this.
+`bp model --json` (M1, #29) prints a `Model`. Nodes and edges are sorted, so the same model always serialises to the same bytes; snapshot tests rely on this. The example below is checked by a test (`crates/model/src/graph.rs`), so it is the real output:
 
 ```json
 {
-  "nodes": {
-    "L1:engine":          { "id": "L1:engine", "level": "L1", "kind": "cargo-package", "name": "engine",
-                            "path": "crates/engine/Cargo.toml", "parent": null, "confidence": "exact" },
-    "L2:engine/git/tree": { "id": "L2:engine/git/tree", "level": "L2", "kind": "module", "name": "tree",
-                            "path": "crates/engine/src/git/tree.rs", "parent": "L1:engine", "confidence": "exact" }
-  },
+  "nodes": [
+    {
+      "id": "L1:cargo:crates/cli#",
+      "kind": "system",
+      "name": "cli",
+      "source": "crates/cli/Cargo.toml",
+      "parent": null,
+      "confidence": "exact"
+    },
+    {
+      "id": "L1:cargo:crates/engine#",
+      "kind": "system",
+      "name": "engine",
+      "source": "crates/engine/Cargo.toml",
+      "parent": null,
+      "confidence": "exact"
+    }
+  ],
   "edges": [
-    { "from": "L1:cli", "to": "L1:engine", "kind": "depends-on", "confidence": "exact", "evidence": [] }
+    {
+      "from": "L1:cargo:crates/cli#",
+      "to": "L1:cargo:crates/engine#",
+      "kind": "depends-on",
+      "confidence": "exact",
+      "evidence": []
+    }
   ]
 }
 ```
 
-- **`id`**: `L<level>:<system>[/<path within the system>]`. It is derived from location, never content, so a node keeps its id across commits.
-- **`level`**: `L1`–`L4` (REQUIREMENTS §3.1).
-- **`kind`**: one of `cargo-package`, `npm-package`, `go-module`, `dotnet-project`, `nx-project`, `bazel-package`, `unowned` (L1), `module`, `directory` (L2), `component` (L3) or `function` (L4).
-- **`parent`**: the node one level up; `null` only at L1.
+- **`id`**: `L<level>:<ecosystem>:<manifest directory>#<path within the system>`, for example `L2:cargo:crates/engine#git/tree`.
+  - In segments, `%`, `/`, `#` and `:` are escaped as `%25`, `%2F`, `%23` and `%3A`, so two locations never share an id.
+  - The id comes from location, never content, so renaming a package keeps its id.
+  - Moving a directory changes the id. Detecting a move is the diff's job (M2).
+- **`kind`**: `system` or `unowned` at L1, `module` or `directory` at L2, `component` at L3, and `function` at L4. The level is the one encoded in the `id`. L2 is flat within a system: the nested module `git/tree` is its own L2 node.
+- **`source`**: the repository-relative file or directory that defines the node, `/`-separated and normalised.
+- **`parent`**: the node one level up, in the same system; `null` only at L1.
 - **`confidence`**: `exact`, `inferred` or `unknown` (§3.2).
-- **Edge `kind`**: `depends-on`, `calls`, `implements`, `extends`, `reads`, `writes` or `exposes`.
-- **Edge `evidence`**: the `[from, to]` pairs of the lower-level edges a rolled-up edge stands for.
+- **Edge `kind`**: `depends-on`, `calls`, `implements`, `extends`, `reads`, `writes` or `exposes`. There is at most one edge per `(from, to, kind)`.
+- **Edge `evidence`**: for a rolled-up edge, the `{from, to, kind}` keys of the edges exactly one level down that it stands for.
 
-Deserialising does not re-check the hierarchy rules that `Model::add_node` and `Model::add_edge` enforce. Only feed it JSON that the engine produced.
+Loading JSON re-applies every rule that `Model::add_node` and `Model::add_edge` enforce, so a malformed or tampered model is rejected rather than loaded.

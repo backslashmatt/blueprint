@@ -5,7 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 pub mod graph;
-pub use graph::{Edge, EdgeKind, Model, ModelError, Node, NodeId, NodeKind};
+pub use graph::{
+    Ecosystem, Edge, EdgeKey, EdgeKind, InvalidPath, Model, ModelError, Node, NodeId, NodeKind,
+    RepoPath, SystemKey,
+};
 
 /// One of the four fixed levels of the model hierarchy (§3.1).
 /// Drilling down moves exactly one level. Serialised as `"L1"` to `"L4"`.
