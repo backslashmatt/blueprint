@@ -1,0 +1,10 @@
+nodes:
+  L1:dotnet:a#  System  "A"  Exact  a/A.csproj
+  L1:dotnet:b#  System  "B"  Unknown  b/B.csproj
+  L1:dotnet:c#  System  "C"  Exact  c/C.csproj
+edges:
+diagnostics:
+  a/A.csproj: reference ../../../x.csproj is outside the repository
+  a/A.csproj: reference ../missing/M.csproj names no project file
+  b/B.csproj: no <Project> element
+  c/C2.csproj: another project file in this directory comes first
