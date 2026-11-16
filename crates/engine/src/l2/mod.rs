@@ -3,8 +3,9 @@
 //!
 //! - **Rust:** the module tree of each Cargo package, from `src/lib.rs` and
 //!   `src/main.rs`, following `mod` declarations ([`rust`]).
-//! - **No analyser:** a system with no Rust crate root falls back to its
-//!   top-level directories, with `unknown` confidence (§3.4).
+//! - **No analyser:** files no analyser reached (a system with no Rust
+//!   crate root, or a crate's tests, benches, build script and docs) are
+//!   shown by top-level directory, with `unknown` confidence (§3.4).
 //! - **Unowned:** files outside every system go under one synthetic
 //!   `unowned` system, laid out by directory, so nothing disappears.
 //!
@@ -52,11 +53,19 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
 
     for (id, key) in &systems {
         let files: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
-        let analysed = key.ecosystem == Ecosystem::Cargo
-            && rust::analyse_crate(id, key, &files, read, model, &mut diags);
-        if !analysed {
-            directories(id, key, &files, model, &mut diags);
-        }
+        let reached = if key.ecosystem == Ecosystem::Cargo {
+            rust::analyse_crate(id, key, &files, read, model, &mut diags)
+        } else {
+            None
+        };
+        // Whatever the module tree did not reach (tests, benches, examples,
+        // build scripts, docs, files behind unparsed macros) still shows up,
+        // by directory.
+        let rest: BTreeSet<&RepoPath> = match &reached {
+            Some(r) => files.iter().copied().filter(|f| !r.contains(*f)).collect(),
+            None => files,
+        };
+        directories(id, key, &rest, model, &mut diags);
     }
 
     if !unowned.is_empty() {
@@ -89,8 +98,8 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
 }
 
 /// One `unknown` L2 directory node per top-level directory of `system` that
-/// holds files. Files directly in the system's directory belong to the
-/// system node itself.
+/// holds any of `files`. Files directly in the system's directory belong to
+/// the system node itself.
 fn directories(
     system: &NodeId,
     key: &SystemKey,
@@ -107,8 +116,9 @@ fn directories(
     for top in tops {
         let mut dir = key.dir.segments().to_vec();
         dir.push(top.clone());
+        // The trailing `/` keeps directory ids apart from module ids.
         let node = Node {
-            id: NodeId::within(Level::Module, key.clone(), vec![top.clone()]),
+            id: NodeId::within(Level::Module, key.clone(), vec![format!("{top}/")]),
             kind: NodeKind::Directory,
             name: format!("{top}/"),
             source: RepoPath::parse(&dir.join("/")).unwrap_or_else(|_| RepoPath::root()),

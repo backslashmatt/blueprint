@@ -19,10 +19,12 @@ nodes:
   L2:cargo:bench#report/tests  Module  "report::tests"  Exact  bench/src/report.rs
   L2:cargo:bench#repos  Module  "repos"  Exact  bench/src/repos.rs
   L2:cargo:bench#repos/tests  Module  "repos::tests"  Exact  bench/src/repos.rs
+  L2:cargo:crates/cli#tests%2F  Directory  "tests/"  Unknown  crates/cli/tests
   L2:cargo:crates/engine#l1  Module  "l1"  Exact  crates/engine/src/l1/mod.rs
   L2:cargo:crates/engine#l1/cargo  Module  "l1::cargo"  Exact  crates/engine/src/l1/cargo.rs
   L2:cargo:crates/engine#l2  Module  "l2"  Exact  crates/engine/src/l2/mod.rs
   L2:cargo:crates/engine#l2/rust  Module  "l2::rust"  Exact  crates/engine/src/l2/rust.rs
+  L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs
   L2:cargo:crates/model#tests  Module  "tests"  Exact  crates/model/src/lib.rs
@@ -30,9 +32,11 @@ nodes:
   L2:cargo:crates/store#checksum/tests  Module  "checksum::tests"  Exact  crates/store/src/checksum.rs
   L2:cargo:crates/store#segment  Module  "segment"  Exact  crates/store/src/segment.rs
   L2:cargo:crates/store#store  Module  "store"  Exact  crates/store/src/store.rs
+  L2:cargo:crates/store#tests%2F  Directory  "tests/"  Unknown  crates/store/tests
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs
   L2:cargo:xtask#layering/tests  Module  "layering::tests"  Exact  xtask/src/layering.rs
-  L2:unowned:#docs  Directory  "docs/"  Unknown  docs
+  L2:cargo:xtask#tests%2F  Directory  "tests/"  Unknown  xtask/tests
+  L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
 edges:
   L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact
   L1:cargo:bench# -> L1:cargo:crates/store#  DependsOn  Exact

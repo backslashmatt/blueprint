@@ -2,9 +2,9 @@ nodes:
   L1:cargo:lib#  System  "lib"  Exact  lib/Cargo.toml
   L1:cargo:tool#  System  "tool"  Exact  tool/Cargo.toml
   L1:unowned:#  Unowned  "(unowned)"  Unknown  
-  L2:cargo:tool#assets  Directory  "assets/"  Unknown  tool/assets
-  L2:cargo:tool#scripts  Directory  "scripts/"  Unknown  tool/scripts
-  L2:unowned:#docs  Directory  "docs/"  Unknown  docs
-  L2:unowned:#editors  Directory  "editors/"  Unknown  editors
+  L2:cargo:tool#assets%2F  Directory  "assets/"  Unknown  tool/assets
+  L2:cargo:tool#scripts%2F  Directory  "scripts/"  Unknown  tool/scripts
+  L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
+  L2:unowned:#editors%2F  Directory  "editors/"  Unknown  editors
 edges:
 diagnostics:

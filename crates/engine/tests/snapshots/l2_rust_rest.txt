@@ -1,0 +1,11 @@
+nodes:
+  L1:cargo:#  System  "root"  Exact  Cargo.toml
+  L2:cargo:#a  Module  "a"  Exact  src/a.rs
+  L2:cargo:#benches%2F  Directory  "benches/"  Unknown  benches
+  L2:cargo:#docs%2F  Directory  "docs/"  Unknown  docs
+  L2:cargo:#i  Module  "i"  Unknown  src/lib.rs
+  L2:cargo:#src%2F  Directory  "src/"  Unknown  src
+  L2:cargo:#tests%2F  Directory  "tests/"  Unknown  tests
+edges:
+diagnostics:
+  src/lib.rs: syntax errors; modules read from the recovered tree

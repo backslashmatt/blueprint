@@ -179,3 +179,168 @@ fn mutated_sources_never_panic() {
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
 }
+
+fn names(model: &Model) -> Vec<String> {
+    model.level(Level::Module).map(|n| n.name.clone()).collect()
+}
+
+#[test]
+fn deeply_nested_inline_modules_stop_at_the_depth_limit() {
+    let src = format!("{}{}", "mod a{".repeat(900), "}".repeat(900));
+    let start = std::time::Instant::now();
+    let (model, diags) = run(&files(&[
+        ("Cargo.toml", "[package]\nname = \"k\"\n"),
+        ("src/lib.rs", &src),
+    ]));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(model.level(Level::Module).count(), l2::rust::MAX_DEPTH + 1);
+    assert!(
+        diags.iter().any(|d| d.message.contains("deeper than")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn reference_rules_for_path_on_inline_modules_and_repeated_files() {
+    let (model, diags) = check(
+        "l2_rust_paths",
+        &[
+            ("Cargo.toml", "[package]\nname = \"k\"\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "#[path = \"thread_files\"]\nmod thread {\n    #[path = \"tls.rs\"]\n    mod local_data;\n    mod other;\n}\n",
+                    "#[path = \"shared/m.rs\"]\nmod one;\n#[path = \"shared/m.rs\"]\nmod two;\n",
+                    "#[path = \"loop.rs\"]\nmod looping;\n",
+                ),
+            ),
+            ("src/thread_files/tls.rs", ""),
+            ("src/thread_files/other.rs", ""),
+            ("src/shared/m.rs", "mod leaf;\n"),
+            ("src/shared/leaf.rs", ""),
+            ("src/loop.rs", "#[path = \"loop.rs\"]\nmod again;\n"),
+        ],
+    );
+    assert_eq!(
+        confidence(&model, "thread::local_data"),
+        Some(Confidence::Exact)
+    );
+    assert_eq!(confidence(&model, "thread::other"), Some(Confidence::Exact));
+    assert_eq!(
+        confidence(&model, "two"),
+        Some(Confidence::Exact),
+        "a file may be included twice"
+    );
+    assert_eq!(confidence(&model, "two::leaf"), Some(Confidence::Exact));
+    assert_eq!(
+        confidence(&model, "looping::again"),
+        Some(Confidence::Inferred),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn cfg_variants_and_macro_declared_modules_are_merged() {
+    let (model, _) = check(
+        "l2_rust_cfg",
+        &[
+            ("Cargo.toml", "[package]\nname = \"k\"\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "#[cfg(unix)]\n#[path = \"sys/unix.rs\"]\nmod sys;\n#[cfg(windows)]\n#[path = \"sys/windows.rs\"]\nmod sys;\n",
+                    "#[cfg(unix)]\nmod imp { pub mod a {} }\n#[cfg(not(unix))]\nmod imp { pub mod b {} }\n",
+                    "cfg_if::cfg_if! {\n    if #[cfg(unix)] { mod unix_only; } else { mod other_os; }\n}\n",
+                    "#[cfg_attr(feature = \"pathological\", allow(dead_code))]\nmod plain;\n",
+                    "#[cfg_attr(test, path = \"alt.rs\")]\nmod switched;\n",
+                ),
+            ),
+            ("src/sys/unix.rs", "pub mod fd;\n"),
+            ("src/sys/fd.rs", ""),
+            ("src/sys/windows.rs", "pub mod handle;\n"),
+            ("src/sys/handle.rs", ""),
+            ("src/unix_only.rs", ""),
+            ("src/other_os.rs", ""),
+            ("src/plain.rs", ""),
+            ("src/switched.rs", ""),
+        ],
+    );
+    let n = names(&model);
+    for m in ["sys::fd", "sys::handle", "imp::a", "imp::b"] {
+        assert!(n.contains(&m.to_owned()), "{m} missing from {n:?}");
+    }
+    assert_eq!(confidence(&model, "unix_only"), Some(Confidence::Inferred));
+    assert_eq!(confidence(&model, "other_os"), Some(Confidence::Inferred));
+    assert_eq!(
+        confidence(&model, "plain"),
+        Some(Confidence::Exact),
+        "cfg_attr without path"
+    );
+    assert_eq!(
+        confidence(&model, "switched"),
+        Some(Confidence::Inferred),
+        "cfg_attr with path"
+    );
+}
+
+#[test]
+fn crate_roots_come_from_the_manifest() {
+    let (model, _) = check(
+        "l2_rust_targets",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"custom\", \"bins\"]\n",
+            ),
+            (
+                "custom/Cargo.toml",
+                "[package]\nname = \"custom\"\n[lib]\npath = \"lib.rs\"\n[[bin]]\nname = \"t\"\npath = \"tools/t.rs\"\n",
+            ),
+            ("custom/lib.rs", "pub mod a;\n"),
+            ("custom/a.rs", ""),
+            ("custom/tools/t.rs", "mod helper;\n"),
+            ("custom/tools/helper.rs", ""),
+            ("bins/Cargo.toml", "[package]\nname = \"bins\"\n"),
+            ("bins/src/lib.rs", "pub mod core;\n"),
+            ("bins/src/core.rs", ""),
+            ("bins/src/bin/tool.rs", "mod cli;\n"),
+            ("bins/src/bin/cli.rs", ""),
+            ("bins/src/bin/big/main.rs", "mod parts;\n"),
+            ("bins/src/bin/big/parts.rs", ""),
+        ],
+    );
+    let n = names(&model);
+    for m in ["a", "helper", "core", "cli", "parts"] {
+        assert!(n.contains(&m.to_owned()), "{m} missing from {n:?}");
+    }
+}
+
+#[test]
+fn files_outside_the_module_tree_still_appear() {
+    let (model, _) = check(
+        "l2_rust_rest",
+        &[
+            ("Cargo.toml", "[package]\nname = \"root\"\n[workspace]\n"),
+            ("src/lib.rs", "pub mod a;\nmod i {}\nfn broken( {\n"),
+            ("src/a.rs", ""),
+            ("src/orphan.rs", ""),
+            ("tests/it.rs", ""),
+            ("benches/b.rs", ""),
+            ("docs/guide.md", ""),
+            ("build.rs", ""),
+        ],
+    );
+    let n = names(&model);
+    for d in ["src/", "tests/", "benches/", "docs/"] {
+        assert!(n.contains(&d.to_owned()), "{d} missing from {n:?}");
+    }
+    assert_eq!(
+        confidence(&model, "i"),
+        Some(Confidence::Unknown),
+        "inline in a broken file"
+    );
+}
