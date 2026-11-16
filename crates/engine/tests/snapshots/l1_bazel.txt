@@ -1,0 +1,17 @@
+nodes:
+  L1:bazel:app#  System  "//app"  Exact  app/BUILD.bazel
+  L1:bazel:bad#  System  "//bad"  Unknown  bad/BUILD
+  L1:bazel:gen#  System  "//gen"  Exact  gen/BUILD
+  L1:bazel:lib/core#  System  "//lib/core"  Exact  lib/core/BUILD.bazel
+  L1:bazel:lib/net#  System  "//lib/net"  Exact  lib/net/BUILD
+  L1:bazel:lib/plat#  System  "//lib/plat"  Exact  lib/plat/BUILD
+  L1:bazel:tools#  System  "//tools"  Exact  tools/BUILD
+edges:
+  L1:bazel:app# -> L1:bazel:gen#  DependsOn  Exact  {Normal}
+  L1:bazel:app# -> L1:bazel:lib/core#  DependsOn  Exact  {Normal}
+  L1:bazel:app# -> L1:bazel:lib/net#  DependsOn  Exact  {Normal}
+  L1:bazel:app# -> L1:bazel:lib/plat#  DependsOn  Exact  {Normal}
+  L1:bazel:bad# -> L1:bazel:lib/core#  DependsOn  Exact  {Normal}
+diagnostics:
+  bad/BUILD: unbalanced brackets or unclosed string
+  lib/core/BUILD.bazel: label //lib/missing names no package
