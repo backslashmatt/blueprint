@@ -425,7 +425,7 @@ impl Ctx<'_> {
             if let Some(body) = item.body {
                 let inner = match &item.path_attr {
                     Some(p) => normalise(path_base, p),
-                    None => Some([child_dir, &[item.name.clone()]].concat()),
+                    None => Some([child_dir, std::slice::from_ref(&item.name)].concat()),
                 };
                 let conf = if inner.is_some() {
                     file_conf
@@ -455,7 +455,7 @@ impl Ctx<'_> {
                     None => (None, Vec::new()),
                 },
                 None => {
-                    let nested = [child_dir, &[item.name.clone()]].concat();
+                    let nested = [child_dir, std::slice::from_ref(&item.name)].concat();
                     let flat = [child_dir, &[format!("{}.rs", item.name)]].concat();
                     let modrs = [nested.as_slice(), &["mod.rs".to_owned()]].concat();
                     if self.files.contains(&repo_path(&flat)) {
