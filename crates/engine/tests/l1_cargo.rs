@@ -4,74 +4,18 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)] // test code
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+mod common;
 
 use blueprint_engine::l1::{Diagnostic, cargo};
 use blueprint_model::{Model, RepoPath};
 
-type Files = BTreeMap<RepoPath, Vec<u8>>;
-
-fn files(entries: &[(&str, &str)]) -> Files {
-    entries
-        .iter()
-        .map(|(p, c)| (RepoPath::parse(p).unwrap(), c.as_bytes().to_vec()))
-        .collect()
-}
+use common::{Files, files, render, snapshot};
 
 fn run(files: &Files) -> (Model, Vec<Diagnostic>) {
     let paths: Vec<RepoPath> = files.keys().cloned().collect();
     let mut model = Model::default();
     let diags = cargo::analyse(&paths, &|p| files.get(p).cloned(), &mut model);
     (model, diags)
-}
-
-fn render(model: &Model, diags: &[Diagnostic]) -> String {
-    let mut out = String::from("nodes:\n");
-    for n in model.nodes() {
-        out += &format!(
-            "  {}  {:?}  {:?}  {}\n",
-            String::from(n.id.clone()),
-            n.name,
-            n.confidence,
-            n.source
-        );
-    }
-    out += "edges:\n";
-    for e in model.edges() {
-        out += &format!(
-            "  {} -> {}  {:?}  {:?}\n",
-            String::from(e.key.from.clone()),
-            String::from(e.key.to.clone()),
-            e.key.kind,
-            e.confidence
-        );
-    }
-    out += "diagnostics:\n";
-    for d in diags {
-        out += &format!("  {}: {}\n", d.path, d.message.lines().next().unwrap_or(""));
-    }
-    out
-}
-
-fn snapshot(name: &str, actual: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}.txt"));
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| {
-            panic!(
-                "no snapshot {}; run with UPDATE_SNAPSHOTS=1",
-                path.display()
-            )
-        })
-        .replace("\r\n", "\n");
-    assert_eq!(
-        actual, expected,
-        "snapshot {name} differs; run with UPDATE_SNAPSHOTS=1 if intended"
-    );
 }
 
 fn check(name: &str, entries: &[(&str, &str)]) -> (Model, Vec<Diagnostic>) {
@@ -191,39 +135,9 @@ fn malformed_manifests_degrade_one_node_each() {
     assert_eq!(diags.len(), 4);
 }
 
-/// Every Cargo.toml in this checkout, skipping build output, hidden
-/// directories and the fetched reference repositories.
-fn this_repository() -> Files {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut out = Files::new();
-    let mut stack = vec![PathBuf::new()];
-    while let Some(rel) = stack.pop() {
-        for entry in std::fs::read_dir(root.join(&rel)).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let child = rel.join(&name);
-            if entry.file_type().unwrap().is_dir() {
-                if !name.starts_with('.') && name != "target" && child != Path::new("bench/repos") {
-                    stack.push(child);
-                }
-            } else if name == "Cargo.toml" {
-                let p: Vec<String> = child
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                out.insert(
-                    RepoPath::parse(&p.join("/")).unwrap(),
-                    std::fs::read(root.join(&child)).unwrap(),
-                );
-            }
-        }
-    }
-    out
-}
-
 #[test]
 fn this_repository_l1_model() {
-    let (model, diags) = run(&this_repository());
+    let (model, diags) = run(&common::this_repository(|name| name == "Cargo.toml"));
     snapshot("l1_cargo_blueprint", &render(&model, &diags));
     assert!(diags.is_empty(), "{diags:?}");
 }
@@ -232,7 +146,7 @@ fn this_repository_l1_model() {
 /// valid model.
 #[test]
 fn mutated_manifests_never_panic() {
-    let seeds = this_repository();
+    let seeds = common::this_repository(|name| name == "Cargo.toml");
     let mut state = 0x2545_F491_4F6C_DD1Du64;
     let mut next = move || {
         state ^= state << 13;
