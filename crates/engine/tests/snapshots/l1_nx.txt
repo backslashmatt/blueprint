@@ -1,0 +1,13 @@
+nodes:
+  L1:nx:apps/web#  System  "web"  Exact  apps/web/project.json
+  L1:nx:libs/broken#  System  "broken"  Unknown  libs/broken/project.json
+  L1:nx:libs/feature-a#  System  "feature-a"  Exact  libs/feature-a/project.json
+  L1:nx:libs/feature-old#  System  "feature-old"  Exact  libs/feature-old/project.json
+  L1:nx:libs/ui#  System  "@acme/ui"  Exact  libs/ui/project.json
+  L1:nx:libs/unnamed#  System  "unnamed"  Exact  libs/unnamed/project.json
+edges:
+  L1:nx:apps/web# -> L1:nx:libs/feature-a#  DependsOn  Inferred  {Normal}
+  L1:nx:apps/web# -> L1:nx:libs/ui#  DependsOn  Exact  {Normal}
+diagnostics:
+  apps/web/project.json: implicit dependency ghost names no project
+  libs/broken/project.json: EOF while parsing a value at line 1 column 10
