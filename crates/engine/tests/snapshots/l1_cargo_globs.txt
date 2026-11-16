@@ -1,0 +1,11 @@
+nodes:
+  L1:cargo:crates/a#  "a"  Exact  crates/a/Cargo.toml
+  L1:cargo:crates/b#  "b"  Exact  crates/b/Cargo.toml
+  L1:cargo:crates/old#  "old"  Exact  crates/old/Cargo.toml
+  L1:cargo:tools/x/y#  "y"  Exact  tools/x/y/Cargo.toml
+  L1:cargo:vendor/b#  "b"  Exact  vendor/b/Cargo.toml
+edges:
+  L1:cargo:crates/a# -> L1:cargo:crates/b#  DependsOn  Inferred
+  L1:cargo:tools/x/y# -> L1:cargo:crates/b#  DependsOn  Exact
+diagnostics:
+  crates/old/Cargo.toml: `b` uses workspace = true outside a workspace

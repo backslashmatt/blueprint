@@ -1,0 +1,4 @@
+nodes:
+  L1:cargo:#  "solo"  Exact  Cargo.toml
+edges:
+diagnostics:
