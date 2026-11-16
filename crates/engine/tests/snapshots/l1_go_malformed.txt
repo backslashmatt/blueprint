@@ -1,0 +1,9 @@
+nodes:
+  L1:go:a#  System  "example.com/a"  Exact  a/go.mod
+  L1:go:b#  System  "b"  Unknown  b/go.mod
+  L1:go:c#  System  "c"  Unknown  c/go.mod
+edges:
+diagnostics:
+  a/go.mod: replace for example.com/b points to nowhere, which has no go.mod
+  b/go.mod: no module directive
+  c/go.mod: no module directive
