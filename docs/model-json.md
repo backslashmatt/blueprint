@@ -28,7 +28,10 @@
       "to": "L1:cargo:crates/engine#",
       "kind": "depends-on",
       "confidence": "exact",
-      "evidence": []
+      "evidence": [],
+      "dependency": [
+        "normal"
+      ]
     }
   ]
 }
@@ -42,7 +45,11 @@
 - **`source`**: the repository-relative file or directory that defines the node, `/`-separated and normalised.
 - **`parent`**: the node one level up, in the same system; `null` only at L1.
 - **`confidence`**: `exact`, `inferred` or `unknown` (§3.2).
+- **`visibility`** (optional): `public`, `restricted` or `private`, where the language defines it. For a Rust module, these are `pub`, `pub(crate)`/`pub(super)`/`pub(in ..)`, and no `pub`. It is omitted when unknown or not applicable, as for systems and directories.
 - **Edge `kind`**: `depends-on`, `calls`, `implements`, `extends`, `reads`, `writes` or `exposes`. There is at most one edge per `(from, to, kind)`.
 - **Edge `evidence`**: for a rolled-up edge, the `{from, to, kind}` keys of the edges exactly one level down that it stands for.
+- **Edge `dependency`** (optional): for `depends-on`, why the dependency exists: `normal`, `build`, or both. It is omitted when the analyser does not distinguish.
+
+Both optional fields can be absent in older documents, which still load.
 
 Loading JSON re-applies every rule that `Model::add_node` and `Model::add_edge` enforce, so a malformed or tampered model is rejected rather than loaded.

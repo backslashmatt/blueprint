@@ -9,15 +9,15 @@ nodes:
   L1:cargo:crates/ui#  System  "blueprint-ui"  Exact  crates/ui/Cargo.toml
   L1:cargo:xtask#  System  "xtask"  Exact  xtask/Cargo.toml
 edges:
-  L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact
-  L1:cargo:bench# -> L1:cargo:crates/store#  DependsOn  Exact
-  L1:cargo:crates/app# -> L1:cargo:crates/engine#  DependsOn  Exact
-  L1:cargo:crates/app# -> L1:cargo:crates/protocol#  DependsOn  Exact
-  L1:cargo:crates/app# -> L1:cargo:crates/ui#  DependsOn  Exact
-  L1:cargo:crates/cli# -> L1:cargo:crates/engine#  DependsOn  Exact
-  L1:cargo:crates/cli# -> L1:cargo:crates/protocol#  DependsOn  Exact
-  L1:cargo:crates/engine# -> L1:cargo:crates/model#  DependsOn  Exact
-  L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact
-  L1:cargo:crates/protocol# -> L1:cargo:crates/model#  DependsOn  Exact
-  L1:cargo:crates/ui# -> L1:cargo:crates/protocol#  DependsOn  Exact
+  L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
+  L1:cargo:bench# -> L1:cargo:crates/store#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/app# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/app# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/app# -> L1:cargo:crates/ui#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/cli# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/cli# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/engine# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/protocol# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/ui# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
 diagnostics:

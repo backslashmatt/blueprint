@@ -322,6 +322,33 @@ pub struct Node {
     pub parent: Option<NodeId>,
     /// How sure the analyser is that this node exists as shown.
     pub confidence: Confidence,
+    /// Who can use it from outside, where the language says so (a Rust
+    /// module's `pub`). `None` when the analyser does not know or the idea
+    /// does not apply, as for systems and directories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
+}
+
+/// How visible a node is outside its parent (§3.3: public surface changes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// Visible only where it is defined (Rust: no `pub`).
+    Private,
+    /// Visible to a limited scope (Rust: `pub(crate)`, `pub(super)`, `pub(in ..)`).
+    Restricted,
+    /// Part of the public surface (Rust: `pub`).
+    Public,
+}
+
+/// Why a `depends-on` edge exists, where the manifest says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepKind {
+    /// Needed by the built code (Cargo: `[dependencies]`).
+    Normal,
+    /// Needed only to build it (Cargo: `[build-dependencies]`).
+    Build,
 }
 
 impl Node {
@@ -374,6 +401,10 @@ pub struct Edge {
     /// For a rolled-up edge, the edges exactly one level down that it stands
     /// for. Empty when the edge was found directly at this level.
     pub evidence: BTreeSet<EdgeKey>,
+    /// For a `depends-on` edge, why it exists. Empty when the analyser does
+    /// not distinguish. Merging two observations of an edge unites these.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dependency: BTreeSet<DepKind>,
 }
 
 /// Why a node or edge was rejected. The model is unchanged when this is returned.
@@ -522,6 +553,7 @@ impl Model {
             Some(existing) => {
                 existing.confidence = existing.confidence.max(edge.confidence);
                 existing.evidence.extend(edge.evidence);
+                existing.dependency.extend(edge.dependency);
             }
             None => {
                 self.edges.insert(k.clone(), edge);
@@ -615,6 +647,7 @@ mod tests {
             source: RepoPath::parse(&format!("{dir}/Cargo.toml")).unwrap(),
             parent: None,
             confidence: Confidence::Exact,
+            visibility: None,
         }
     }
 
@@ -630,6 +663,7 @@ mod tests {
             source: RepoPath::parse(dir).unwrap(),
             parent: Some(NodeId::system(key(dir))),
             confidence: Confidence::Exact,
+            visibility: Some(Visibility::Public),
         }
     }
 
@@ -642,7 +676,45 @@ mod tests {
             },
             confidence: Confidence::Exact,
             evidence: evidence.iter().cloned().collect(),
+            dependency: BTreeSet::from([DepKind::Normal]),
         }
+    }
+
+    #[test]
+    fn merging_an_edge_unites_its_dependency_kinds() {
+        let mut m = Model::default();
+        let (a, b) = (system("a"), system("b"));
+        m.add_node(a.clone()).unwrap();
+        m.add_node(b.clone()).unwrap();
+        m.add_edge(edge(&a, &b, &[])).unwrap();
+        let mut build = edge(&a, &b, &[]);
+        build.dependency = BTreeSet::from([DepKind::Build]);
+        m.add_edge(build).unwrap();
+        let e = m.edges().next().unwrap();
+        assert_eq!(
+            e.dependency,
+            BTreeSet::from([DepKind::Normal, DepKind::Build])
+        );
+    }
+
+    #[test]
+    fn visibility_and_dependency_are_optional_in_json() {
+        let mut m = Model::default();
+        let (a, b) = (system("a"), system("b"));
+        m.add_node(a.clone()).unwrap();
+        m.add_node(b.clone()).unwrap();
+        m.add_node(module("a", &["x"])).unwrap();
+        m.add_edge(edge(&a, &b, &[])).unwrap();
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""visibility":"public""#), "{json}");
+        assert_eq!(serde_json::from_str::<Model>(&json).unwrap(), m);
+        // Documents written before these fields existed still load.
+        let old = json
+            .replace(r#","visibility":"public""#, "")
+            .replace(r#","dependency":["normal"]"#, "");
+        let loaded = serde_json::from_str::<Model>(&old).unwrap();
+        assert!(loaded.edges().all(|e| e.dependency.is_empty()));
+        assert!(loaded.nodes().all(|n| n.visibility.is_none()));
     }
 
     #[test]

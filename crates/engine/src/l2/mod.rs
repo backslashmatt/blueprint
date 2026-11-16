@@ -81,6 +81,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             source: RepoPath::root(),
             parent: None,
             confidence: Confidence::Unknown,
+            visibility: None,
         };
         match model.add_node(node) {
             Ok(()) => {
@@ -124,6 +125,7 @@ fn directories(
             source: RepoPath::parse(&dir.join("/")).unwrap_or_else(|_| RepoPath::root()),
             parent: Some(system.clone()),
             confidence: Confidence::Unknown,
+            visibility: None,
         };
         if let Err(e) = model.add_node(node) {
             diags.push(Diagnostic {
