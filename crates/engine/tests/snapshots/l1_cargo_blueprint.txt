@@ -5,10 +5,12 @@ nodes:
   L1:cargo:crates/engine#  "blueprint-engine"  Exact  crates/engine/Cargo.toml
   L1:cargo:crates/model#  "blueprint-model"  Exact  crates/model/Cargo.toml
   L1:cargo:crates/protocol#  "blueprint-protocol"  Exact  crates/protocol/Cargo.toml
+  L1:cargo:crates/store#  "blueprint-store"  Exact  crates/store/Cargo.toml
   L1:cargo:crates/ui#  "blueprint-ui"  Exact  crates/ui/Cargo.toml
   L1:cargo:xtask#  "xtask"  Exact  xtask/Cargo.toml
 edges:
   L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact
+  L1:cargo:bench# -> L1:cargo:crates/store#  DependsOn  Exact
   L1:cargo:crates/app# -> L1:cargo:crates/engine#  DependsOn  Exact
   L1:cargo:crates/app# -> L1:cargo:crates/protocol#  DependsOn  Exact
   L1:cargo:crates/app# -> L1:cargo:crates/ui#  DependsOn  Exact
