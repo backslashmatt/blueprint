@@ -1,6 +1,6 @@
 # 0005: Engine foundations — git access, query engine, index storage and location
 
-**Status:** accepted, 2026-11-16. **Issue:** #22. The prototypes were not committed; their code and API notes are in the comments on #22.
+**Status:** accepted, 2026-11-16; adding `gix` waits on the licence answer in #33 (see below). **Issue:** #22. The prototypes were not committed; their code and API notes are in the comments on #22.
 
 ## Context
 
@@ -25,6 +25,12 @@ All measurements: 4-CPU Linux container, release builds, the pinned reference re
 |---|---|---|
 | medium | 1.1–1.6 ms | 48–64 ms (22 MB) |
 | large | 53 ms warm, 377 ms cold | 0.63–0.80 s (230 MB) |
+
+**Licence caveat.** `gix` is MIT OR Apache-2.0, and so are almost all of the crates it reaches. The exceptions:
+- `foldhash` and `zlib-rs` (Zlib) and `uluru` (MPL-2.0) are on §8.1's list.
+- `unicode-normalization` (via `gix-utils`, not optional) is `(MIT OR Apache-2.0) AND Unicode-3.0`, which is **not** on the list.
+
+That is the same licence question already open in #33. Adding `gix` to the workspace therefore waits for the owner's answer there. If the answer is no, the fallback is to read loose and packed objects with `gix-object`, `gix-pack` and `gix-odb` directly, if they avoid `gix-utils`, or else with a minimal reader of our own.
 
 **2. Incremental queries with `salsa` 0.28** (Apache-2.0 OR MIT), measured on 64,465 file inputs, the large repository's blob count:
 
