@@ -152,3 +152,69 @@ fn mutated_project_files_never_panic() {
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
 }
+
+#[test]
+fn review_findings_attributes_entities_case_remove_and_order() {
+    let a = concat!(
+        "<?xml version=\"1.0\"?>\n<Project Sdk=\"x\">\n<ItemGroup>\n",
+        // `>` inside a quoted value does not end the tag.
+        "<ProjectReference Condition=\"'$(V)' > '1'\" Include=\"..\\b\\B.csproj\"/>\n",
+        // An attribute name inside another attribute's value is not an attribute.
+        "<ProjectReference Label=\"x Include='..\\c\\C.csproj'\" Include=\"..\\d\\D.csproj\"/>\n",
+        // Entities are decoded before splitting on `;`.
+        "<ProjectReference Include=\"..&#x5C;e&#x5C;E.csproj;..\\f&amp;g\\F.csproj\"/>\n",
+        // Case differs from the file on disk.
+        "<ProjectReference Include=\"..\\H\\h.CSPROJ\"/>\n",
+        // Included, then removed.
+        "<ProjectReference Include=\"..\\c\\C.csproj\"/>\n<ProjectReference Remove=\"../c/C.csproj\"/>\n",
+        // Wildcards are reported, not expanded; look-alikes are not references.
+        "<ProjectReference Include=\"..\\*\\*.csproj\"/>\n<ProjectReferenceX Include=\"..\\c\\C.csproj\"/>\n",
+        "<![CDATA[ <ProjectReference Include=\"..\\c\\C.csproj\"/> ]]>\n",
+        // A second project file in a shared directory resolves to its node.
+        "<ProjectReference Include=\"..\\s\\S2.csproj\"/>\n",
+        "</ItemGroup>\n</Project>\n",
+    );
+    let entries = [
+        ("a/A.csproj", a),
+        ("b/B.csproj", "<Project/>"),
+        ("c/C.csproj", "<Project/>"),
+        ("d/D.csproj", "<Project/>"),
+        ("e/E.csproj", "<Project/>"),
+        ("f&g/F.csproj", "<Project/>"),
+        ("h/H.csproj", "<Project/>"),
+        ("s/S2.csproj", "<Project/>"),
+        ("s/S1.csproj", "<Project/>"),
+        ("t/T.csproj", "<project-like text, not a Project element/>"),
+    ];
+    let (model, diags) = run(&files(&entries));
+    snapshot("l1_dotnet_review", &render(&model, &diags));
+    assert_eq!(
+        edges(&model),
+        vec![
+            "a -> b Exact",
+            "a -> d Exact",
+            "a -> e Exact",
+            "a -> f&g Exact",
+            "a -> h Exact",
+            "a -> s Exact"
+        ]
+    );
+    let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("wildcard reference")),
+        "{messages:?}"
+    );
+    let s = model
+        .nodes()
+        .find(|n| n.id.system_key().dir.to_string() == "s")
+        .unwrap();
+    assert_eq!(
+        s.name, "S1",
+        "the first file by path wins, whatever the input order"
+    );
+    let t = model
+        .nodes()
+        .find(|n| n.id.system_key().dir.to_string() == "t")
+        .unwrap();
+    assert_eq!(t.confidence, Confidence::Unknown);
+}
