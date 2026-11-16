@@ -119,3 +119,54 @@ fn mutated_projects_never_panic() {
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
 }
+
+#[test]
+fn review_findings_negation_tags_names_and_package_json_projects() {
+    let (model, diags) = run(&files(&[
+        (
+            "apps/a/project.json",
+            r#"{ "name": "a", "implicitDependencies": ["*", "!lib-*", "!a", "tag:scope-*", "mylib", "@acme/pkg"] }"#,
+        ),
+        ("libs/lib-x/project.json", r#"{ "name": "lib-x" }"#),
+        ("libs/MyLib/project.json", "{}"),
+        ("libs/pkg/project.json", "{}"),
+        ("libs/pkg/package.json", r#"{ "name": "@acme/pkg" }"#),
+        (
+            "libs/tagged/project.json",
+            r#"{ "name": "tagged", "tags": ["scope-shared"] }"#,
+        ),
+        (
+            "packages/z/package.json",
+            r#"{ "name": "z", "nx": { "implicitDependencies": ["tagged"] } }"#,
+        ),
+        ("packages/plain/package.json", r#"{ "name": "plain" }"#),
+        // A broken copy must not make the real `tagged` ambiguous.
+        ("x/tagged/project.json", "{ broken"),
+        (
+            "libs/odd/project.json",
+            r#"{ "name": "odd", "implicitDependencies": "tagged" }"#,
+        ),
+    ]));
+    snapshot("l1_nx_review", &render(&model, &diags));
+    assert_eq!(
+        edges(&model),
+        vec![
+            "apps/a -> libs/MyLib Exact",
+            "apps/a -> libs/odd Inferred",
+            "apps/a -> libs/pkg Exact",
+            "apps/a -> libs/tagged Inferred",
+            "apps/a -> packages/z Inferred",
+            "packages/z -> libs/tagged Exact",
+        ]
+    );
+    assert!(
+        !model.nodes().any(|n| n.name == "plain"),
+        "a package.json without nx is not an Nx project"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("implicitDependencies is not an array")),
+        "{diags:?}"
+    );
+}

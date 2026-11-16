@@ -1,0 +1,19 @@
+nodes:
+  L1:nx:apps/a#  System  "a"  Exact  apps/a/project.json
+  L1:nx:libs/MyLib#  System  "mylib"  Exact  libs/MyLib/project.json
+  L1:nx:libs/lib-x#  System  "lib-x"  Exact  libs/lib-x/project.json
+  L1:nx:libs/odd#  System  "odd"  Exact  libs/odd/project.json
+  L1:nx:libs/pkg#  System  "@acme/pkg"  Exact  libs/pkg/project.json
+  L1:nx:libs/tagged#  System  "tagged"  Exact  libs/tagged/project.json
+  L1:nx:packages/z#  System  "z"  Exact  packages/z/package.json
+  L1:nx:x/tagged#  System  "tagged"  Unknown  x/tagged/project.json
+edges:
+  L1:nx:apps/a# -> L1:nx:libs/MyLib#  DependsOn  Exact  {Normal}
+  L1:nx:apps/a# -> L1:nx:libs/odd#  DependsOn  Inferred  {Normal}
+  L1:nx:apps/a# -> L1:nx:libs/pkg#  DependsOn  Exact  {Normal}
+  L1:nx:apps/a# -> L1:nx:libs/tagged#  DependsOn  Inferred  {Normal}
+  L1:nx:apps/a# -> L1:nx:packages/z#  DependsOn  Inferred  {Normal}
+  L1:nx:packages/z# -> L1:nx:libs/tagged#  DependsOn  Exact  {Normal}
+diagnostics:
+  libs/odd/project.json: implicitDependencies is not an array
+  x/tagged/project.json: key must be a string at line 1 column 3
