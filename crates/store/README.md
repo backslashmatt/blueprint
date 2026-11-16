@@ -42,12 +42,7 @@ The xtask layering test allows `#[allow(unsafe_code)]` only in crates listed in
 
 ## Fuzzing
 
-`fuzz/` holds a `cargo-fuzz` target for the segment reader. It needs nightly
-Rust:
-
-```sh
-cd crates/store/fuzz && cargo +nightly fuzz run segment
-```
-
-On stable, `tests/store.rs` runs 20,000 deterministic mutations of valid
-segments on every CI run, along with exhaustive truncation and bit-flip tests.
+`tests/store.rs` runs 20,000 deterministic mutations of valid segments on
+every CI run, along with exhaustive truncation and bit-flip tests. A
+`cargo-fuzz` target for the reader is in its own pull request, because
+`libfuzzer-sys` carries the NCSA licence, which needs the owner (#33).
