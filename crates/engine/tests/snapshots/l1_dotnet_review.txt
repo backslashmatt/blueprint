@@ -1,0 +1,21 @@
+nodes:
+  L1:dotnet:a#  System  "A"  Exact  a/A.csproj
+  L1:dotnet:b#  System  "B"  Exact  b/B.csproj
+  L1:dotnet:c#  System  "C"  Exact  c/C.csproj
+  L1:dotnet:d#  System  "D"  Exact  d/D.csproj
+  L1:dotnet:e#  System  "E"  Exact  e/E.csproj
+  L1:dotnet:f&g#  System  "F"  Exact  f&g/F.csproj
+  L1:dotnet:h#  System  "H"  Exact  h/H.csproj
+  L1:dotnet:s#  System  "S1"  Exact  s/S1.csproj
+  L1:dotnet:t#  System  "T"  Unknown  t/T.csproj
+edges:
+  L1:dotnet:a# -> L1:dotnet:b#  DependsOn  Exact  {Normal}
+  L1:dotnet:a# -> L1:dotnet:d#  DependsOn  Exact  {Normal}
+  L1:dotnet:a# -> L1:dotnet:e#  DependsOn  Exact  {Normal}
+  L1:dotnet:a# -> L1:dotnet:f&g#  DependsOn  Exact  {Normal}
+  L1:dotnet:a# -> L1:dotnet:h#  DependsOn  Exact  {Normal}
+  L1:dotnet:a# -> L1:dotnet:s#  DependsOn  Exact  {Normal}
+diagnostics:
+  a/A.csproj: wildcard reference ..\*\*.csproj is not expanded
+  s/S2.csproj: another project file in this directory comes first
+  t/T.csproj: no <Project> element
