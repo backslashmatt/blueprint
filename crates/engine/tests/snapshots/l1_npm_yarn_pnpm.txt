@@ -1,4 +1,5 @@
 nodes:
+  L1:npm:pnpm#  System  "pnpm-root"  Exact  pnpm/package.json
   L1:npm:pnpm/pkgs/skip#  System  "skip"  Exact  pnpm/pkgs/skip/package.json
   L1:npm:pnpm/pkgs/x#  System  "x"  Exact  pnpm/pkgs/x/package.json
   L1:npm:pnpm/pkgs/y#  System  "y"  Exact  pnpm/pkgs/y/package.json

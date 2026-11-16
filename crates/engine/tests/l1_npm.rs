@@ -116,8 +116,8 @@ fn yarn_object_form_and_pnpm_yaml_with_negation() {
         ]
     );
     assert!(
-        !model.nodes().any(|n| n.name == "pnpm-root"),
-        "a pnpm root is not a system"
+        model.nodes().any(|n| n.name == "pnpm-root"),
+        "a named root is a system too"
     );
 }
 
@@ -216,4 +216,97 @@ fn mutated_manifests_never_panic() {
         let back: Model = serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
+}
+
+#[test]
+fn review_findings_roots_pnpm_forms_paths_and_globs() {
+    let (model, diags) = check(
+        "l1_npm_edge_cases",
+        &[
+            // A root that is also a package, with a BOM; members depend on it.
+            (
+                "package.json",
+                "\u{feff}{ \"name\": \"root\", \"workspaces\": [\"p/{a,b}\", \"q/[c]\", \"p/a/docs\"], \"dependencies\": { \"a\": \"workspace:*\" } }",
+            ),
+            (
+                "p/a/package.json",
+                r#"{ "name": "a", "workspaces": ["plugins/*"], "dependencies": { "root": "workspace:*", "b": "./tarballs/b-1.0.0.tgz", "c": "../../q/c" } }"#,
+            ),
+            (
+                "p/a/plugins/x/package.json",
+                r#"{ "name": "x", "dependencies": { "a": "workspace:*" } }"#,
+            ),
+            (
+                "p/a/docs/package.json",
+                r#"{ "name": "docs", "dependencies": { "b": "workspace:*" } }"#,
+            ),
+            ("p/b/package.json", r#"{ "name": "b" }"#),
+            ("q/c/package.json", r#"{ "name": "c" }"#),
+            // pnpm: flow-style list; plain ranges are not linked.
+            (
+                "pn/pnpm-workspace.yaml",
+                "packages: ['libs/*', \"!libs/old\"]\n",
+            ),
+            (
+                "pn/libs/m/package.json",
+                r#"{ "name": "m", "dependencies": { "n": "^1", "o": "workspace:*" } }"#,
+            ),
+            ("pn/libs/n/package.json", r#"{ "name": "n" }"#),
+            ("pn/libs/o/package.json", r#"{ "name": "o" }"#),
+            // A settings-only pnpm yaml is not a root.
+            (
+                "solo/pnpm-workspace.yaml",
+                "onlyBuiltDependencies:\n  - esbuild\n",
+            ),
+            (
+                "solo/package.json",
+                r#"{ "name": "solo", "dependencies": { "c": "file:../q/c" } }"#,
+            ),
+        ],
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(
+        edges(&model),
+        vec![
+            " -> p/a Exact",
+            "p/a ->  Exact",
+            "p/a -> q/c Exact",
+            "p/a/docs -> p/b Exact",
+            "p/a/plugins/x -> p/a Exact",
+            "pn/libs/m -> pn/libs/o Exact",
+            "solo -> q/c Exact",
+        ]
+    );
+}
+
+/// Many packages with many dependencies must stay fast: name lookups are
+/// indexed, not scanned.
+#[test]
+fn many_packages_stay_fast() {
+    let mut entries: Vec<(String, String)> =
+        vec![("package.json".into(), r#"{ "workspaces": ["p/*"] }"#.into())];
+    for i in 0..2_000 {
+        let deps: Vec<String> = (0..50)
+            .map(|j| format!("\"p{}\": \"^1\"", (i + j) % 2_000))
+            .collect();
+        entries.push((
+            format!("p/p{i}/package.json"),
+            format!(
+                "{{ \"name\": \"p{i}\", \"dependencies\": {{ {} }} }}",
+                deps.join(", ")
+            ),
+        ));
+    }
+    let borrowed: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let start = std::time::Instant::now();
+    let (model, _) = run(&files(&borrowed));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(model.edges().count(), 2_000 * 49);
 }

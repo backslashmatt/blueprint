@@ -1,4 +1,5 @@
 nodes:
+  L1:npm:#  System  "root"  Exact  package.json
   L1:npm:apps/web#  System  "web"  Exact  apps/web/package.json
   L1:npm:packages/testkit#  System  "testkit"  Exact  packages/testkit/package.json
   L1:npm:packages/ui#  System  "ui"  Exact  packages/ui/package.json
