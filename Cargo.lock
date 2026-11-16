@@ -42,6 +42,8 @@ version = "0.1.0"
 dependencies = [
  "blueprint-model",
  "blueprint-protocol",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
