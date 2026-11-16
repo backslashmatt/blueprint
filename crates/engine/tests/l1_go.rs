@@ -141,3 +141,56 @@ fn mutated_manifests_never_panic() {
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
 }
+
+#[test]
+fn review_findings_replace_rules_ignored_dirs_and_syntax() {
+    let entries = [
+        ("go.work", "use ./w\nreplace x/over => ./over2\n"),
+        (
+            "w/go.mod",
+            "module x/w\nrequire x/over v1\nreplace x/over => ../over\n",
+        ),
+        ("over/go.mod", "module x/over\n"),
+        ("over2/go.mod", "module x/over\n"),
+        // require( without a space; a remote replace stops name matching;
+        // a versioned replace applies only to that version; `..` is local.
+        (
+            "a/go.mod",
+            "module x/a\nrequire(\n\tx/b v1\n\tx/c v1.1.0\n\tx/root v0\n\tx/d v1 // indirect; kept for tools\n)\nreplace x/b => github.com/fork/b v1.2.0\nreplace x/c v1.0.0 => ../c\nreplace x/root => ..\n",
+        ),
+        ("b/go.mod", "module x/b\n"),
+        ("c/go.mod", "module x/c\n"),
+        ("d/go.mod", "module x/d\n"),
+        ("go.mod", "module x/rootreal\n"),
+        // The go tool ignores these.
+        ("b/testdata/fake/go.mod", "module x/b\n"),
+        ("vendor/x/c/go.mod", "module x/c\n"),
+        ("_old/go.mod", "module x/c\n"),
+    ];
+    let (model, diags) = run(&files(&entries));
+    snapshot("l1_go_replace", &render(&model, &diags));
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(
+        edges(&model),
+        vec!["a ->  Exact", "a -> c Inferred", "w -> over2 Exact"],
+        "go.work replace wins; remote replace means no edge; versioned replace only for its version"
+    );
+    assert!(!model.nodes().any(|n| {
+        ["b/testdata/fake", "vendor/x/c", "_old"]
+            .contains(&n.id.system_key().dir.to_string().as_str())
+    }));
+}
+
+#[test]
+fn go_work_problems_are_reported() {
+    let (_, diags) = run(&files(&[
+        ("go.work", "use (\n ./missing\n"),
+        ("bad/go.work", "\u{ff}"),
+    ]));
+    let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+    assert!(messages.contains(&"block not closed"), "{messages:?}");
+    assert!(
+        messages.iter().any(|m| m.contains("has no go.mod")),
+        "{messages:?}"
+    );
+}
