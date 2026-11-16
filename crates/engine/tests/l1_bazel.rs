@@ -80,7 +80,7 @@ cc_binary(
             "app -> lib/core Exact",
             "app -> lib/net Exact",
             "app -> lib/plat Exact",
-            "bad -> lib/core Exact"
+            "bad -> lib/core Inferred"
         ],
         "main-repo labels in dependency attributes, including select() values, but not keys, loads, visibility or tags"
     );
@@ -141,4 +141,50 @@ fn mutated_build_files_never_panic() {
         let back: Model = serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
+}
+
+#[test]
+fn review_findings_joins_top_level_repos_and_bzlmod() {
+    let (model, diags) = run(&files(&[
+        (
+            "MODULE.bazel",
+            "module(name = \"acme\", version = \"1.0\")\n",
+        ),
+        (".bazelignore", "# generated\nignored\n"),
+        (
+            "a/BUILD",
+            r#"load("//tools:defs.bzl", "m")
+X = ["//b" + "/c:x", "//b/" + NAME, "//b:%s" % NAME, "//b:{}".format(NAME)]
+deps = ["//top_level_is_not_an_attribute"]
+cc_library(name = "a", deps = ["@acme//lib", "//b/c", "//tools" + ":gen", "//vis:%s" % N], visibility = ["//vis:__subpackages__"])
+"#,
+        ),
+        ("b/BUILD", ""),
+        ("b/c/BUILD", ""),
+        ("lib/BUILD", ""),
+        ("tools/BUILD", ""),
+        ("vis/BUILD", ""),
+        ("ignored/BUILD", "x(deps = ['//lib'])"),
+        // A nested repository: its // labels resolve inside it.
+        ("third_party/sub/WORKSPACE", ""),
+        ("third_party/sub/BUILD", "x(deps = ['//lib'])"),
+        ("third_party/sub/lib/BUILD", ""),
+    ]));
+    snapshot("l1_bazel_review", &render(&model, &diags));
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(
+        edges(&model),
+        vec![
+            "a -> b/c Exact",
+            "a -> lib Exact",
+            "third_party/sub -> third_party/sub/lib Exact"
+        ],
+        "joined strings, top-level assignments, loads and visibility make no edge"
+    );
+    assert!(
+        !model
+            .nodes()
+            .any(|n| n.id.system_key().dir.to_string() == "ignored")
+    );
+    assert!(model.nodes().any(|n| n.name == "third_party/sub//lib"));
 }

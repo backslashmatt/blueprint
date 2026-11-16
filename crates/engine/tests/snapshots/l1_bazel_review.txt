@@ -1,0 +1,14 @@
+nodes:
+  L1:bazel:a#  System  "//a"  Exact  a/BUILD
+  L1:bazel:b#  System  "//b"  Exact  b/BUILD
+  L1:bazel:b/c#  System  "//b/c"  Exact  b/c/BUILD
+  L1:bazel:lib#  System  "//lib"  Exact  lib/BUILD
+  L1:bazel:third_party/sub#  System  "third_party/sub//"  Exact  third_party/sub/BUILD
+  L1:bazel:third_party/sub/lib#  System  "third_party/sub//lib"  Exact  third_party/sub/lib/BUILD
+  L1:bazel:tools#  System  "//tools"  Exact  tools/BUILD
+  L1:bazel:vis#  System  "//vis"  Exact  vis/BUILD
+edges:
+  L1:bazel:a# -> L1:bazel:b/c#  DependsOn  Exact  {Normal}
+  L1:bazel:a# -> L1:bazel:lib#  DependsOn  Exact  {Normal}
+  L1:bazel:third_party/sub# -> L1:bazel:third_party/sub/lib#  DependsOn  Exact  {Normal}
+diagnostics:

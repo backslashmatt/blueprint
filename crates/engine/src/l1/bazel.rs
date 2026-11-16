@@ -7,11 +7,16 @@
 //! - **Nodes:** every package, named by its label (`//path/to/pkg`). If
 //!   both files exist, `BUILD.bazel` is read, as Bazel does. A file that is
 //!   not UTF-8 or has unbalanced brackets or quotes still becomes a node,
-//!   with `unknown` confidence.
+//!   with `unknown` confidence, and its edges are only `inferred`.
+//! - **Repositories:** a directory with `MODULE.bazel`, `WORKSPACE` or
+//!   `WORKSPACE.bazel` starts a repository; `//` labels resolve within the
+//!   repository they are written in, and a bzlmod `module(name = ..)` makes
+//!   `@name//` refer to it too. Paths in `.bazelignore` are skipped.
 //! - **Edges:** string labels inside dependency attributes (`deps`,
 //!   `runtime_deps`, `exports`, `implementation_deps`, `data`, `srcs`,
 //!   `hdrs`, `tools`, `plugins`), including inside `select()` values but not
-//!   its condition keys. A label in the main repository (`//pkg:t`,
+//!   its condition keys, and not strings joined with `+`, `%` or
+//!   `.format`, which are not literal. A label in the same repository (`//pkg:t`,
 //!   `@//pkg`, `@@//pkg`) is stated literally, so its edge is `exact`.
 //!   Labels of other repositories (`@x//..`) are external; local labels
 //!   (`:t`, `t`) stay inside the package. Dependencies built by macros or
@@ -55,6 +60,8 @@ enum Tok {
     Comma,
     Colon,
     Eq,
+    /// `+`, `%` or `.`: a neighbouring string is being built, not literal.
+    Join,
     Other,
 }
 
@@ -84,6 +91,7 @@ fn tokens(src: &str) -> Option<Vec<Tok>> {
             ',' => out.push(Tok::Comma),
             ':' => out.push(Tok::Colon),
             '=' if c.get(i + 1) != Some(&'=') => out.push(Tok::Eq),
+            '+' | '%' | '.' => out.push(Tok::Join),
             '"' | '\'' => {
                 let triple = c.get(i + 1) == Some(&ch) && c.get(i + 2) == Some(&ch);
                 let raw = i > 0 && matches!(c[i - 1], 'r' | 'R');
@@ -151,15 +159,22 @@ fn labels(toks: &[Tok]) -> (Vec<String>, bool) {
                 }
             }
             Tok::Comma if reading == Some(depth) => reading = None,
+            // Attributes are keyword arguments, so inside a call (depth >= 1).
             Tok::Ident(name)
-                if reading.is_none()
+                if depth >= 1
+                    && reading.is_none()
                     && DEP_ATTRS.contains(&name.as_str())
                     && toks.get(k + 1) == Some(&Tok::Eq) =>
             {
                 reading = Some(depth);
             }
-            // A string followed by `:` is a select() condition key.
-            Tok::Str(s) if reading.is_some() && toks.get(k + 1) != Some(&Tok::Colon) => {
+            // A string followed by `:` is a select() condition key; one next
+            // to `+`, `%` or `.` is being built, so it is not a literal label.
+            Tok::Str(s)
+                if reading.is_some()
+                    && !matches!(toks.get(k + 1), Some(Tok::Colon | Tok::Join))
+                    && (k == 0 || toks[k - 1] != Tok::Join) =>
+            {
                 out.push(s.clone())
             }
             _ => {}
@@ -168,20 +183,94 @@ fn labels(toks: &[Tok]) -> (Vec<String>, bool) {
     (out, depth == 0)
 }
 
-/// The package directory a main-repository label points to; `None` for
-/// local or other-repository labels.
-fn label_package(label: &str) -> Option<&str> {
+/// The package path a label points to inside the repository it is written
+/// in; `None` for local labels and other repositories. `module` is the
+/// repository's own bzlmod name, which also refers to itself.
+fn label_package<'l>(label: &'l str, module: Option<&str>) -> Option<&'l str> {
     let rest = label
         .strip_prefix("@@//")
         .or_else(|| label.strip_prefix("@//"))
-        .or_else(|| label.strip_prefix("//"))?;
+        .or_else(|| label.strip_prefix("//"))
+        .or_else(|| {
+            let m = module?;
+            let after = label
+                .strip_prefix("@@")
+                .or_else(|| label.strip_prefix('@'))?;
+            after.strip_prefix(m)?.strip_prefix("//")
+        })?;
     Some(rest.split(':').next().unwrap_or(""))
+}
+
+/// Files that make their directory the root of a repository.
+const BOUNDARIES: [&str; 3] = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"];
+
+/// `module(name = "..")` in a `MODULE.bazel`.
+fn module_name(text: &str) -> Option<String> {
+    let toks = tokens(text)?;
+    toks.windows(5).find_map(|w| match w {
+        [
+            Tok::Ident(m),
+            Tok::Open,
+            Tok::Ident(n),
+            Tok::Eq,
+            Tok::Str(v),
+        ] if m == "module" && n == "name" => Some(v.clone()),
+        _ => None,
+    })
+}
+
+struct Repo {
+    root: Dir,
+    module: Option<String>,
 }
 
 /// Adds the Bazel systems found among `paths` to `model`, and returns what
 /// could not be fully understood. Never fails: problems degrade nodes.
 pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
+    let text_of = |p: &RepoPath| read(p).and_then(|b| String::from_utf8(b).ok());
+    // Repositories: the top level, and any directory with a boundary file.
+    let mut repos: Vec<Repo> = vec![Repo {
+        root: Vec::new(),
+        module: None,
+    }];
+    let mut ignored: Vec<Dir> = Vec::new();
+    for path in paths {
+        let segs = path.segments();
+        let Some(file) = segs.last() else { continue };
+        let dir: Dir = segs[..segs.len() - 1].to_vec();
+        if BOUNDARIES.contains(&file.as_str()) {
+            let module = if file == "MODULE.bazel" {
+                text_of(path).as_deref().and_then(module_name)
+            } else {
+                None
+            };
+            match repos.iter_mut().find(|r| r.root == dir) {
+                Some(r) => r.module = r.module.take().or(module),
+                None => repos.push(Repo {
+                    root: dir.clone(),
+                    module,
+                }),
+            }
+        }
+        if file == ".bazelignore" {
+            for line in text_of(path).unwrap_or_default().lines() {
+                let line = line.trim();
+                if !line.is_empty() && !line.starts_with('#') {
+                    ignored.extend(normalise(&dir, line));
+                }
+            }
+        }
+    }
+    let repo_of = |dir: &[String]| -> usize {
+        repos
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| dir.starts_with(&r.root))
+            .max_by_key(|(_, r)| r.root.len())
+            .map_or(0, |(i, _)| i)
+    };
+
     // BUILD.bazel wins over BUILD in the same directory.
     let mut files: BTreeMap<Dir, &RepoPath> = BTreeMap::new();
     for path in paths {
@@ -191,13 +280,16 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             continue;
         }
         let dir: Dir = segs[..segs.len() - 1].to_vec();
+        if ignored.iter().any(|i| dir.starts_with(i)) {
+            continue;
+        }
         if file == "BUILD.bazel" || !files.contains_key(&dir) {
             files.insert(dir, path);
         }
     }
     let mut packages: Vec<Package> = Vec::new();
     for (dir, path) in files {
-        let text = read(path).and_then(|b| String::from_utf8(b).ok());
+        let text = text_of(path);
         let toks = text.as_deref().and_then(tokens);
         let (labels, balanced) = toks.as_deref().map_or((Vec::new(), false), labels);
         let ok = toks.is_some() && balanced;
@@ -226,10 +318,17 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         .collect();
 
     for p in &packages {
+        let repo = &repos[repo_of(&p.dir)];
+        let rel = p.dir[repo.root.len()..].join("/");
+        let name = if repo.root.is_empty() {
+            format!("//{rel}")
+        } else {
+            format!("{}//{rel}", repo.root.join("/"))
+        };
         let node = Node {
             id: node_id(&p.dir),
             kind: NodeKind::System,
-            name: format!("//{}", p.dir.join("/")),
+            name,
             source: p.file.clone(),
             parent: None,
             confidence: if p.ok {
@@ -247,13 +346,20 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         }
     }
 
-    let mut edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut edges: BTreeMap<(usize, usize), Confidence> = BTreeMap::new();
     for (from, p) in packages.iter().enumerate() {
+        let repo = &repos[repo_of(&p.dir)];
+        // Labels read from a damaged file are only a best guess.
+        let conf = if p.ok {
+            Confidence::Exact
+        } else {
+            Confidence::Inferred
+        };
         for label in &p.labels {
-            let Some(pkg) = label_package(label) else {
+            let Some(pkg) = label_package(label, repo.module.as_deref()) else {
                 continue;
             };
-            let Some(dir) = normalise(&[], pkg).filter(|_| !pkg.contains("..")) else {
+            let Some(dir) = normalise(&repo.root, pkg).filter(|_| !pkg.contains("..")) else {
                 diags.push(Diagnostic {
                     path: p.file.clone(),
                     message: format!("label {label} is not a valid package path"),
@@ -262,7 +368,8 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             };
             match by_dir.get(dir.as_slice()) {
                 Some(&to) if to != from => {
-                    edges.insert((from, to));
+                    let e = edges.entry((from, to)).or_insert(conf);
+                    *e = (*e).max(conf);
                 }
                 Some(_) => {}
                 None => diags.push(Diagnostic {
@@ -272,14 +379,14 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             }
         }
     }
-    for (from, to) in edges {
+    for ((from, to), confidence) in edges {
         let edge = Edge {
             key: EdgeKey {
                 from: node_id(&packages[from].dir),
                 to: node_id(&packages[to].dir),
                 kind: EdgeKind::DependsOn,
             },
-            confidence: Confidence::Exact,
+            confidence,
             evidence: BTreeSet::new(),
             dependency: BTreeSet::from([DepKind::Normal]),
         };

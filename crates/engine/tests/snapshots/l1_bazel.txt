@@ -11,7 +11,7 @@ edges:
   L1:bazel:app# -> L1:bazel:lib/core#  DependsOn  Exact  {Normal}
   L1:bazel:app# -> L1:bazel:lib/net#  DependsOn  Exact  {Normal}
   L1:bazel:app# -> L1:bazel:lib/plat#  DependsOn  Exact  {Normal}
-  L1:bazel:bad# -> L1:bazel:lib/core#  DependsOn  Exact  {Normal}
+  L1:bazel:bad# -> L1:bazel:lib/core#  DependsOn  Inferred  {Normal}
 diagnostics:
   bad/BUILD: unbalanced brackets or unclosed string
   lib/core/BUILD.bazel: label //lib/missing names no package
