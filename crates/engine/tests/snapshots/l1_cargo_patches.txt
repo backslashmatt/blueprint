@@ -1,0 +1,15 @@
+nodes:
+  L1:cargo:a#  "a"  Exact  a/Cargo.toml
+  L1:cargo:b#  "b"  Exact  b/Cargo.toml
+  L1:cargo:c#  "c"  Exact  c/Cargo.toml
+  L1:cargo:examples/tokio#  "tokio"  Exact  examples/tokio/Cargo.toml
+  L1:cargo:stray#  "stray"  Unknown  stray/Cargo.toml
+  L1:cargo:tok#  "tok"  Exact  tok/Cargo.toml
+  L1:cargo:vendor/serde#  "serde"  Exact  vendor/serde/Cargo.toml
+  L1:cargo:x/c#  "c"  Exact  x/c/Cargo.toml
+edges:
+  L1:cargo:a# -> L1:cargo:b#  DependsOn  Exact
+  L1:cargo:a# -> L1:cargo:c#  DependsOn  Exact
+  L1:cargo:a# -> L1:cargo:tok#  DependsOn  Inferred
+diagnostics:
+  stray/Cargo.toml: neither [package] nor [workspace]
