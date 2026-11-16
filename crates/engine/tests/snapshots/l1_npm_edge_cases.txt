@@ -1,0 +1,20 @@
+nodes:
+  L1:npm:#  System  "root"  Exact  package.json
+  L1:npm:p/a#  System  "a"  Exact  p/a/package.json
+  L1:npm:p/a/docs#  System  "docs"  Exact  p/a/docs/package.json
+  L1:npm:p/a/plugins/x#  System  "x"  Exact  p/a/plugins/x/package.json
+  L1:npm:p/b#  System  "b"  Exact  p/b/package.json
+  L1:npm:pn/libs/m#  System  "m"  Exact  pn/libs/m/package.json
+  L1:npm:pn/libs/n#  System  "n"  Exact  pn/libs/n/package.json
+  L1:npm:pn/libs/o#  System  "o"  Exact  pn/libs/o/package.json
+  L1:npm:q/c#  System  "c"  Exact  q/c/package.json
+  L1:npm:solo#  System  "solo"  Exact  solo/package.json
+edges:
+  L1:npm:# -> L1:npm:p/a#  DependsOn  Exact  {Normal}
+  L1:npm:p/a# -> L1:npm:#  DependsOn  Exact  {Normal}
+  L1:npm:p/a# -> L1:npm:q/c#  DependsOn  Exact  {Normal}
+  L1:npm:p/a/docs# -> L1:npm:p/b#  DependsOn  Exact  {Normal}
+  L1:npm:p/a/plugins/x# -> L1:npm:p/a#  DependsOn  Exact  {Normal}
+  L1:npm:pn/libs/m# -> L1:npm:pn/libs/o#  DependsOn  Exact  {Normal}
+  L1:npm:solo# -> L1:npm:q/c#  DependsOn  Exact  {Normal}
+diagnostics:

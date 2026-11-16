@@ -5,6 +5,8 @@
 //! fixtures. Nothing in the repository is ever executed (§5.5).
 
 pub mod cargo;
+pub mod npm;
+pub mod path;
 
 use blueprint_model::RepoPath;
 
@@ -20,3 +22,16 @@ pub struct Diagnostic {
 
 /// Reads a file's bytes by repository path, or `None` if it cannot be read.
 pub type Read<'a> = &'a dyn Fn(&RepoPath) -> Option<Vec<u8>>;
+
+/// Runs every L1 analyser over `paths`, adding their systems and edges to
+/// `model`, and returns their diagnostics, sorted.
+pub fn analyse(
+    paths: &[RepoPath],
+    read: Read<'_>,
+    model: &mut blueprint_model::Model,
+) -> Vec<Diagnostic> {
+    let mut diags = cargo::analyse(paths, read, model);
+    diags.extend(npm::analyse(paths, read, model));
+    diags.sort();
+    diags
+}
