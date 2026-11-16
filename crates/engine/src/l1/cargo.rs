@@ -493,11 +493,12 @@ fn membership(packages: &[Package], workspaces: &[Workspace]) -> Vec<Option<usiz
                 let Ok(Some(dir)) = dep_path(key, spec, &packages[i], Some(&workspaces[w])) else {
                     continue;
                 };
-                if let Some(&j) = by_dir.get(dir.as_slice()) {
-                    if !member[j] && candidate[j] == Some(w) {
-                        member[j] = true;
-                        grew = true;
-                    }
+                if let Some(&j) = by_dir.get(dir.as_slice())
+                    && !member[j]
+                    && candidate[j] == Some(w)
+                {
+                    member[j] = true;
+                    grew = true;
                 }
             }
         }
@@ -534,10 +535,10 @@ fn real_name<'a>(key: &'a str, spec: &'a Value, ws: Option<&'a Workspace>) -> &'
     if let Some(n) = spec.get("package").and_then(Value::as_str) {
         return n;
     }
-    if let Ok(Some((_, v))) = inherited(key, spec, ws) {
-        if let Some(n) = v.get("package").and_then(Value::as_str) {
-            return n;
-        }
+    if let Ok(Some((_, v))) = inherited(key, spec, ws)
+        && let Some(n) = v.get("package").and_then(Value::as_str)
+    {
+        return n;
     }
     key
 }
