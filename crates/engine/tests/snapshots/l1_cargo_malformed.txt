@@ -1,7 +1,7 @@
 nodes:
-  L1:cargo:broken#  "broken"  Unknown  broken/Cargo.toml
-  L1:cargo:good#  "good"  Exact  good/Cargo.toml
-  L1:cargo:nameless#  "nameless"  Unknown  nameless/Cargo.toml
+  L1:cargo:broken#  System  "broken"  Unknown  broken/Cargo.toml
+  L1:cargo:good#  System  "good"  Exact  good/Cargo.toml
+  L1:cargo:nameless#  System  "nameless"  Unknown  nameless/Cargo.toml
 edges:
   L1:cargo:good# -> L1:cargo:broken#  DependsOn  Exact
 diagnostics:

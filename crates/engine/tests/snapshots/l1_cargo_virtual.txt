@@ -1,8 +1,8 @@
 nodes:
-  L1:cargo:app#  "app"  Exact  app/Cargo.toml
-  L1:cargo:lib#  "lib"  Exact  lib/Cargo.toml
-  L1:cargo:tools/gen#  "gen"  Exact  tools/gen/Cargo.toml
-  L1:cargo:util#  "util"  Exact  util/Cargo.toml
+  L1:cargo:app#  System  "app"  Exact  app/Cargo.toml
+  L1:cargo:lib#  System  "lib"  Exact  lib/Cargo.toml
+  L1:cargo:tools/gen#  System  "gen"  Exact  tools/gen/Cargo.toml
+  L1:cargo:util#  System  "util"  Exact  util/Cargo.toml
 edges:
   L1:cargo:app# -> L1:cargo:lib#  DependsOn  Exact
   L1:cargo:app# -> L1:cargo:tools/gen#  DependsOn  Exact

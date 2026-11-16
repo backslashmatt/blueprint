@@ -1,0 +1,10 @@
+nodes:
+  L1:cargo:#  System  "k"  Exact  Cargo.toml
+  L2:cargo:#bad  Module  "bad"  Unknown  src/bad.rs
+  L2:cargo:#bad/inner  Module  "bad::inner"  Exact  src/bad/inner.rs
+  L2:cargo:#binary  Module  "binary"  Unknown  src/binary.rs
+  L2:cargo:#good  Module  "good"  Exact  src/good.rs
+edges:
+diagnostics:
+  src/bad.rs: syntax errors; modules read from the recovered tree
+  src/binary.rs: syntax errors; modules read from the recovered tree

@@ -1,0 +1,11 @@
+nodes:
+  L1:cargo:bins#  System  "bins"  Exact  bins/Cargo.toml
+  L1:cargo:custom#  System  "custom"  Exact  custom/Cargo.toml
+  L1:unowned:#  Unowned  "(unowned)"  Unknown  
+  L2:cargo:bins#cli  Module  "cli"  Exact  bins/src/bin/cli.rs
+  L2:cargo:bins#core  Module  "core"  Exact  bins/src/core.rs
+  L2:cargo:bins#parts  Module  "parts"  Exact  bins/src/bin/big/parts.rs
+  L2:cargo:custom#a  Module  "a"  Exact  custom/a.rs
+  L2:cargo:custom#helper  Module  "helper"  Exact  custom/tools/helper.rs
+edges:
+diagnostics:

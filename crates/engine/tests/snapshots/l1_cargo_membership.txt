@@ -1,11 +1,11 @@
 nodes:
-  L1:cargo:app#  "app"  Exact  app/Cargo.toml
-  L1:cargo:crates/dropped#  "dropped"  Exact  crates/dropped/Cargo.toml
-  L1:cargo:crates/keep#  "keep"  Exact  crates/keep/Cargo.toml
-  L1:cargo:far/away#  "away"  Exact  far/away/Cargo.toml
-  L1:cargo:gen#  "gen"  Exact  gen/Cargo.toml
-  L1:cargo:lib#  "lib"  Exact  lib/Cargo.toml
-  L1:cargo:nested/inner#  "inner"  Exact  nested/inner/Cargo.toml
+  L1:cargo:app#  System  "app"  Exact  app/Cargo.toml
+  L1:cargo:crates/dropped#  System  "dropped"  Exact  crates/dropped/Cargo.toml
+  L1:cargo:crates/keep#  System  "keep"  Exact  crates/keep/Cargo.toml
+  L1:cargo:far/away#  System  "away"  Exact  far/away/Cargo.toml
+  L1:cargo:gen#  System  "gen"  Exact  gen/Cargo.toml
+  L1:cargo:lib#  System  "lib"  Exact  lib/Cargo.toml
+  L1:cargo:nested/inner#  System  "inner"  Exact  nested/inner/Cargo.toml
 edges:
   L1:cargo:app# -> L1:cargo:gen#  DependsOn  Exact
   L1:cargo:crates/keep# -> L1:cargo:lib#  DependsOn  Exact
