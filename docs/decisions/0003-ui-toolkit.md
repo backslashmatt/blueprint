@@ -36,12 +36,29 @@ Spike run 43691383463 on GitHub-hosted runners, with no real GPU on Linux or Win
 | RSS, graph / text | 85 / 98 MB | 58 / 78 MB | 162 / 174 MB | — |
 | Binary (release, line tables) | 10.6 MB | 10.7 MB | — | 50 MB installed |
 
+## Re-measured on Linux and Windows
+
+Spike run 43729297274, after the #13 corrections: 200 randomised inputs, the throttle disabled, a concrete monospace font, and a cold start for the text scene. macOS was not re-run (DR 0004).
+
+| | Windows | Linux (Xvfb + llvmpipe) | Budget |
+|---|---|---|---|
+| First paint, text, cold | 414 ms | — | 300 ms |
+| Open 50k-line view | 200 ms | — | 100 ms |
+| Input to paint p50 / p95, text | 18 / 37 ms | — | 16 ms |
+| Input to paint p50 / p95, graph (quads) | 32 ms / — | 15.6 / 16.7 ms | 16 ms |
+| Frame interval p50, text / graph | 35 / 45 ms | — / 32 ms | 16.7 ms |
+| CPU per frame p95, all scenes | ≤ 5.6 ms | ≤ 5.6 ms | 16 ms |
+
+A dash means the value is in the run's job summary but was not copied here.
+
+GPUI's own CPU work stays far inside budget. The misses come from presentation on software rasterisers, which CI cannot separate from GPUI. Real-GPU numbers on Linux and Windows need hardware (#31). The latency revisit trigger (#32) stays open.
+
 ## Limits: what this does not show
 
 - **Input latency** was measured from a timer-driven state change to the end of the next CPU paint. That leaves out OS event delivery and GPU present, and successive samples land at nearly the same vsync phase, so it is a lower bound. Even so, it is over budget on macOS and Windows (p50 17–20 ms).
 - **Frame-interval tails miss 60 fps:** p95 is 20 ms on macOS and 43–48 ms on the software renderers.
 - **The cold start was not truly cold.** Later scenes ran with warm caches. The text scenes used a fallback font, and the path-edge timeouts happened only under software rasterisers.
-- **Windows' ~32 ms frame interval** is most likely GPUI's throttle for inactive windows (`inactive_frame_interval`, ~30 fps). The spike's window probably was not focused on the runner. Windows 60 fps is therefore untested.
+- **Windows' ~32 ms frame interval is not the inactive-window throttle.** The re-run below disabled the throttle (`inactive_frame_interval: None`), and the interval stayed at 35–45 ms. The runner draws with a software rasteriser, so Windows 60 fps on a real GPU is still untested.
 - **Linux and Windows have no real GPU in CI.** Accessibility was seen initialising on Linux (`org.a11y.Bus`) but has not been checked end to end with a screen reader.
 - Visual quality and smoothness need human eyes: see #31.
 
