@@ -277,3 +277,153 @@ fn mutated_manifests_never_panic() {
         assert_eq!(back.nodes().count(), model.nodes().count());
     }
 }
+
+#[test]
+fn workspace_membership_follows_cargo() {
+    let (model, diags) = check(
+        "l1_cargo_membership",
+        &[
+            // Root workspace: `gen` is only a path dependency of a member, and
+            // `crates/keep` is listed explicitly although `crates` is excluded.
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"app\", \"crates/keep\"]\nexclude = [\"crates\"]\n\n[workspace.dependencies]\nlib = { path = \"lib\" }\nserde = \"1\"\n",
+            ),
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\n[dependencies]\ngen = { path = \"../gen\" }\n",
+            ),
+            (
+                "gen/Cargo.toml",
+                "[package]\nname = \"gen\"\n[dependencies]\nserde.workspace = true\nlib.workspace = true\n",
+            ),
+            ("lib/Cargo.toml", "[package]\nname = \"lib\"\n"),
+            (
+                "crates/keep/Cargo.toml",
+                "[package]\nname = \"keep\"\n[dependencies]\nlib.workspace = true\n",
+            ),
+            (
+                "crates/dropped/Cargo.toml",
+                "[package]\nname = \"dropped\"\n[dependencies]\nlib = \"1\"\n",
+            ),
+            // A nested workspace: its packages belong to it, not the root.
+            (
+                "nested/Cargo.toml",
+                "[workspace]\nmembers = [\"inner\"]\n[workspace.dependencies]\nlib = { path = \"../lib\" }\n",
+            ),
+            (
+                "nested/inner/Cargo.toml",
+                "[package]\nname = \"inner\"\n[dependencies]\nlib.workspace = true\n",
+            ),
+            // package.workspace names its root explicitly.
+            (
+                "far/away/Cargo.toml",
+                "[package]\nname = \"away\"\nworkspace = \"../../nested\"\n[dependencies]\nlib.workspace = true\n",
+            ),
+        ],
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    let edges: Vec<String> = model
+        .edges()
+        .map(|e| {
+            format!(
+                "{} -> {}",
+                e.key.from.system_key().dir,
+                e.key.to.system_key().dir
+            )
+        })
+        .collect();
+    assert!(
+        edges.contains(&"gen -> lib".to_owned()),
+        "implicit path members inherit: {edges:?}"
+    );
+    assert!(
+        edges.contains(&"crates/keep -> lib".to_owned()),
+        "explicit members beat exclude: {edges:?}"
+    );
+    assert!(
+        !edges.contains(&"crates/dropped -> lib".to_owned()),
+        "excluded packages are in no workspace: {edges:?}"
+    );
+}
+
+#[test]
+fn patches_git_and_name_collisions() {
+    let (model, _) = check(
+        "l1_cargo_patches",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"tok\"]\n\n[patch.crates-io]\nb = { path = \"b\" }\n\n[replace]\n\"c:1.0.0\" = { path = \"c\" }\n",
+            ),
+            (
+                "a/Cargo.toml",
+                "[package]\nname = \"a\"\n[dependencies]\nb = \"1\"\nc = \"1\"\nserde = \"1\"\ntokio = { git = \"https://example.invalid/tokio\" }\n[build_dependencies]\ntok = \"1\"\n",
+            ),
+            ("b/Cargo.toml", "[package]\nname = \"b\"\n"),
+            ("c/Cargo.toml", "[package]\nname = \"c\"\n"),
+            ("x/c/Cargo.toml", "[package]\nname = \"c\"\n"),
+            ("tok/Cargo.toml", "[package]\nname = \"tok\"\n"),
+            // Same names as a's registry and git dependencies, outside the workspace.
+            ("vendor/serde/Cargo.toml", "[package]\nname = \"serde\"\n"),
+            ("examples/tokio/Cargo.toml", "[package]\nname = \"tokio\"\n"),
+            ("stray/Cargo.toml", "# neither [package] nor [workspace]\n"),
+        ],
+    );
+    let edges: Vec<String> = model
+        .edges()
+        .map(|e| {
+            format!(
+                "{} -> {} {:?}",
+                e.key.from.system_key().dir,
+                e.key.to.system_key().dir,
+                e.confidence
+            )
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        vec!["a -> b Exact", "a -> c Exact", "a -> tok Inferred"],
+        "patch and replace are exact; git and out-of-workspace names are not matched; build_dependencies counts"
+    );
+    let stray = model
+        .nodes()
+        .find(|n| n.id.system_key().dir.to_string() == "stray")
+        .unwrap();
+    assert_eq!(stray.confidence, blueprint_model::Confidence::Unknown);
+}
+
+/// Hostile glob patterns must neither crash (deep recursion) nor hang
+/// (exponential backtracking).
+#[test]
+fn hostile_member_globs_finish_quickly() {
+    let many_stars = "*".repeat(20_000);
+    let backtracking = format!("{}b", "*a".repeat(400));
+    let deep_double = vec!["**"; 60].join("/") + "/zzz";
+    let long_dir = vec!["a".repeat(60); 30].join("/");
+    let root = format!(
+        "[workspace]\nmembers = [\"{many_stars}\", \"{backtracking}\", \"{deep_double}\", \"x/{}\"]\n",
+        "*a".repeat(200)
+    );
+    let start = std::time::Instant::now();
+    let (_, diags) = run(&files(&[
+        ("Cargo.toml", &root),
+        (
+            &format!("{long_dir}/Cargo.toml"),
+            "[package]\nname = \"deep\"\n",
+        ),
+        (
+            &format!("x/{}/Cargo.toml", "a".repeat(300)),
+            "[package]\nname = \"wide\"\n",
+        ),
+    ]));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        diags.iter().any(|d| d.message.contains("too long")),
+        "{diags:?}"
+    );
+}

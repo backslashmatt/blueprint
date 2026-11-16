@@ -3,17 +3,27 @@
 //! `Cargo.toml` files are parsed with `toml`; `cargo` is never run (§5.5).
 //!
 //! - **Nodes:** every package manifest in the tree, whether or not it belongs
-//!   to a workspace. A manifest that cannot be parsed still becomes a node,
-//!   with `unknown` confidence (§5.5). A virtual workspace root is not a node.
-//! - **Workspaces:** a package belongs to the nearest enclosing workspace that
-//!   lists it in `members` (globs allowed) and does not `exclude` it, or that
-//!   it names with `package.workspace`. The root package belongs to its own.
-//! - **Edges:** from `[dependencies]`, `[build-dependencies]` and their
-//!   `[target.*]` forms; dev-dependencies are left out because they do not
-//!   shape what ships. A dependency resolved by `path`, directly or through
-//!   `workspace = true`, is `exact`. One that matches a package only by name
-//!   is `inferred`, preferring a package in the same workspace and skipped if
-//!   the name is ambiguous.
+//!   to a workspace. A manifest that cannot be parsed, or that has neither
+//!   `[package]` nor `[workspace]`, still becomes a node, with `unknown`
+//!   confidence (§5.5). A virtual workspace root is not a node.
+//! - **Workspaces**, as Cargo decides them: a package's workspace is the one
+//!   it names with `package.workspace`, or else the nearest enclosing
+//!   workspace root, unless that root `exclude`s it. It is a member if it is that
+//!   root, matches `members` (globs `*`, `?`, `**`), or is a path dependency
+//!   of a member under the root. An explicit (non-glob) member is never
+//!   excluded. A package that is not a member belongs to no workspace.
+//! - **Edges:** from `[dependencies]`, `[build-dependencies]` (also spelled
+//!   `build_dependencies`) and their `[target.*]` forms; dev-dependencies are
+//!   left out because they do not shape what ships.
+//!   - `exact`: resolved by `path`, directly or through `workspace = true`,
+//!     or by the workspace root's `[patch.*]` or `[replace]`.
+//!   - `inferred`: a registry dependency whose name matches exactly one
+//!     package in the same workspace. Git and alternative-registry
+//!     dependencies are never matched by name.
+//!
+//! Globs are matched in polynomial time without recursion, and oversized
+//! patterns are ignored with a diagnostic, so a hostile manifest cannot hang
+//! or crash the run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +36,11 @@ use toml::{Table, Value};
 use super::{Diagnostic, Read};
 
 const MANIFEST: &str = "Cargo.toml";
-const DEP_TABLES: [&str; 2] = ["dependencies", "build-dependencies"];
+const DEP_TABLES: [&str; 3] = ["dependencies", "build-dependencies", "build_dependencies"];
+
+/// Members patterns longer than this, in bytes or segments, are ignored.
+const MAX_PATTERN_BYTES: usize = 1024;
+const MAX_PATTERN_SEGMENTS: usize = 64;
 
 type Dir = Vec<String>;
 
@@ -40,9 +54,12 @@ struct Package {
 
 struct Workspace {
     root: Dir,
-    members: Vec<Vec<String>>,
+    /// Each pattern as segments, and whether it has glob characters.
+    members: Vec<(Vec<Vec<char>>, bool)>,
     exclude: Vec<Dir>,
     deps: Table,
+    /// Names redirected to a local directory by `[patch.*]` or `[replace]`.
+    patches: BTreeMap<String, Dir>,
 }
 
 fn repo_path(dir: &[String]) -> RepoPath {
@@ -78,33 +95,49 @@ fn normalise(base: &[String], rel: &str) -> Option<Dir> {
     Some(out)
 }
 
-/// Matches one path segment against a glob segment with `*` and `?`.
-fn segment_matches(pat: &[char], s: &[char]) -> bool {
-    match (pat.first(), s.first()) {
-        (None, None) => true,
-        (Some('*'), _) => {
-            segment_matches(&pat[1..], s) || (!s.is_empty() && segment_matches(pat, &s[1..]))
+/// Matches one path segment against a glob segment with `*` and `?`, by
+/// the iterative backtracking algorithm: O(pattern × text), no recursion.
+fn segment_matches(p: &[char], s: &[char]) -> bool {
+    let (mut pi, mut si) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, si));
+            pi += 1;
+        } else if let Some((sp, ss)) = star {
+            pi = sp + 1;
+            si = ss + 1;
+            star = Some((sp, ss + 1));
+        } else {
+            return false;
         }
-        (Some('?'), Some(_)) => segment_matches(&pat[1..], &s[1..]),
-        (Some(p), Some(c)) if p == c => segment_matches(&pat[1..], &s[1..]),
-        _ => false,
     }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
-/// Matches a relative directory against a glob of segments; `**` matches
-/// any number of segments.
-fn glob_matches(pat: &[String], dir: &[String]) -> bool {
-    match pat.first() {
-        None => dir.is_empty(),
-        Some(p) if p == "**" => (0..=dir.len()).any(|i| glob_matches(&pat[1..], &dir[i..])),
-        Some(p) => {
-            let (pc, dc): (Vec<char>, Vec<char>) = match dir.first() {
-                Some(d) => (p.chars().collect(), d.chars().collect()),
-                None => return false,
+/// Matches a relative directory against a glob of segments, where a `**`
+/// segment matches any number of segments. Dynamic programming over
+/// (pattern position, path position): O(pattern × path) segment matches.
+fn glob_matches(pat: &[Vec<char>], dir: &[String]) -> bool {
+    let dir: Vec<Vec<char>> = dir.iter().map(|d| d.chars().collect()).collect();
+    let (np, nd) = (pat.len(), dir.len());
+    // ok[pi][di]: pat[pi..] matches dir[di..].
+    let mut ok = vec![vec![false; nd + 1]; np + 1];
+    ok[np][nd] = true;
+    for pi in (0..np).rev() {
+        let double = pat[pi].len() == 2 && pat[pi].iter().all(|&c| c == '*');
+        for di in (0..=nd).rev() {
+            ok[pi][di] = if double {
+                ok[pi + 1][di] || (di < nd && ok[pi][di + 1])
+            } else {
+                di < nd && ok[pi + 1][di + 1] && segment_matches(&pat[pi], &dir[di])
             };
-            segment_matches(&pc, &dc) && glob_matches(&pat[1..], &dir[1..])
         }
     }
+    ok[0][0]
 }
 
 fn strings(v: Option<&Value>) -> Vec<String> {
@@ -119,11 +152,35 @@ fn strings(v: Option<&Value>) -> Vec<String> {
 }
 
 impl Workspace {
-    fn from(root: Dir, ws: &Table) -> Self {
-        let members = strings(ws.get("members"))
-            .iter()
-            .filter_map(|m| normalise(&[], m))
-            .collect();
+    fn from(root: Dir, manifest: &RepoPath, table: &Table, diags: &mut Vec<Diagnostic>) -> Self {
+        let empty = Table::new();
+        let ws = table
+            .get("workspace")
+            .and_then(Value::as_table)
+            .unwrap_or(&empty);
+        let mut members = Vec::new();
+        for m in strings(ws.get("members")) {
+            let Some(segs) = normalise(&[], &m) else {
+                continue;
+            };
+            if m.len() > MAX_PATTERN_BYTES || segs.len() > MAX_PATTERN_SEGMENTS {
+                diags.push(Diagnostic {
+                    path: manifest.clone(),
+                    message: format!("members pattern of {} bytes ignored as too long", m.len()),
+                });
+                continue;
+            }
+            let glob = m.contains(['*', '?', '[']);
+            // Collapse runs of `**`: they match the same paths.
+            let mut pat: Vec<Vec<char>> = Vec::new();
+            for s in segs {
+                if s == "**" && pat.last().is_some_and(|l| l == &['*', '*']) {
+                    continue;
+                }
+                pat.push(s.chars().collect());
+            }
+            members.push((pat, glob));
+        }
         let exclude = strings(ws.get("exclude"))
             .iter()
             .filter_map(|e| normalise(&root, e))
@@ -133,20 +190,71 @@ impl Workspace {
             .and_then(Value::as_table)
             .cloned()
             .unwrap_or_default();
+        let mut patches = BTreeMap::new();
+        let patch_tables = table
+            .get("patch")
+            .and_then(Value::as_table)
+            .into_iter()
+            .flat_map(|p| p.values().filter_map(Value::as_table));
+        for t in patch_tables {
+            for (key, spec) in t {
+                let name = spec.get("package").and_then(Value::as_str).unwrap_or(key);
+                if let Some(dir) = spec
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .and_then(|p| normalise(&root, p))
+                {
+                    patches.insert(name.to_owned(), dir);
+                }
+            }
+        }
+        if let Some(replace) = table.get("replace").and_then(Value::as_table) {
+            for (key, spec) in replace {
+                let name = key.split(':').next().unwrap_or(key);
+                if let Some(dir) = spec
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .and_then(|p| normalise(&root, p))
+                {
+                    patches.insert(name.to_owned(), dir);
+                }
+            }
+        }
         Self {
             root,
             members,
             exclude,
             deps,
+            patches,
         }
     }
 
+    /// Whether `rel` (relative to the root) is named by a non-glob member.
+    fn explicit(&self, rel: &[String]) -> bool {
+        self.members.iter().any(|(pat, glob)| {
+            !glob
+                && pat.len() == rel.len()
+                && pat
+                    .iter()
+                    .zip(rel)
+                    .all(|(p, r)| p.iter().copied().eq(r.chars()))
+        })
+    }
+
+    /// Whether `dir` is excluded. The root and explicit members never are.
+    fn excludes(&self, dir: &[String]) -> bool {
+        let Some(rel) = dir.strip_prefix(self.root.as_slice()) else {
+            return true;
+        };
+        !rel.is_empty() && !self.explicit(rel) && self.exclude.iter().any(|e| dir.starts_with(e))
+    }
+
+    /// Whether `dir` is a member through being the root or matching `members`.
     fn lists(&self, dir: &[String]) -> bool {
-        if !dir.starts_with(&self.root) || self.exclude.iter().any(|e| dir.starts_with(e)) {
+        let Some(rel) = dir.strip_prefix(self.root.as_slice()) else {
             return false;
-        }
-        let rel = &dir[self.root.len()..];
-        rel.is_empty() || self.members.iter().any(|m| glob_matches(m, rel))
+        };
+        rel.is_empty() || self.members.iter().any(|(pat, _)| glob_matches(pat, rel))
     }
 }
 
@@ -155,6 +263,46 @@ fn read_manifest(path: &RepoPath, read: Read<'_>) -> Result<Table, String> {
     let text = String::from_utf8(bytes).map_err(|_| "is not UTF-8".to_owned())?;
     text.parse::<Table>()
         .map_err(|e| e.to_string().trim().to_owned())
+}
+
+/// The directory a dependency's `path` points to, directly or through
+/// `workspace = true`. `Ok(None)` if it has no path.
+fn dep_path(
+    key: &str,
+    spec: &Value,
+    pkg: &Package,
+    ws: Option<&Workspace>,
+) -> Result<Option<Dir>, String> {
+    let (base, rel) = match spec.get("path").and_then(Value::as_str) {
+        Some(p) => (pkg.dir.as_slice(), p),
+        None => match inherited(key, spec, ws)? {
+            Some((w, v)) => match v.get("path").and_then(Value::as_str) {
+                Some(p) => (w.root.as_slice(), p),
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        },
+    };
+    normalise(base, rel)
+        .map(Some)
+        .ok_or_else(|| format!("`{key}` has a path outside the repository: {rel}"))
+}
+
+/// For `workspace = true`, the workspace and its entry for `key`.
+fn inherited<'w>(
+    key: &str,
+    spec: &Value,
+    ws: Option<&'w Workspace>,
+) -> Result<Option<(&'w Workspace, &'w Value)>, String> {
+    if spec.get("workspace").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    let ws = ws.ok_or_else(|| format!("`{key}` uses workspace = true outside a workspace"))?;
+    let v = ws
+        .deps
+        .get(key)
+        .ok_or_else(|| format!("`{key}` is not in [workspace.dependencies]"))?;
+    Ok(Some((ws, v)))
 }
 
 /// Adds the Cargo systems found among `paths` to `model`, and returns what
@@ -170,71 +318,48 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
     {
         let segs = path.segments();
         let dir: Dir = segs[..segs.len() - 1].to_vec();
-        match read_manifest(path, read) {
+        let degraded = |message: String, diags: &mut Vec<Diagnostic>| {
+            diags.push(Diagnostic {
+                path: path.clone(),
+                message,
+            });
+            Package {
+                dir: dir.clone(),
+                manifest: path.clone(),
+                name: None,
+                table: None,
+            }
+        };
+        let table = match read_manifest(path, read) {
+            Ok(t) => t,
             Err(message) => {
-                diags.push(Diagnostic {
-                    path: path.clone(),
-                    message,
-                });
-                packages.push(Package {
+                packages.push(degraded(message, &mut diags));
+                continue;
+            }
+        };
+        let is_ws = table.get("workspace").is_some_and(Value::is_table);
+        if is_ws {
+            workspaces.push(Workspace::from(dir.clone(), path, &table, &mut diags));
+        }
+        match table.get("package") {
+            None if is_ws => {}
+            None => packages.push(degraded(
+                "neither [package] nor [workspace]".into(),
+                &mut diags,
+            )),
+            Some(pkg) => match pkg.get("name").and_then(Value::as_str).map(str::to_owned) {
+                None => packages.push(degraded("[package] has no name".into(), &mut diags)),
+                Some(name) => packages.push(Package {
                     dir,
                     manifest: path.clone(),
-                    name: None,
-                    table: None,
-                });
-            }
-            Ok(table) => {
-                if let Some(ws) = table.get("workspace").and_then(Value::as_table) {
-                    workspaces.push(Workspace::from(dir.clone(), ws));
-                }
-                match table.get("package") {
-                    None => {}
-                    Some(pkg) => {
-                        let name = pkg.get("name").and_then(Value::as_str).map(str::to_owned);
-                        if name.is_none() {
-                            diags.push(Diagnostic {
-                                path: path.clone(),
-                                message: "[package] has no name".into(),
-                            });
-                        }
-                        let table = name.as_ref().map(|_| table.clone());
-                        packages.push(Package {
-                            dir,
-                            manifest: path.clone(),
-                            name,
-                            table,
-                        });
-                    }
-                }
-            }
+                    name: Some(name),
+                    table: Some(table),
+                }),
+            },
         }
     }
 
-    // Which workspace each package belongs to, by index.
-    let ws_of: Vec<Option<usize>> = packages
-        .iter()
-        .map(|p| {
-            let explicit = p
-                .table
-                .as_ref()
-                .and_then(|t| {
-                    t.get("package")?
-                        .get("workspace")?
-                        .as_str()
-                        .map(str::to_owned)
-                })
-                .and_then(|w| normalise(&p.dir, &w));
-            workspaces
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| match &explicit {
-                    Some(root) => w.root == *root,
-                    None => w.lists(&p.dir),
-                })
-                .max_by_key(|(_, w)| w.root.len())
-                .map(|(i, _)| i)
-        })
-        .collect();
+    let ws_of = membership(&packages, &workspaces);
 
     let by_dir: BTreeMap<&[String], usize> = packages
         .iter()
@@ -275,7 +400,9 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         let Some(table) = &p.table else { continue };
         let ws = ws_of[from].map(|i| &workspaces[i]);
         for (key, spec) in dependency_entries(table) {
-            match resolve(key, spec, from, p, ws, &by_dir, &by_name, &ws_of) {
+            let found = resolve(key, spec, p, ws, &by_dir)
+                .map(|r| r.or_else(|| infer(key, spec, ws, from, &by_name, &ws_of)));
+            match found {
                 Ok(Some((to, conf))) if to != from => {
                     let e = edges.entry((from, to)).or_insert(conf);
                     *e = (*e).max(conf);
@@ -306,7 +433,83 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         }
     }
     diags.sort();
+    diags.dedup();
     diags
+}
+
+/// Which workspace each package is a member of, by index.
+fn membership(packages: &[Package], workspaces: &[Workspace]) -> Vec<Option<usize>> {
+    // The workspace each package would belong to, member or not, and
+    // whether the package named it with `package.workspace`.
+    let found: Vec<(Option<usize>, bool)> = packages
+        .iter()
+        .map(|p| {
+            let explicit = p
+                .table
+                .as_ref()
+                .and_then(|t| {
+                    t.get("package")?
+                        .get("workspace")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .and_then(|w| normalise(&p.dir, &w));
+            if let Some(root) = explicit {
+                return (workspaces.iter().position(|w| w.root == root), true);
+            }
+            // Cargo stops at the nearest enclosing root; if that root
+            // excludes the package, it has no workspace.
+            let nearest = workspaces
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| p.dir.starts_with(&w.root))
+                .max_by_key(|(_, w)| w.root.len())
+                .filter(|(_, w)| !w.excludes(&p.dir))
+                .map(|(i, _)| i);
+            (nearest, false)
+        })
+        .collect();
+    let candidate: Vec<Option<usize>> = found.iter().map(|(c, _)| *c).collect();
+    // A package that names its root is taken at its word: Cargo rejects the
+    // manifest unless the root lists it too.
+    let mut member: Vec<bool> = packages
+        .iter()
+        .zip(&found)
+        .map(|(p, (c, named))| c.is_some_and(|w| *named || workspaces[w].lists(&p.dir)))
+        .collect();
+    let by_dir: BTreeMap<&[String], usize> = packages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.dir.as_slice(), i))
+        .collect();
+    // Path dependencies of members under the same root are members too.
+    loop {
+        let mut grew = false;
+        for i in 0..packages.len() {
+            let (Some(w), true, Some(table)) = (candidate[i], member[i], &packages[i].table) else {
+                continue;
+            };
+            for (key, spec) in dependency_entries(table) {
+                let Ok(Some(dir)) = dep_path(key, spec, &packages[i], Some(&workspaces[w])) else {
+                    continue;
+                };
+                if let Some(&j) = by_dir.get(dir.as_slice()) {
+                    if !member[j] && candidate[j] == Some(w) {
+                        member[j] = true;
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    candidate
+        .into_iter()
+        .zip(member)
+        .map(|(c, m)| c.filter(|_| m))
+        .collect()
 }
 
 /// Every `(name, spec)` in the dependency tables that count for L1.
@@ -326,41 +529,29 @@ fn dependency_entries(table: &Table) -> Vec<(&str, &Value)> {
         .collect()
 }
 
-/// Resolves one dependency to a package index and a confidence. `Ok(None)`
-/// means an external dependency; `Err` a dependency that should have
-/// resolved and did not.
-#[allow(clippy::too_many_arguments)]
+/// The package name a dependency refers to, after `package = ".."` renames.
+fn real_name<'a>(key: &'a str, spec: &'a Value, ws: Option<&'a Workspace>) -> &'a str {
+    if let Some(n) = spec.get("package").and_then(Value::as_str) {
+        return n;
+    }
+    if let Ok(Some((_, v))) = inherited(key, spec, ws) {
+        if let Some(n) = v.get("package").and_then(Value::as_str) {
+            return n;
+        }
+    }
+    key
+}
+
+/// Resolves a dependency exactly: by path, or by the workspace's patches.
+/// `Ok(None)` if neither applies; `Err` if a path leads nowhere.
 fn resolve(
     key: &str,
     spec: &Value,
-    from: usize,
     pkg: &Package,
     ws: Option<&Workspace>,
     by_dir: &BTreeMap<&[String], usize>,
-    by_name: &BTreeMap<&str, Vec<usize>>,
-    ws_of: &[Option<usize>],
 ) -> Result<Option<(usize, Confidence)>, String> {
-    let mut name = spec.get("package").and_then(Value::as_str).unwrap_or(key);
-    let mut path = spec
-        .get("path")
-        .and_then(Value::as_str)
-        .map(|p| (pkg.dir.as_slice(), p));
-    if spec.get("workspace").and_then(Value::as_bool) == Some(true) {
-        let ws = ws.ok_or_else(|| format!("`{key}` uses workspace = true outside a workspace"))?;
-        let inherited = ws
-            .deps
-            .get(key)
-            .ok_or_else(|| format!("`{key}` is not in [workspace.dependencies]"))?;
-        if let Some(n) = inherited.get("package").and_then(Value::as_str) {
-            name = n;
-        }
-        if let Some(p) = inherited.get("path").and_then(Value::as_str) {
-            path = Some((ws.root.as_slice(), p));
-        }
-    }
-    if let Some((base, rel)) = path {
-        let target = normalise(base, rel)
-            .ok_or_else(|| format!("`{key}` has a path outside the repository: {rel}"))?;
+    if let Some(target) = dep_path(key, spec, pkg, ws)? {
         return match by_dir.get(target.as_slice()) {
             Some(&i) => Ok(Some((i, Confidence::Exact))),
             None => Err(format!(
@@ -369,18 +560,43 @@ fn resolve(
             )),
         };
     }
-    let Some(candidates) = by_name.get(name) else {
-        return Ok(None);
+    let patched = ws.and_then(|w| w.patches.get(real_name(key, spec, ws)));
+    Ok(patched
+        .and_then(|dir| by_dir.get(dir.as_slice()))
+        .map(|&i| (i, Confidence::Exact)))
+}
+
+/// Infers a registry dependency from a unique same-workspace name match.
+fn infer(
+    key: &str,
+    spec: &Value,
+    ws: Option<&Workspace>,
+    from: usize,
+    by_name: &BTreeMap<&str, Vec<usize>>,
+    ws_of: &[Option<usize>],
+) -> Option<(usize, Confidence)> {
+    let external = |v: &Value| {
+        ["git", "registry", "registry-index"]
+            .iter()
+            .any(|k| v.get(*k).is_some())
     };
-    let here = ws_of.get(from).copied().flatten();
-    let same_ws: Vec<usize> = candidates
+    if external(spec)
+        || inherited(key, spec, ws)
+            .ok()
+            .flatten()
+            .is_some_and(|(_, v)| external(v))
+    {
+        return None;
+    }
+    let here = ws_of.get(from).copied().flatten()?;
+    let same: Vec<usize> = by_name
+        .get(real_name(key, spec, ws))?
         .iter()
         .copied()
-        .filter(|&c| here.is_some() && ws_of[c] == here)
+        .filter(|&c| ws_of[c] == Some(here))
         .collect();
-    let pick = match (same_ws.as_slice(), candidates.as_slice()) {
-        ([one], _) | ([], [one]) => Some(*one),
+    match same.as_slice() {
+        [one] => Some((*one, Confidence::Inferred)),
         _ => None,
-    };
-    Ok(pick.map(|i| (i, Confidence::Inferred)))
+    }
 }
