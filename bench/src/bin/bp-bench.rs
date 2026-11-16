@@ -18,6 +18,7 @@ use blueprint_bench::floor::read_tree;
 use blueprint_bench::measure::{Error, best_ms, confirm, parse_opts};
 use blueprint_bench::report::{Measurement, Report, SCHEMA, failures, markdown};
 use blueprint_bench::repos::{self, RefRepo};
+use blueprint_engine::git::Repo;
 
 const USAGE: &str = "usage: bp-bench fetch [--manifest F] [--dest D]\n       bp-bench run [--manifest F] [--dest D] --bp PATH --out F [--base-bp PATH] [--base-commit SHA] [--commit SHA] [--summary F]";
 
@@ -179,6 +180,31 @@ fn measure(
                 "warm cache; reads {} files, {} MB (symlinks and submodules skipped)",
                 s.files,
                 s.bytes / 1_000_000
+            )),
+            gated: false,
+        });
+
+        // The first step of indexing (#24): list the pinned commit's tree
+        // through the object database. In-process, so there is no base build
+        // to compare with; it is reported, not gated.
+        let repo = Repo::open(&dir)?;
+        let commit = repo.resolve(&r.commit)?;
+        let mut listed = 0;
+        let mut list = || -> Result<(), Error> {
+            listed = repo.tree(commit)?.len();
+            Ok(())
+        };
+        let (value, _) = best_ms(samples, 1, &mut list, None)?;
+        out.push(Measurement {
+            name: "git_list_tree".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base: None,
+            unit: "ms".into(),
+            budget: None,
+            samples,
+            note: Some(format!(
+                "warm cache; {listed} entries at the pinned commit, via gix; a step towards index_large_l2"
             )),
             gated: false,
         });

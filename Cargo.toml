@@ -23,6 +23,8 @@ blueprint-model = { path = "crates/model" }
 blueprint-engine = { path = "crates/engine" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
+# Git object access (DR 0005). Pure-Rust compression; `revision` for rev-parse.
+gix = { version = "0.90", default-features = false, features = ["max-performance", "sha1", "revision"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

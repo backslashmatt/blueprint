@@ -10,6 +10,10 @@ publish.workspace = true
 [dependencies]
 blueprint-model.workspace = true
 blueprint-protocol.workspace = true
+gix = { workspace = true }
+
+[dev-dependencies]
+gix = { workspace = true }
 
 [lints]
 workspace = true
