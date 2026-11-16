@@ -5,6 +5,7 @@
 //! fixtures. Nothing in the repository is ever executed (§5.5).
 
 pub mod cargo;
+pub mod dotnet;
 pub mod go;
 pub mod npm;
 pub mod path;
@@ -34,6 +35,7 @@ pub fn analyse(
     let mut diags = cargo::analyse(paths, read, model);
     diags.extend(npm::analyse(paths, read, model));
     diags.extend(go::analyse(paths, read, model));
+    diags.extend(dotnet::analyse(paths, read, model));
     diags.sort();
     diags
 }
