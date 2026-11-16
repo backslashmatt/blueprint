@@ -33,6 +33,7 @@ use blueprint_model::{
 };
 use toml::{Table, Value};
 
+use super::path::{Dir, Glob, normalise, repo_path};
 use super::{Diagnostic, Read};
 
 const MANIFEST: &str = "Cargo.toml";
@@ -41,12 +42,6 @@ const DEP_TABLES: [(&str, DepKind); 3] = [
     ("build-dependencies", DepKind::Build),
     ("build_dependencies", DepKind::Build),
 ];
-
-/// Members patterns longer than this, in bytes or segments, are ignored.
-const MAX_PATTERN_BYTES: usize = 1024;
-const MAX_PATTERN_SEGMENTS: usize = 64;
-
-type Dir = Vec<String>;
 
 struct Package {
     dir: Dir,
@@ -58,18 +53,11 @@ struct Package {
 
 struct Workspace {
     root: Dir,
-    /// Each pattern as segments, and whether it has glob characters.
-    members: Vec<(Vec<Vec<char>>, bool)>,
+    members: Vec<Glob>,
     exclude: Vec<Dir>,
     deps: Table,
     /// Names redirected to a local directory by `[patch.*]` or `[replace]`.
     patches: BTreeMap<String, Dir>,
-}
-
-fn repo_path(dir: &[String]) -> RepoPath {
-    // Segments come from parsed RepoPaths or from `normalise`, which yields
-    // only valid segments, so this cannot fail; fall back to the root anyway.
-    RepoPath::parse(&dir.join("/")).unwrap_or_else(|_| RepoPath::root())
 }
 
 fn node_id(dir: &[String]) -> NodeId {
@@ -77,71 +65,6 @@ fn node_id(dir: &[String]) -> NodeId {
         ecosystem: Ecosystem::Cargo,
         dir: repo_path(dir),
     })
-}
-
-/// Joins a relative path written in a manifest onto `base`, resolving `.`
-/// and `..`. `None` if it is absolute or climbs above the repository root.
-fn normalise(base: &[String], rel: &str) -> Option<Dir> {
-    let rel = rel.replace('\\', "/");
-    if rel.starts_with('/') || rel.contains(':') {
-        return None;
-    }
-    let mut out: Dir = base.to_vec();
-    for seg in rel.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop()?;
-            }
-            s => out.push(s.to_owned()),
-        }
-    }
-    Some(out)
-}
-
-/// Matches one path segment against a glob segment with `*` and `?`, by
-/// the iterative backtracking algorithm: O(pattern × text), no recursion.
-fn segment_matches(p: &[char], s: &[char]) -> bool {
-    let (mut pi, mut si) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while si < s.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
-            pi += 1;
-            si += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, si));
-            pi += 1;
-        } else if let Some((sp, ss)) = star {
-            pi = sp + 1;
-            si = ss + 1;
-            star = Some((sp, ss + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|&c| c == '*')
-}
-
-/// Matches a relative directory against a glob of segments, where a `**`
-/// segment matches any number of segments. Dynamic programming over
-/// (pattern position, path position): O(pattern × path) segment matches.
-fn glob_matches(pat: &[Vec<char>], dir: &[String]) -> bool {
-    let dir: Vec<Vec<char>> = dir.iter().map(|d| d.chars().collect()).collect();
-    let (np, nd) = (pat.len(), dir.len());
-    // ok[pi][di]: pat[pi..] matches dir[di..].
-    let mut ok = vec![vec![false; nd + 1]; np + 1];
-    ok[np][nd] = true;
-    for pi in (0..np).rev() {
-        let double = pat[pi].len() == 2 && pat[pi].iter().all(|&c| c == '*');
-        for di in (0..=nd).rev() {
-            ok[pi][di] = if double {
-                ok[pi + 1][di] || (di < nd && ok[pi][di + 1])
-            } else {
-                di < nd && ok[pi + 1][di + 1] && segment_matches(&pat[pi], &dir[di])
-            };
-        }
-    }
-    ok[0][0]
 }
 
 fn strings(v: Option<&Value>) -> Vec<String> {
@@ -164,26 +87,14 @@ impl Workspace {
             .unwrap_or(&empty);
         let mut members = Vec::new();
         for m in strings(ws.get("members")) {
-            let Some(segs) = normalise(&[], &m) else {
-                continue;
-            };
-            if m.len() > MAX_PATTERN_BYTES || segs.len() > MAX_PATTERN_SEGMENTS {
-                diags.push(Diagnostic {
+            match Glob::compile(&m) {
+                Ok(Some(g)) => members.push(g),
+                Ok(None) => {}
+                Err(message) => diags.push(Diagnostic {
                     path: manifest.clone(),
-                    message: format!("members pattern of {} bytes ignored as too long", m.len()),
-                });
-                continue;
+                    message,
+                }),
             }
-            let glob = m.contains(['*', '?', '[']);
-            // Collapse runs of `**`: they match the same paths.
-            let mut pat: Vec<Vec<char>> = Vec::new();
-            for s in segs {
-                if s == "**" && pat.last().is_some_and(|l| l == &['*', '*']) {
-                    continue;
-                }
-                pat.push(s.chars().collect());
-            }
-            members.push((pat, glob));
         }
         let exclude = strings(ws.get("exclude"))
             .iter()
@@ -235,14 +146,7 @@ impl Workspace {
 
     /// Whether `rel` (relative to the root) is named by a non-glob member.
     fn explicit(&self, rel: &[String]) -> bool {
-        self.members.iter().any(|(pat, glob)| {
-            !glob
-                && pat.len() == rel.len()
-                && pat
-                    .iter()
-                    .zip(rel)
-                    .all(|(p, r)| p.iter().copied().eq(r.chars()))
-        })
+        self.members.iter().any(|g| g.is_literal(rel))
     }
 
     /// Whether `dir` is excluded. The root and explicit members never are.
@@ -258,7 +162,7 @@ impl Workspace {
         let Some(rel) = dir.strip_prefix(self.root.as_slice()) else {
             return false;
         };
-        rel.is_empty() || self.members.iter().any(|(pat, _)| glob_matches(pat, rel))
+        rel.is_empty() || self.members.iter().any(|g| g.matches(rel))
     }
 }
 

@@ -6,7 +6,7 @@
 
 mod common;
 
-use blueprint_engine::l1::{Diagnostic, cargo};
+use blueprint_engine::l1::{self, Diagnostic};
 use blueprint_engine::l2;
 use blueprint_model::{Confidence, Level, Model, RepoPath};
 
@@ -16,7 +16,7 @@ fn run(files: &Files) -> (Model, Vec<Diagnostic>) {
     let paths: Vec<RepoPath> = files.keys().cloned().collect();
     let read = |p: &RepoPath| files.get(p).cloned();
     let mut model = Model::default();
-    let mut diags = cargo::analyse(&paths, &read, &mut model);
+    let mut diags = l1::analyse(&paths, &read, &mut model);
     diags.extend(l2::analyse(&paths, &read, &mut model));
     (model, diags)
 }

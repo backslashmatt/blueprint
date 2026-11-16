@@ -1,0 +1,10 @@
+nodes:
+  L1:npm:pnpm/pkgs/skip#  System  "skip"  Exact  pnpm/pkgs/skip/package.json
+  L1:npm:pnpm/pkgs/x#  System  "x"  Exact  pnpm/pkgs/x/package.json
+  L1:npm:pnpm/pkgs/y#  System  "y"  Exact  pnpm/pkgs/y/package.json
+  L1:npm:yarn/libs/a#  System  "a"  Exact  yarn/libs/a/package.json
+  L1:npm:yarn/libs/b#  System  "b"  Exact  yarn/libs/b/package.json
+edges:
+  L1:npm:pnpm/pkgs/x# -> L1:npm:pnpm/pkgs/y#  DependsOn  Exact  {Normal}
+  L1:npm:yarn/libs/a# -> L1:npm:yarn/libs/b#  DependsOn  Inferred  {Normal}
+diagnostics:
