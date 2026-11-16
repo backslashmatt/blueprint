@@ -341,3 +341,34 @@ fn hostile_member_globs_finish_quickly() {
         "{diags:?}"
     );
 }
+
+#[test]
+fn edges_record_why_the_dependency_exists() {
+    use blueprint_model::DepKind::{Build, Normal};
+    use std::collections::BTreeSet;
+    let (model, _) = run(&files(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"d\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\n[dependencies]\nb = { path = \"../b\" }\n[build-dependencies]\nb = { path = \"../b\" }\nc = { path = \"../c\" }\n[target.'cfg(unix)'.dependencies]\nd = { path = \"../d\" }\n",
+        ),
+        ("b/Cargo.toml", "[package]\nname = \"b\"\n"),
+        ("c/Cargo.toml", "[package]\nname = \"c\"\n"),
+        ("d/Cargo.toml", "[package]\nname = \"d\"\n"),
+    ]));
+    let kinds: Vec<(String, BTreeSet<_>)> = model
+        .edges()
+        .map(|e| (e.key.to.system_key().dir.to_string(), e.dependency.clone()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("b".to_owned(), BTreeSet::from([Normal, Build])),
+            ("c".to_owned(), BTreeSet::from([Build])),
+            ("d".to_owned(), BTreeSet::from([Normal])),
+        ]
+    );
+}

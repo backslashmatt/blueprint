@@ -7,9 +7,9 @@ nodes:
   L1:cargo:lib#  System  "lib"  Exact  lib/Cargo.toml
   L1:cargo:nested/inner#  System  "inner"  Exact  nested/inner/Cargo.toml
 edges:
-  L1:cargo:app# -> L1:cargo:gen#  DependsOn  Exact
-  L1:cargo:crates/keep# -> L1:cargo:lib#  DependsOn  Exact
-  L1:cargo:far/away# -> L1:cargo:lib#  DependsOn  Exact
-  L1:cargo:gen# -> L1:cargo:lib#  DependsOn  Exact
-  L1:cargo:nested/inner# -> L1:cargo:lib#  DependsOn  Exact
+  L1:cargo:app# -> L1:cargo:gen#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/keep# -> L1:cargo:lib#  DependsOn  Exact  {Normal}
+  L1:cargo:far/away# -> L1:cargo:lib#  DependsOn  Exact  {Normal}
+  L1:cargo:gen# -> L1:cargo:lib#  DependsOn  Exact  {Normal}
+  L1:cargo:nested/inner# -> L1:cargo:lib#  DependsOn  Exact  {Normal}
 diagnostics:

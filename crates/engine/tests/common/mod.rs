@@ -21,22 +21,24 @@ pub fn render(model: &Model, diags: &[Diagnostic]) -> String {
     let mut out = String::from("nodes:\n");
     for n in model.nodes() {
         out += &format!(
-            "  {}  {:?}  {:?}  {:?}  {}\n",
+            "  {}  {:?}  {:?}  {:?}  {}{}\n",
             String::from(n.id.clone()),
             n.kind,
             n.name,
             n.confidence,
-            n.source
+            n.source,
+            n.visibility.map(|v| format!("  {v:?}")).unwrap_or_default()
         );
     }
     out += "edges:\n";
     for e in model.edges() {
         out += &format!(
-            "  {} -> {}  {:?}  {:?}\n",
+            "  {} -> {}  {:?}  {:?}  {:?}\n",
             String::from(e.key.from.clone()),
             String::from(e.key.to.clone()),
             e.key.kind,
-            e.confidence
+            e.confidence,
+            e.dependency
         );
     }
     out += "diagnostics:\n";

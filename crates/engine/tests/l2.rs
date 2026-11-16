@@ -344,3 +344,35 @@ fn files_outside_the_module_tree_still_appear() {
         "inline in a broken file"
     );
 }
+
+#[test]
+fn module_visibility_is_recorded() {
+    let (model, _) = run(&files(&[
+        ("Cargo.toml", "[package]\nname = \"k\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod a;\npub(crate) mod b;\nmod c;\npub(in crate::a) mod d {}\ncfg_if::cfg_if! { if #[cfg(unix)] { pub mod e; } }\n",
+        ),
+        ("src/a.rs", ""),
+        ("src/b.rs", ""),
+        ("src/c.rs", ""),
+        ("src/e.rs", ""),
+    ]));
+    let vis = |name: &str| {
+        model
+            .level(Level::Module)
+            .find(|n| n.name == name)
+            .and_then(|n| n.visibility)
+    };
+    use blueprint_model::Visibility::{Private, Public, Restricted};
+    assert_eq!(
+        ["a", "b", "c", "d", "e"].map(vis),
+        [
+            Some(Public),
+            Some(Restricted),
+            Some(Private),
+            Some(Restricted),
+            Some(Public)
+        ]
+    );
+}

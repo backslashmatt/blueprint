@@ -8,8 +8,8 @@ nodes:
   L1:cargo:vendor/serde#  System  "serde"  Exact  vendor/serde/Cargo.toml
   L1:cargo:x/c#  System  "c"  Exact  x/c/Cargo.toml
 edges:
-  L1:cargo:a# -> L1:cargo:b#  DependsOn  Exact
-  L1:cargo:a# -> L1:cargo:c#  DependsOn  Exact
-  L1:cargo:a# -> L1:cargo:tok#  DependsOn  Inferred
+  L1:cargo:a# -> L1:cargo:b#  DependsOn  Exact  {Normal}
+  L1:cargo:a# -> L1:cargo:c#  DependsOn  Exact  {Normal}
+  L1:cargo:a# -> L1:cargo:tok#  DependsOn  Inferred  {Build}
 diagnostics:
   stray/Cargo.toml: neither [package] nor [workspace]

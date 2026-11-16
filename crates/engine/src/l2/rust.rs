@@ -32,7 +32,9 @@
 
 use std::collections::BTreeSet;
 
-use blueprint_model::{Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey};
+use blueprint_model::{
+    Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey, Visibility,
+};
 use toml::{Table, Value};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -67,6 +69,16 @@ struct ModItem<'t> {
     path_attr: Option<String>,
     cfg_attr_path: bool,
     in_macro: bool,
+    visibility: Visibility,
+}
+
+/// The visibility a `pub`, `pub(..)` or absent modifier gives.
+fn visibility_of(modifier: Option<&str>) -> Visibility {
+    match modifier.map(str::trim) {
+        Some("pub") => Visibility::Public,
+        Some(m) if m.starts_with("pub") || m == "crate" => Visibility::Restricted,
+        _ => Visibility::Private,
+    }
 }
 
 /// Adds the module tree of the package `system` to `model`, and returns the
@@ -267,6 +279,12 @@ fn mod_items<'t>(list: TsNode<'t>, src: &[u8]) -> Vec<ModItem<'t>> {
                         path_attr: path_attr.take(),
                         cfg_attr_path,
                         in_macro: false,
+                        visibility: visibility_of(
+                            child
+                                .named_child(0)
+                                .filter(|c| c.kind() == "visibility_modifier")
+                                .and_then(|c| c.utf8_text(src).ok()),
+                        ),
                     });
                 }
             }
@@ -289,6 +307,15 @@ fn mod_items<'t>(list: TsNode<'t>, src: &[u8]) -> Vec<ModItem<'t>> {
                             path_attr: None,
                             cfg_attr_path: false,
                             in_macro: true,
+                            // `pub mod x;` or `pub(crate) mod x;` in tokens.
+                            visibility: match (
+                                i.checked_sub(1).map(text),
+                                i.checked_sub(4).map(text),
+                            ) {
+                                (Some("pub"), _) => Visibility::Public,
+                                (Some(")"), Some("pub")) => Visibility::Restricted,
+                                _ => Visibility::Private,
+                            },
                         });
                     }
                 }
@@ -308,7 +335,13 @@ impl Ctx<'_> {
 
     /// Adds a module node unless it exists (another root or `cfg` variant
     /// declared it first). Returns whether it was added.
-    fn add_module(&mut self, module: &[String], source: &[String], confidence: Confidence) -> bool {
+    fn add_module(
+        &mut self,
+        module: &[String],
+        source: &[String],
+        confidence: Confidence,
+        visibility: Visibility,
+    ) -> bool {
         let id = self.id(module);
         if self.model.node(&id).is_some() {
             return false;
@@ -320,6 +353,7 @@ impl Ctx<'_> {
             source: repo_path(source),
             parent: Some(self.system.clone()),
             confidence,
+            visibility: Some(visibility),
         };
         match self.model.add_node(node) {
             Ok(()) => true,
@@ -414,7 +448,7 @@ impl Ctx<'_> {
             let mut sub = module.to_vec();
             sub.push(item.name.clone());
             if depth >= MAX_DEPTH {
-                if self.add_module(&sub, file, Confidence::Inferred) {
+                if self.add_module(&sub, file, Confidence::Inferred, item.visibility) {
                     self.diag(
                         file,
                         format!("modules nested deeper than {MAX_DEPTH} are not followed"),
@@ -440,6 +474,7 @@ impl Ctx<'_> {
                     } else {
                         conf
                     }),
+                    item.visibility,
                 );
                 if let Some(inner) = inner {
                     self.walk_items(body, src, file, file_conf, &inner, &inner, &sub, depth + 1);
@@ -473,10 +508,10 @@ impl Ctx<'_> {
                     if item.cfg_attr_path || item.in_macro {
                         conf = conf.min(Confidence::Inferred);
                     }
-                    self.add_module(&sub, &t, conf);
+                    self.add_module(&sub, &t, conf, item.visibility);
                 }
                 None => {
-                    if self.add_module(&sub, file, Confidence::Inferred) {
+                    if self.add_module(&sub, file, Confidence::Inferred, item.visibility) {
                         self.diag(file, format!("file for `mod {}` not found", item.name));
                     }
                 }

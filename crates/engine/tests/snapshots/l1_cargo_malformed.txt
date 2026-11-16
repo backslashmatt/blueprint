@@ -3,7 +3,7 @@ nodes:
   L1:cargo:good#  System  "good"  Exact  good/Cargo.toml
   L1:cargo:nameless#  System  "nameless"  Unknown  nameless/Cargo.toml
 edges:
-  L1:cargo:good# -> L1:cargo:broken#  DependsOn  Exact
+  L1:cargo:good# -> L1:cargo:broken#  DependsOn  Exact  {Normal}
 diagnostics:
   broken/Cargo.toml: TOML parse error at line 1, column 9
   good/Cargo.toml: `escape` has a path outside the repository: ../../outside

@@ -28,15 +28,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blueprint_model::{
-    Confidence, Ecosystem, Edge, EdgeKey, EdgeKind, Model, Node, NodeId, NodeKind, RepoPath,
-    SystemKey,
+    Confidence, DepKind, Ecosystem, Edge, EdgeKey, EdgeKind, Model, Node, NodeId, NodeKind,
+    RepoPath, SystemKey,
 };
 use toml::{Table, Value};
 
 use super::{Diagnostic, Read};
 
 const MANIFEST: &str = "Cargo.toml";
-const DEP_TABLES: [&str; 3] = ["dependencies", "build-dependencies", "build_dependencies"];
+const DEP_TABLES: [(&str, DepKind); 3] = [
+    ("dependencies", DepKind::Normal),
+    ("build-dependencies", DepKind::Build),
+    ("build_dependencies", DepKind::Build),
+];
 
 /// Members patterns longer than this, in bytes or segments, are ignored.
 const MAX_PATTERN_BYTES: usize = 1024;
@@ -386,6 +390,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             } else {
                 Confidence::Unknown
             },
+            visibility: None,
         };
         if let Err(e) = model.add_node(node) {
             diags.push(Diagnostic {
@@ -395,17 +400,18 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         }
     }
 
-    let mut edges: BTreeMap<(usize, usize), Confidence> = BTreeMap::new();
+    let mut edges: BTreeMap<(usize, usize), (Confidence, BTreeSet<DepKind>)> = BTreeMap::new();
     for (from, p) in packages.iter().enumerate() {
         let Some(table) = &p.table else { continue };
         let ws = ws_of[from].map(|i| &workspaces[i]);
-        for (key, spec) in dependency_entries(table) {
+        for (key, spec, kind) in dependency_entries(table) {
             let found = resolve(key, spec, p, ws, &by_dir)
                 .map(|r| r.or_else(|| infer(key, spec, ws, from, &by_name, &ws_of)));
             match found {
                 Ok(Some((to, conf))) if to != from => {
-                    let e = edges.entry((from, to)).or_insert(conf);
-                    *e = (*e).max(conf);
+                    let e = edges.entry((from, to)).or_insert((conf, BTreeSet::new()));
+                    e.0 = e.0.max(conf);
+                    e.1.insert(kind);
                 }
                 Ok(_) => {}
                 Err(message) => diags.push(Diagnostic {
@@ -415,7 +421,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             }
         }
     }
-    for ((from, to), confidence) in edges {
+    for ((from, to), (confidence, dependency)) in edges {
         let edge = Edge {
             key: EdgeKey {
                 from: node_id(&packages[from].dir),
@@ -424,6 +430,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             },
             confidence,
             evidence: BTreeSet::new(),
+            dependency,
         };
         if let Err(e) = model.add_edge(edge) {
             diags.push(Diagnostic {
@@ -489,7 +496,7 @@ fn membership(packages: &[Package], workspaces: &[Workspace]) -> Vec<Option<usiz
             let (Some(w), true, Some(table)) = (candidate[i], member[i], &packages[i].table) else {
                 continue;
             };
-            for (key, spec) in dependency_entries(table) {
+            for (key, spec, _) in dependency_entries(table) {
                 let Ok(Some(dir)) = dep_path(key, spec, &packages[i], Some(&workspaces[w])) else {
                     continue;
                 };
@@ -514,19 +521,22 @@ fn membership(packages: &[Package], workspaces: &[Workspace]) -> Vec<Option<usiz
 }
 
 /// Every `(name, spec)` in the dependency tables that count for L1.
-fn dependency_entries(table: &Table) -> Vec<(&str, &Value)> {
-    let mut tables: Vec<&Table> = DEP_TABLES
-        .iter()
-        .filter_map(|t| table.get(*t)?.as_table())
-        .collect();
+fn dependency_entries(table: &Table) -> Vec<(&str, &Value, DepKind)> {
+    fn tables_in(t: &Table) -> Vec<(&Table, DepKind)> {
+        DEP_TABLES
+            .iter()
+            .filter_map(|(name, kind)| Some((t.get(*name)?.as_table()?, *kind)))
+            .collect()
+    }
+    let mut tables = tables_in(table);
     if let Some(targets) = table.get("target").and_then(Value::as_table) {
         for t in targets.values().filter_map(Value::as_table) {
-            tables.extend(DEP_TABLES.iter().filter_map(|d| t.get(*d)?.as_table()));
+            tables.extend(tables_in(t));
         }
     }
     tables
         .into_iter()
-        .flat_map(|t| t.iter().map(|(k, v)| (k.as_str(), v)))
+        .flat_map(|(t, kind)| t.iter().map(move |(k, v)| (k.as_str(), v, kind)))
         .collect()
 }
 
