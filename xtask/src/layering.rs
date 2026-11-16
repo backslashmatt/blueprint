@@ -294,9 +294,30 @@ pub const PROTECTED_LINTS: &[&str] = &[
     "dbg_macro",
 ];
 
+/// Crate directories, relative to the workspace root, that may allow
+/// `unsafe_code`. Each must also justify it in its README under
+/// [`UNSAFE_HEADING`] (REQUIREMENTS §5.3). Adding a crate here is a reviewed
+/// change to this file.
+pub const UNSAFE_CRATES: &[&str] = &["crates/store"];
+
+/// The README heading that justifies a crate's `unsafe`.
+pub const UNSAFE_HEADING: &str = "## Why this crate uses `unsafe`";
+
+/// Whether source at `path` (relative to the workspace root, whose README
+/// text is given by `readme`) may allow `unsafe_code`.
+pub fn unsafe_allowed(path: &Path, readme: impl Fn(&Path) -> Option<String>) -> bool {
+    UNSAFE_CRATES.iter().any(|c| {
+        let dir = Path::new(c);
+        path.starts_with(dir)
+            && readme(&dir.join("README.md"))
+                .is_some_and(|r| r.lines().any(|l| l.trim_end() == UNSAFE_HEADING))
+    })
+}
+
 /// Source lines outside `tests/` directories that switch off a protected lint
-/// with `allow`, `expect` or `warn`, as `path:line: text`.
-pub fn lint_overrides(path: &Path, source: &str) -> Vec<String> {
+/// with `allow`, `expect` or `warn`, as `path:line: text`. With
+/// `unsafe_allowed`, switching off `unsafe_code` (and only that) is permitted.
+pub fn lint_overrides(path: &Path, source: &str, unsafe_allowed: bool) -> Vec<String> {
     let in_tests_dir = path.components().any(|c| c.as_os_str() == "tests");
     if in_tests_dir {
         return Vec::new();
@@ -308,7 +329,10 @@ pub fn lint_overrides(path: &Path, source: &str) -> Vec<String> {
             let l = l.trim_start();
             l.starts_with("#")
                 && ["allow(", "expect(", "warn("].iter().any(|a| l.contains(a))
-                && PROTECTED_LINTS.iter().any(|lint| l.contains(lint))
+                && PROTECTED_LINTS
+                    .iter()
+                    .filter(|lint| !(unsafe_allowed && **lint == "unsafe_code"))
+                    .any(|lint| l.contains(lint))
         })
         .map(|(i, l)| format!("{}:{}: {}", path.display(), i + 1, l.trim()))
         .collect()
@@ -458,8 +482,46 @@ mod tests {
     #[test]
     fn lint_overrides_are_found_outside_tests_only() {
         let src = "#![allow(clippy::unwrap_used)]\nfn f() {}\n#[allow(dead_code)]\n#[expect(unsafe_code)]\n";
-        let found = lint_overrides(Path::new("crates/engine/src/lib.rs"), src);
+        let found = lint_overrides(Path::new("crates/engine/src/lib.rs"), src, false);
         assert_eq!(found.len(), 2, "{found:?}");
-        assert!(lint_overrides(Path::new("crates/engine/tests/it.rs"), src).is_empty());
+        assert!(lint_overrides(Path::new("crates/engine/tests/it.rs"), src, false).is_empty());
+    }
+
+    #[test]
+    fn unsafe_allowance_covers_unsafe_code_only() {
+        let src = "#[allow(unsafe_code)]\n#[allow(unsafe_code, clippy::unwrap_used)]\n";
+        let found = lint_overrides(Path::new("crates/store/src/lib.rs"), src, true);
+        assert_eq!(found.len(), 1, "unwrap_used is still caught: {found:?}");
+        assert_eq!(
+            lint_overrides(Path::new("crates/store/src/lib.rs"), src, false).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn unsafe_needs_both_the_list_and_the_readme_heading() {
+        let justified = |_: &Path| Some(format!("# store\n\n{UNSAFE_HEADING}\n\nBecause.\n"));
+        let silent = |_: &Path| Some("# store\n\nNo reason given.\n".to_owned());
+        let missing = |_: &Path| None;
+        assert!(unsafe_allowed(
+            Path::new("crates/store/src/segment.rs"),
+            justified
+        ));
+        assert!(!unsafe_allowed(
+            Path::new("crates/store/src/segment.rs"),
+            silent
+        ));
+        assert!(!unsafe_allowed(
+            Path::new("crates/store/src/segment.rs"),
+            missing
+        ));
+        assert!(!unsafe_allowed(
+            Path::new("crates/engine/src/lib.rs"),
+            justified
+        ));
+        assert!(!unsafe_allowed(
+            Path::new("crates/storefront/src/lib.rs"),
+            justified
+        ));
     }
 }

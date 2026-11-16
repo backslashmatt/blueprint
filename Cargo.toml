@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/model",
     "crates/engine",
+    "crates/store",
     "crates/protocol",
     "crates/cli",
     "crates/ui",
@@ -10,6 +11,8 @@ members = [
     "bench",
     "xtask",
 ]
+# cargo-fuzz targets need nightly Rust and build on their own.
+exclude = ["crates/store/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,11 +24,15 @@ publish = false
 [workspace.dependencies]
 blueprint-model = { path = "crates/model" }
 blueprint-engine = { path = "crates/engine" }
+blueprint-store = { path = "crates/store" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`, so that a crate listed in xtask's UNSAFE_CRATES whose
+# README justifies it can allow one call (REQUIREMENTS §5.3). xtask rejects
+# every other override.
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

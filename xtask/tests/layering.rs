@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xtask::layering::{Graph, lint_overrides, missing_lints, violations};
+use xtask::layering::{Graph, lint_overrides, missing_lints, unsafe_allowed, violations};
 
 /// The workspace root. Read at run time, not compile time, so a test binary
 /// reused from a shared target directory still checks this checkout.
@@ -39,9 +39,13 @@ fn no_source_outside_tests_switches_off_a_protected_lint() {
                 stack.push(path);
             } else if name.ends_with(".rs") {
                 let rel = path.strip_prefix(root()).unwrap().to_path_buf();
+                let allowed = unsafe_allowed(&rel, |readme| {
+                    std::fs::read_to_string(root().join(readme)).ok()
+                });
                 found.extend(lint_overrides(
                     &rel,
                     &std::fs::read_to_string(&path).unwrap(),
+                    allowed,
                 ));
             }
         }
