@@ -27,10 +27,10 @@ blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
 
 [workspace.lints.rust]
-# `deny`, not `forbid`, so that a crate listed in xtask's UNSAFE_CRATES whose
-# README justifies it can allow one call (REQUIREMENTS §5.3). xtask rejects
-# every other override.
-unsafe_code = "deny"
+# rustc rejects any attempt to allow it. The one exception, crates/store,
+# declares its own copy of these lints with `deny`; xtask checks that copy
+# (REQUIREMENTS §5.3).
+unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

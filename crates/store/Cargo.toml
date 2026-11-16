@@ -10,5 +10,17 @@ publish.workspace = true
 [dependencies]
 memmap2 = "0.9"
 
-[lints]
-workspace = true
+# A copy of [workspace.lints] with `unsafe_code = "deny"` instead of `forbid`,
+# so that the one justified `unsafe` call can be allowed (see README.md).
+# xtask's layering test fails if this drifts from the workspace lints.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

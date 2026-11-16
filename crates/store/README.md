@@ -21,14 +21,14 @@ The crate keeps this from happening as follows:
 
 - Segment files belong to Blueprint. They live in its cache directory, never
   in the repository under review.
-- A segment is written under a temporary name, synced, and renamed into place.
-  It is never opened for writing again: a change always makes a new file,
-  named by its checksum.
+- A segment is written under a unique temporary name, synced, and renamed into
+  place. It is never opened for writing again: a change always makes a new
+  file, named by its checksum.
 - Before any lookup, every header field, offset and key is validated and the
   checksum is checked against the whole file. After that, reads cannot go out
   of bounds.
-- Old segments are unmapped before they are deleted. Deleting a mapped file is
-  harmless on Unix and refused on Windows.
+- `compact` opens the merged segment before unmapping and deleting the old
+  ones. Deleting a mapped file is harmless on Unix and refused on Windows.
 
 The remaining risk is another program truncating or rewriting a segment while
 Blueprint has it open. On Unix that would end the process with `SIGBUS`. The
@@ -36,9 +36,23 @@ user's own tools have no reason to touch these files. If this is ever seen in
 practice, `Segment::from_bytes`, which reads the file into memory, is the
 drop-in fallback.
 
-The xtask layering test allows `#[allow(unsafe_code)]` only in crates listed in
-`UNSAFE_CRATES` whose README has this section. Every other crate inherits
-`unsafe_code = "deny"`.
+Every other crate inherits `unsafe_code = "forbid"`, so rustc itself rejects
+`unsafe` there. This crate declares its own copy of the workspace lints with
+`unsafe_code = "deny"`, so that the one call can be allowed. The xtask layering
+test checks that:
+- the copy matches the workspace lints apart from that one line;
+- the crate is listed in `UNSAFE_CRATES` and its README has this section;
+- `src/` contains exactly one `unsafe` block.
+
+## Files
+
+A segment is named `v<format version>-<checksum>.seg`.
+- Identical content gets the same name.
+- `Store::open` deletes segments named for an older format version.
+- It leaves a newer version's segments alone, so two Blueprint versions
+  sharing a cache do not keep deleting each other's index.
+- Temporary files are deleted only once they are an hour old, so a write in
+  progress in another process is never disturbed.
 
 ## Fuzzing
 

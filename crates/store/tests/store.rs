@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime};
 
 use blueprint_store::{
     FORMAT_VERSION, KEY_LEN, Key, Segment, SegmentWriter, Store, StoreError, reseal,
@@ -203,10 +204,20 @@ fn store_drops_and_deletes_damaged_segments_and_keeps_good_ones() -> Result<(), 
         path: dir.clone(),
         source: e,
     })?;
-    std::fs::write(dir.join(".tmp-1-1"), b"partial").map_err(|e| StoreError::Io {
+    let io = |e| StoreError::Io {
         path: dir.clone(),
         source: e,
-    })?;
+    };
+    // One temporary file a crashed writer left two hours ago, one that
+    // another process may still be writing.
+    let abandoned = dir.join(".tmp-1-1-1");
+    std::fs::write(&abandoned, b"partial").map_err(io)?;
+    std::fs::File::options()
+        .write(true)
+        .open(&abandoned)
+        .and_then(|f| f.set_modified(SystemTime::now() - Duration::from_secs(7200)))
+        .map_err(io)?;
+    std::fs::write(dir.join(".tmp-2-1-1"), b"in progress").map_err(io)?;
 
     let store = Store::open(&dir)?;
     assert_eq!(store.segment_count(), 1);
@@ -214,9 +225,10 @@ fn store_drops_and_deletes_damaged_segments_and_keeps_good_ones() -> Result<(), 
     assert!(store.dropped().iter().all(|d| d.reason.is_rebuildable()));
     assert!(!damaged.exists(), "a corrupt segment is deleted");
     assert!(!dir.join("empty.seg").exists());
+    assert!(!abandoned.exists(), "abandoned temporary files are removed");
     assert!(
-        !dir.join(".tmp-1-1").exists(),
-        "temporary files are cleaned up"
+        dir.join(".tmp-2-1-1").exists(),
+        "a write that may be in progress is left alone"
     );
     let survivors = (0..10)
         .chain(100..110)
@@ -247,4 +259,39 @@ fn compact_merges_segments_and_survives_reopening() -> Result<(), StoreError> {
         assert!(store.get(&key(i)).is_some(), "key {i}");
     }
     Ok(())
+}
+
+#[test]
+fn segments_of_other_versions_are_handled_by_name() -> Result<(), StoreError> {
+    let dir = fresh_dir("versions");
+    let io = |e| StoreError::Io {
+        path: dir.clone(),
+        source: e,
+    };
+    let mut store = Store::open(&dir)?;
+    store.add(&writer(0..3))?;
+    drop(store);
+    let older = dir.join(format!("v{}-00000000000000aa.seg", FORMAT_VERSION - 1));
+    let newer = dir.join(format!("v{}-00000000000000bb.seg", FORMAT_VERSION + 1));
+    std::fs::write(&older, b"old format").map_err(io)?;
+    std::fs::write(&newer, b"new format").map_err(io)?;
+    let store = Store::open(&dir)?;
+    assert_eq!(store.segment_count(), 1);
+    assert!(store.dropped().is_empty());
+    assert!(!older.exists(), "an older version's segment is deleted");
+    assert!(newer.exists(), "a newer Blueprint's segment is left for it");
+    Ok(())
+}
+
+#[test]
+fn flipping_the_top_bit_of_two_words_is_detected() {
+    // Pairs like these passed the first version of the checksum. Bytes 32..64
+    // are the one key, so only the checksum can tell the damage apart.
+    let bytes = writer([1]).to_bytes();
+    for (a, b) in [(39, 47), (47, 55), (55, 63), (39, 63)] {
+        let mut d = bytes.clone();
+        d[a] ^= 0x80;
+        d[b] ^= 0x80;
+        assert!(Segment::from_bytes(d).is_err(), "bytes {a} and {b}");
+    }
 }

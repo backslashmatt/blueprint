@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
-use crate::segment::{Key, Segment, SegmentWriter};
+use std::time::Duration;
+
+use crate::segment::{FORMAT_VERSION, Key, Segment, SegmentWriter, TEMP_PREFIX, name_version};
 
 /// A segment that [`Store::open`] discarded, and why.
 #[derive(Debug)]
@@ -26,6 +28,10 @@ pub struct Store {
     dropped: Vec<Dropped>,
 }
 
+/// How old a temporary file must be before `Store::open` treats it as
+/// abandoned by a writer that crashed.
+const STALE_TEMP: Duration = Duration::from_secs(3600);
+
 fn is_segment(p: &Path) -> bool {
     p.extension().is_some_and(|e| e == "seg")
 }
@@ -33,9 +39,11 @@ fn is_segment(p: &Path) -> bool {
 impl Store {
     /// Opens the store in `dir`, creating the directory if needed.
     ///
-    /// A segment that is corrupt or from another format version is deleted
-    /// and listed in [`Store::dropped`]; its entries will be re-analysed.
-    /// Temporary files left by an interrupted write are deleted too.
+    /// A segment that is corrupt or fails validation is deleted and listed in
+    /// [`Store::dropped`]; its entries will be re-analysed. Segments named for
+    /// an older format version are deleted; a newer version's are left alone
+    /// for the Blueprint that wrote them. Temporary files are deleted once
+    /// they are an hour old, which means their writer crashed.
     ///
     /// # Errors
     /// [`StoreError::Io`] only if the directory itself cannot be created or
@@ -44,14 +52,30 @@ impl Store {
         std::fs::create_dir_all(dir).map_err(|e| StoreError::io(dir, e))?;
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(dir).map_err(|e| StoreError::io(dir, e))? {
-            let path = entry.map_err(|e| StoreError::io(dir, e))?.path();
-            let stale_tmp = path
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(".tmp-"));
-            if stale_tmp {
-                let _ = std::fs::remove_file(&path);
+            let entry = entry.map_err(|e| StoreError::io(dir, e))?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(TEMP_PREFIX) {
+                // Another process may still be writing it: only remove
+                // temporary files old enough to be abandoned.
+                let abandoned = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= STALE_TEMP);
+                if abandoned {
+                    let _ = std::fs::remove_file(&path);
+                }
             } else if is_segment(&path) {
-                paths.push(path);
+                match name_version(&name) {
+                    // A newer Blueprint's segment: leave it for that version.
+                    Some(v) if v > FORMAT_VERSION => {}
+                    Some(v) if v < FORMAT_VERSION => {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    _ => paths.push(path),
+                }
             }
         }
         paths.sort();
@@ -134,13 +158,15 @@ impl Store {
             }
         }
         let path = merged.write_to(&self.dir)?;
+        // Open the merged segment before letting go of the old ones, so a
+        // failure here leaves the store as it was.
+        let seg = Segment::open(&path)?;
         // Unmap before deleting: Windows refuses to delete a mapped file.
         let old: Vec<PathBuf> = self.segments.drain(..).map(|(p, _)| p).collect();
+        self.segments.push((path.clone(), seg));
         for p in old.into_iter().filter(|p| *p != path) {
             let _ = std::fs::remove_file(p);
         }
-        let seg = Segment::open(&path)?;
-        self.segments.push((path, seg));
         Ok(())
     }
 }

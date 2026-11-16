@@ -199,6 +199,12 @@ const STORE_ENTRIES: u32 = 64_465;
 fn store_reopen() -> Result<Measurement, Error> {
     let dir = std::env::temp_dir().join(format!("bp-bench-store-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let result = store_reopen_in(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn store_reopen_in(dir: &Path) -> Result<Measurement, Error> {
     let key = |i: u32| {
         let mut k = [0u8; KEY_LEN];
         k[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
@@ -210,24 +216,23 @@ fn store_reopen() -> Result<Measurement, Error> {
         // About 200 bytes per entry: the size of a small analysis summary.
         w.insert(key(i), vec![(i % 251) as u8; 150 + (i % 100) as usize]);
     }
-    let mut store = Store::open(&dir)?;
+    let mut store = Store::open(dir)?;
     store.add(&w)?;
     drop(store);
-    let bytes: u64 = std::fs::read_dir(&dir)?
+    let bytes: u64 = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok()?.metadata().ok())
         .map(|m| m.len())
         .sum();
     let samples = 11;
     let mut found = 0;
     let mut reopen = || -> Result<(), Error> {
-        let store = Store::open(&dir)?;
+        let store = Store::open(dir)?;
         found = (0..STORE_ENTRIES)
             .filter(|i| store.get(&key(*i)).is_some())
             .count();
         Ok(())
     };
     let (value, _) = best_ms(samples, 1, &mut reopen, None)?;
-    let _ = std::fs::remove_dir_all(&dir);
     if found != STORE_ENTRIES as usize {
         return Err(format!("store_reopen found {found} of {STORE_ENTRIES} keys").into());
     }

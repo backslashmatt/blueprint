@@ -296,33 +296,70 @@ impl SegmentWriter {
         out
     }
 
-    /// Writes the segment into `dir`, named by its checksum, and returns the
-    /// path. The file is written under a temporary name and renamed into
-    /// place, so a reader never sees a partial segment.
+    /// Writes the segment into `dir` and returns its path. The name holds the
+    /// format version and the checksum, so identical content gets the same
+    /// name and different versions never collide.
+    ///
+    /// The file is written under a unique temporary name, synced, and renamed
+    /// into place, so a reader never sees a partial segment. If a valid file
+    /// with the same name already exists it is reused.
     ///
     /// # Errors
     /// [`StoreError::Io`] if the file cannot be written.
     pub fn write_to(&self, dir: &Path) -> Result<PathBuf, StoreError> {
-        static TMP: AtomicU64 = AtomicU64::new(0);
         let bytes = self.to_bytes();
-        let name = format!("{:016x}.seg", checksum(&bytes));
-        let path = dir.join(name);
-        if path.exists() {
+        let path = dir.join(segment_name(checksum(&bytes)));
+        if Segment::open(&path).is_ok() {
             return Ok(path);
         }
-        let n = TMP.fetch_add(1, Ordering::Relaxed);
-        let tmp = dir.join(format!(".tmp-{}-{n}", std::process::id()));
+        let tmp = dir.join(temp_name());
         let write = || -> std::io::Result<()> {
             use std::io::Write;
-            let mut f = File::create(&tmp)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
+            drop(f);
             std::fs::rename(&tmp, &path)
         };
-        write().map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            StoreError::io(&path, e)
-        })?;
-        Ok(path)
+        match write() {
+            Ok(()) => Ok(path),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                // Another process may have written the same segment first
+                // (on Windows the rename then fails if it is mapped).
+                if Segment::open(&path).is_ok() {
+                    Ok(path)
+                } else {
+                    Err(StoreError::io(&path, e))
+                }
+            }
+        }
     }
+}
+
+/// The prefix of every temporary file.
+pub(crate) const TEMP_PREFIX: &str = ".tmp-";
+
+/// A temporary name no other writer, in this process or another, will pick:
+/// the process id, a counter and the time.
+fn temp_name() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{TEMP_PREFIX}{}-{n}-{nanos}", std::process::id())
+}
+
+/// The file name of a segment of this format version with `sum`.
+fn segment_name(sum: u64) -> String {
+    format!("v{FORMAT_VERSION}-{sum:016x}.seg")
+}
+
+/// The format version encoded in a segment file name, if it has one.
+pub(crate) fn name_version(name: &str) -> Option<u32> {
+    name.strip_prefix('v')?.split_once('-')?.0.parse().ok()
 }

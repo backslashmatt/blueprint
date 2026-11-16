@@ -264,16 +264,38 @@ pub fn violations(g: &Graph) -> Vec<String> {
 }
 
 /// Workspace members whose manifest does not inherit the workspace lints.
-pub fn missing_lints(g: &Graph) -> Vec<String> {
+///
+/// The one exception is a crate in [`UNSAFE_CRATES`]. It may instead declare
+/// its own `[lints]` table, which must equal `[workspace.lints]` except that
+/// `unsafe_code` is `deny` instead of `forbid` (see [`unsafe_lints_match`]).
+/// Every other crate inherits `forbid`, which rustc itself enforces.
+pub fn missing_lints(g: &Graph, root: &Path) -> Vec<String> {
+    let root = &root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let workspace_lints = std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("workspace")?.get("lints").cloned());
     let mut v = Vec::new();
     for (name, p) in g.packages.iter().filter(|(_, p)| p.workspace) {
-        let inherits = std::fs::read_to_string(&p.manifest_path).is_ok_and(|m| {
-            let lines: Vec<&str> = m.lines().map(str::trim).collect();
-            lines
-                .windows(2)
-                .any(|w| w == ["[lints]", "workspace = true"])
-        });
-        if !inherits {
+        let manifest = std::fs::read_to_string(&p.manifest_path).unwrap_or_default();
+        let lines: Vec<&str> = manifest.lines().map(str::trim).collect();
+        let inherits = lines
+            .windows(2)
+            .any(|w| w == ["[lints]", "workspace = true"]);
+        let manifest_dir = p
+            .manifest_path
+            .parent()
+            .map(|d| d.canonicalize().unwrap_or_else(|_| d.to_owned()));
+        let rel = manifest_dir
+            .as_deref()
+            .and_then(|d| d.strip_prefix(root).ok())
+            .map(slash_path)
+            .unwrap_or_default();
+        let unsafe_crate = UNSAFE_CRATES.contains(&rel.as_str())
+            && workspace_lints
+                .as_ref()
+                .is_some_and(|w| unsafe_lints_match(&manifest, w));
+        if !inherits && !unsafe_crate {
             v.push(format!(
                 "{name} ({}) does not inherit workspace lints",
                 p.manifest_path.display()
@@ -281,6 +303,31 @@ pub fn missing_lints(g: &Graph) -> Vec<String> {
         }
     }
     v
+}
+
+fn slash_path(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Whether `manifest`'s own `[lints]` table equals `workspace` (the value of
+/// `[workspace.lints]`) with `rust.unsafe_code` set to `deny`.
+pub fn unsafe_lints_match(manifest: &str, workspace: &toml::Value) -> bool {
+    let Some(own) = manifest
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("lints").cloned())
+    else {
+        return false;
+    };
+    let mut expected = workspace.clone();
+    let Some(rust) = expected.get_mut("rust").and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+    rust.insert("unsafe_code".into(), toml::Value::String("deny".into()));
+    own == expected
 }
 
 /// Lints that only test code may switch off (REQUIREMENTS §5.3).
@@ -296,8 +343,9 @@ pub const PROTECTED_LINTS: &[&str] = &[
 
 /// Crate directories, relative to the workspace root, that may allow
 /// `unsafe_code`. Each must also justify it in its README under
-/// [`UNSAFE_HEADING`] (REQUIREMENTS §5.3). Adding a crate here is a reviewed
-/// change to this file.
+/// [`UNSAFE_HEADING`] (REQUIREMENTS §5.3), and keep its lints equal to the
+/// workspace's apart from `unsafe_code = "deny"`. Adding a crate here is a
+/// reviewed change to this file.
 pub const UNSAFE_CRATES: &[&str] = &["crates/store"];
 
 /// The README heading that justifies a crate's `unsafe`.
@@ -314,27 +362,142 @@ pub fn unsafe_allowed(path: &Path, readme: impl Fn(&Path) -> Option<String>) -> 
     })
 }
 
-/// Source lines outside `tests/` directories that switch off a protected lint
-/// with `allow`, `expect` or `warn`, as `path:line: text`. With
-/// `unsafe_allowed`, switching off `unsafe_code` (and only that) is permitted.
-pub fn lint_overrides(path: &Path, source: &str, unsafe_allowed: bool) -> Vec<String> {
-    let in_tests_dir = path.components().any(|c| c.as_os_str() == "tests");
-    if in_tests_dir {
+/// Every attribute in `source` (`#[..]` or `#![..]`, possibly spread over
+/// several lines) as `(line, text)`, with all whitespace removed. Comments,
+/// string literals and character literals are skipped, so text that only
+/// mentions an attribute is not reported.
+pub fn attributes(source: &str) -> Vec<(usize, String)> {
+    let c: Vec<char> = source.chars().collect();
+    let n = c.len();
+    let (mut i, mut line, mut out) = (0, 1, Vec::new());
+    let at = |k: usize| c.get(k).copied().unwrap_or('\0');
+    while i < n {
+        let ch = c[i];
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+        } else if ch == '/' && at(i + 1) == '/' {
+            while i < n && c[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && at(i + 1) == '*' {
+            let mut depth = 0;
+            while i < n {
+                if c[i] == '/' && at(i + 1) == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if c[i] == '*' && at(i + 1) == '/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    line += usize::from(c[i] == '\n');
+                    i += 1;
+                }
+            }
+        } else if ch == 'r'
+            && (at(i + 1) == '"' || (at(i + 1) == '#' && matches!(at(i + 2), '"' | '#')))
+            && (i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '_'))
+        {
+            // Raw string: r"..", r#".."#, ...
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while at(j) == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            j += 1; // opening quote
+            while j < n {
+                if c[j] == '"' && (0..hashes).all(|h| at(j + 1 + h) == '#') {
+                    j += 1 + hashes;
+                    break;
+                }
+                line += usize::from(c[j] == '\n');
+                j += 1;
+            }
+            i = j;
+        } else if ch == '"' {
+            i += 1;
+            while i < n && c[i] != '"' {
+                if c[i] == '\\' {
+                    i += 1;
+                }
+                line += usize::from(at(i) == '\n');
+                i += 1;
+            }
+            i += 1;
+        } else if ch == '\'' && (at(i + 2) == '\'' || at(i + 1) == '\\') {
+            // Character literal ('x' or an escape); a lone ' is a lifetime.
+            i += 1;
+            while i < n && c[i] != '\'' {
+                if c[i] == '\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+        } else if ch == '#' {
+            let start = line;
+            let mut j = i + 1;
+            while j < n && (c[j].is_whitespace() || c[j] == '!') {
+                line += usize::from(c[j] == '\n');
+                j += 1;
+            }
+            if at(j) != '[' {
+                i = j;
+                continue;
+            }
+            let (mut depth, mut text) = (0i32, String::from("#"));
+            while j < n {
+                let d = c[j];
+                line += usize::from(d == '\n');
+                depth += match d {
+                    '[' => 1,
+                    ']' => -1,
+                    _ => 0,
+                };
+                if !d.is_whitespace() {
+                    text.push(d);
+                }
+                j += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            out.push((start, text));
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Attributes that switch off a protected lint with `allow`, `expect` or
+/// `warn` (including inside `cfg_attr`), as `path:line: text`. Test files are
+/// exempt. With `unsafe_allowed`, switching off `unsafe_code` (and only that)
+/// is permitted.
+pub fn lint_overrides(
+    path: &Path,
+    source: &str,
+    unsafe_allowed: bool,
+    test_file: bool,
+) -> Vec<String> {
+    if test_file {
         return Vec::new();
     }
-    source
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| {
-            let l = l.trim_start();
-            l.starts_with("#")
-                && ["allow(", "expect(", "warn("].iter().any(|a| l.contains(a))
+    attributes(source)
+        .into_iter()
+        .filter(|(_, a)| {
+            ["allow(", "expect(", "warn("].iter().any(|k| a.contains(k))
                 && PROTECTED_LINTS
                     .iter()
                     .filter(|lint| !(unsafe_allowed && **lint == "unsafe_code"))
-                    .any(|lint| l.contains(lint))
+                    .any(|lint| a.contains(lint))
         })
-        .map(|(i, l)| format!("{}:{}: {}", path.display(), i + 1, l.trim()))
+        .map(|(l, a)| format!("{}:{l}: {a}", path.display()))
         .collect()
 }
 
@@ -482,20 +645,73 @@ mod tests {
     #[test]
     fn lint_overrides_are_found_outside_tests_only() {
         let src = "#![allow(clippy::unwrap_used)]\nfn f() {}\n#[allow(dead_code)]\n#[expect(unsafe_code)]\n";
-        let found = lint_overrides(Path::new("crates/engine/src/lib.rs"), src, false);
+        let found = lint_overrides(Path::new("crates/engine/src/lib.rs"), src, false, false);
         assert_eq!(found.len(), 2, "{found:?}");
-        assert!(lint_overrides(Path::new("crates/engine/tests/it.rs"), src, false).is_empty());
+        assert!(
+            lint_overrides(Path::new("crates/engine/tests/it.rs"), src, false, true).is_empty()
+        );
     }
 
     #[test]
     fn unsafe_allowance_covers_unsafe_code_only() {
         let src = "#[allow(unsafe_code)]\n#[allow(unsafe_code, clippy::unwrap_used)]\n";
-        let found = lint_overrides(Path::new("crates/store/src/lib.rs"), src, true);
+        let found = lint_overrides(Path::new("crates/store/src/lib.rs"), src, true, false);
         assert_eq!(found.len(), 1, "unwrap_used is still caught: {found:?}");
         assert_eq!(
-            lint_overrides(Path::new("crates/store/src/lib.rs"), src, false).len(),
+            lint_overrides(Path::new("crates/store/src/lib.rs"), src, false, false).len(),
             2
         );
+    }
+
+    #[test]
+    fn overrides_are_found_however_the_attribute_is_written() {
+        let p = Path::new("crates/model/src/lib.rs");
+        for src in [
+            "#[allow(\n    unsafe_code\n)]\nfn f() {}",
+            "#[allow (unsafe_code)]",
+            "# ! [ allow ( clippy :: unwrap_used ) ]",
+            "#[cfg_attr(test, allow(clippy::panic))]",
+            "fn f() {}\n#[expect(\n  clippy::expect_used,\n  reason = \"x\"\n)]",
+        ] {
+            assert_eq!(lint_overrides(p, src, false, false).len(), 1, "{src:?}");
+        }
+        assert!(
+            lint_overrides(p, "#[allow(unsafe_code)]", true, false).is_empty(),
+            "allowed crates may allow unsafe_code"
+        );
+    }
+
+    #[test]
+    fn mentions_in_comments_and_strings_are_not_attributes() {
+        let src = concat!(
+            "// #[allow(unsafe_code)]\n",
+            "/* #[allow(clippy::panic)] /* nested */ */\n",
+            "let s = \"#[allow(clippy::todo)]\";\n",
+            "let r = r#\"#[allow(clippy::dbg_macro)]\"#;\n",
+            "let c = '#'; fn f<'a>(x: &'a u8) {}\n",
+            "#[allow(clippy::unwrap_used)]\n",
+        );
+        let found = lint_overrides(Path::new("x/src/lib.rs"), src, false, false);
+        assert_eq!(
+            found,
+            vec!["x/src/lib.rs:6: #[allow(clippy::unwrap_used)]".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_unsafe_crate_must_match_the_workspace_lints_apart_from_unsafe_code() {
+        let ws = toml::Value::Table(
+            "[rust]\nunsafe_code = \"forbid\"\nmissing_docs = \"warn\"\n[clippy]\nunwrap_used = \"deny\"\n"
+                .parse::<toml::Table>()
+                .unwrap(),
+        );
+        let good = "[package]\nname = \"s\"\n[lints.rust]\nunsafe_code = \"deny\"\nmissing_docs = \"warn\"\n[lints.clippy]\nunwrap_used = \"deny\"\n";
+        assert!(unsafe_lints_match(good, &ws));
+        let loosened = good.replace("unwrap_used = \"deny\"", "unwrap_used = \"allow\"");
+        assert!(!unsafe_lints_match(&loosened, &ws));
+        let allowed = good.replace("unsafe_code = \"deny\"", "unsafe_code = \"allow\"");
+        assert!(!unsafe_lints_match(&allowed, &ws));
+        assert!(!unsafe_lints_match("[package]\nname = \"s\"\n", &ws));
     }
 
     #[test]
