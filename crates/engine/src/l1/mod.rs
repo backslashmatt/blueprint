@@ -4,6 +4,7 @@
 //! callback, so the same code runs on a git tree, a directory or test
 //! fixtures. Nothing in the repository is ever executed (§5.5).
 
+pub mod bazel;
 pub mod cargo;
 pub mod dotnet;
 pub mod go;
@@ -38,6 +39,7 @@ pub fn analyse(
     diags.extend(go::analyse(paths, read, model));
     diags.extend(dotnet::analyse(paths, read, model));
     diags.extend(nx::analyse(paths, read, model));
+    diags.extend(bazel::analyse(paths, read, model));
     diags.sort();
     diags
 }
