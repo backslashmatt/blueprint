@@ -8,6 +8,7 @@ pub mod cargo;
 pub mod dotnet;
 pub mod go;
 pub mod npm;
+pub mod nx;
 pub mod path;
 
 use blueprint_model::RepoPath;
@@ -36,6 +37,7 @@ pub fn analyse(
     diags.extend(npm::analyse(paths, read, model));
     diags.extend(go::analyse(paths, read, model));
     diags.extend(dotnet::analyse(paths, read, model));
+    diags.extend(nx::analyse(paths, read, model));
     diags.sort();
     diags
 }

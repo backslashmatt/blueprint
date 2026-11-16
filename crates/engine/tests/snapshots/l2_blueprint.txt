@@ -25,6 +25,7 @@ nodes:
   L2:cargo:crates/engine#l1/dotnet  Module  "l1::dotnet"  Exact  crates/engine/src/l1/dotnet.rs  Public
   L2:cargo:crates/engine#l1/go  Module  "l1::go"  Exact  crates/engine/src/l1/go.rs  Public
   L2:cargo:crates/engine#l1/npm  Module  "l1::npm"  Exact  crates/engine/src/l1/npm.rs  Public
+  L2:cargo:crates/engine#l1/nx  Module  "l1::nx"  Exact  crates/engine/src/l1/nx.rs  Public
   L2:cargo:crates/engine#l1/path  Module  "l1::path"  Exact  crates/engine/src/l1/path.rs  Public
   L2:cargo:crates/engine#l1/path/tests  Module  "l1::path::tests"  Exact  crates/engine/src/l1/path.rs  Private
   L2:cargo:crates/engine#l2  Module  "l2"  Exact  crates/engine/src/l2/mod.rs  Public
