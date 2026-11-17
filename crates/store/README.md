@@ -57,6 +57,14 @@ A segment is named `v<format version>-<checksum>.seg`.
 ## Fuzzing
 
 `tests/store.rs` runs 20,000 deterministic mutations of valid segments on
-every CI run, along with exhaustive truncation and bit-flip tests. A
-`cargo-fuzz` target for the reader is in its own pull request, because
-`libfuzzer-sys` carries the NCSA licence, which needs the owner (#33).
+every CI run, along with exhaustive truncation and bit-flip tests.
+
+`fuzz/` holds a `cargo-fuzz` target for the reader. It needs nightly Rust, so
+it is excluded from the workspace:
+
+```sh
+cd crates/store/fuzz && cargo +nightly fuzz run segment
+```
+
+`libfuzzer-sys` carries the NCSA licence, which the owner allowed for
+developer tooling (#33). The target never reaches a shipped binary.
