@@ -337,3 +337,21 @@ fn a_commit_with_unreadable_files_is_reported_and_never_indexed() {
     let again = bp_with_cache(&["index", d], &cache);
     assert_eq!(again.status.code(), Some(1), "nothing was stored to find");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn peak_rss_is_reported_only_when_asked() {
+    let out = Command::new(env!("CARGO_BIN_EXE_bp"))
+        .arg("--version")
+        .env("BLUEPRINT_REPORT_PEAK_RSS", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let kb: u64 = err
+        .lines()
+        .find_map(|l| l.strip_prefix("peak_rss_kb: "))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no peak_rss_kb in {err:?}"));
+    assert!(kb > 0);
+    assert!(bp(&["--version"]).stderr.is_empty());
+}
