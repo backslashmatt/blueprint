@@ -194,7 +194,7 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    match command {
+    let code = match command {
         Command::Version => {
             println!("bp {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -210,6 +210,26 @@ fn main() -> ExitCode {
             level,
             json,
         } => model(&path, rev.as_deref(), level, json),
+    };
+    if std::env::var_os(PEAK_RSS_ENV).is_some() {
+        report_peak_rss();
+    }
+    code
+}
+
+/// When set, `bp` prints its peak resident memory to stderr as it exits, as
+/// `peak_rss_kb: <n>`. For bp-bench (#30); Linux only, as it reads `/proc`.
+const PEAK_RSS_ENV: &str = "BLUEPRINT_REPORT_PEAK_RSS";
+
+fn report_peak_rss() {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let peak = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().strip_suffix("kB"))
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    if let Some(kb) = peak {
+        eprintln!("peak_rss_kb: {kb}");
     }
 }
 

@@ -192,6 +192,120 @@ fn open_indexed(
     Ok(out)
 }
 
+/// `first_index` for each reference repository: `bp index` of the pinned
+/// commit into an empty cache, so every run analyses the whole commit. It
+/// is held to the §4 "L1–L2 on screen" budgets. Then one more run of
+/// `bp index` and of the reopen reports peak resident memory (Linux).
+fn first_index(
+    bp: &Path,
+    base_bp: Option<&Path>,
+    dest: &Path,
+    repos: &[RefRepo],
+    cache: &Path,
+) -> Result<Vec<Measurement>, Error> {
+    let mut out = Vec::new();
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let samples = if r.name == "large" { 3 } else { 7 };
+        let fresh = |bp: std::path::PathBuf, tag: &'static str| {
+            let mut n = 0u32;
+            let root = cache.join(&r.name).join(tag);
+            let dir = dir.clone();
+            let rev = r.commit.clone();
+            move || -> Result<(), Error> {
+                n += 1;
+                let c = root.join(n.to_string());
+                let out = Command::new(&bp)
+                    .arg("index")
+                    .arg(&dir)
+                    .args(["--rev", &rev])
+                    .env("BLUEPRINT_CACHE_DIR", &c)
+                    .stderr(std::process::Stdio::null())
+                    .output()?;
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if out.status.success()
+                    && stdout.contains(" indexed (")
+                    && !stdout.contains("already")
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "`{} index {}` did not index: {} {stdout}",
+                        bp.display(),
+                        dir.display(),
+                        out.status
+                    )
+                    .into())
+                }
+            }
+        };
+        let mut head = fresh(bp.to_path_buf(), "head");
+        let mut base = base_bp.map(|b| fresh(b.to_path_buf(), "base"));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "first_index".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: index_budget(&r.name),
+            samples,
+            note: Some(format!(
+                "`bp index <checkout> --rev <pinned>` into an empty cache, fastest of {samples}; warm OS cache"
+            )),
+            gated: true,
+        });
+
+        let peak_cache = cache.join(&r.name).join("peak");
+        for (name, args) in [
+            (
+                "peak_rss_first_index",
+                vec!["index", "--rev", r.commit.as_str()],
+            ),
+            (
+                "peak_rss_open_indexed",
+                vec!["model", "--rev", r.commit.as_str(), "--json"],
+            ),
+        ] {
+            let run = Command::new(bp)
+                .arg(args[0])
+                .arg(&dir)
+                .args(&args[1..])
+                .env("BLUEPRINT_CACHE_DIR", &peak_cache)
+                .env("BLUEPRINT_REPORT_PEAK_RSS", "1")
+                .stdout(std::process::Stdio::null())
+                .output()?;
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            let kb = stderr
+                .lines()
+                .find_map(|l| l.strip_prefix("peak_rss_kb: "))
+                .and_then(|v| v.trim().parse::<f64>().ok());
+            let Some(kb) = kb else {
+                // Not Linux, or a build without the report: nothing to say.
+                continue;
+            };
+            out.push(Measurement {
+                name: name.into(),
+                repo: Some(r.name.clone()),
+                value: kb / 1024.0,
+                base: None,
+                unit: "MB".into(),
+                budget: None,
+                samples: 1,
+                note: Some(format!("peak resident memory of `bp {}`, one run", args[0])),
+                gated: false,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Runs `bp index <dir> --rev <rev>` twice with its cache in `cache`, and
 /// checks that the second run found the first one's entry. That is the same
 /// lookup `bp model --rev` makes, so the timed reopen really reads the index.
@@ -328,7 +442,10 @@ fn measure(
     // cache. A base build without `bp index` is not compared.
     let cache = std::env::temp_dir().join(format!("bp-bench-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
-    let reopened = open_indexed(bp, base_bp, dest, repos, &cache);
+    let reopened = open_indexed(bp, base_bp, dest, repos, &cache).and_then(|mut m| {
+        m.extend(first_index(bp, base_bp, dest, repos, &cache.join("first"))?);
+        Ok(m)
+    });
     let _ = std::fs::remove_dir_all(&cache);
     out.extend(reopened?);
 
