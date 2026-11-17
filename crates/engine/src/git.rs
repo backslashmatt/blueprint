@@ -7,8 +7,7 @@ use std::fmt;
 use std::path::Path;
 
 use blueprint_model::Confidence;
-use gix::bstr::{BString, ByteSlice};
-use gix::objs::tree::EntryKind as GixKind;
+use gix::bstr::ByteSlice;
 
 pub use gix::ObjectId;
 
@@ -93,6 +92,16 @@ impl fmt::Display for GitError {
 
 impl std::error::Error for GitError {}
 
+/// The most entries [`Repo::tree`] reads, counting directories. Far above any
+/// real repository (rust-lang/rust has about 65,000 files), it stops a small
+/// repository whose trees share subtrees from expanding without limit.
+pub const MAX_TREE_ENTRIES: usize = 5_000_000;
+
+/// Whether git would accept `name` as a tree entry name (as `git fsck` does).
+fn valid_name(name: &[u8]) -> bool {
+    !name.is_empty() && name != b"." && name != b".." && !name.contains(&b'/') && !name.contains(&0)
+}
+
 fn read_err(e: impl fmt::Display) -> GitError {
     GitError::Read(e.to_string())
 }
@@ -140,38 +149,83 @@ impl Repo {
     }
 
     /// Lists every file, symlink and submodule in `commit`'s tree, sorted by path.
+    ///
+    /// Trees are read breadth first with an explicit queue, so deep nesting
+    /// cannot overflow the stack. An entry whose name git itself would reject
+    /// (empty, `.`, `..`, or containing `/` or NUL), or whose mode is not one
+    /// git writes, is an error rather than a guess. So is a tree with more than
+    /// [`MAX_TREE_ENTRIES`] entries, which bounds memory on hostile repositories
+    /// whose trees share subtrees.
     pub fn tree(&self, commit: ObjectId) -> Result<Vec<TreeEntry>, GitError> {
-        let tree = self
+        self.tree_limited(commit, MAX_TREE_ENTRIES)
+    }
+
+    /// [`Repo::tree`] with a different entry limit (counting directories).
+    pub fn tree_limited(&self, commit: ObjectId, limit: usize) -> Result<Vec<TreeEntry>, GitError> {
+        let root = self
             .inner
             .find_commit(commit)
             .map_err(read_err)?
-            .tree()
-            .map_err(read_err)?;
-        let mut rec = gix::traverse::tree::Recorder::default();
-        tree.traverse().breadthfirst(&mut rec).map_err(read_err)?;
-        let mut out: Vec<TreeEntry> = rec
-            .records
-            .into_iter()
-            .filter_map(|r| {
-                let kind = match r.mode.kind() {
-                    GixKind::Tree => return None,
-                    GixKind::Blob => EntryKind::Blob,
-                    GixKind::BlobExecutable => EntryKind::Executable,
-                    GixKind::Link => EntryKind::Symlink,
-                    GixKind::Commit => EntryKind::Submodule,
+            .tree_id()
+            .map_err(read_err)?
+            .detach();
+        let mut out = Vec::new();
+        let mut seen = 0usize;
+        let mut queue = std::collections::VecDeque::from([(Vec::<u8>::new(), root)]);
+        while let Some((prefix, id)) = queue.pop_front() {
+            let tree = self.inner.find_tree(id).map_err(read_err)?;
+            let decoded = tree.decode().map_err(read_err)?;
+            for entry in decoded.entries {
+                seen += 1;
+                if seen > limit {
+                    return Err(GitError::Read(format!(
+                        "tree of {commit} has more than {limit} entries"
+                    )));
+                }
+                let name: &[u8] = entry.filename;
+                if !valid_name(name) {
+                    return Err(GitError::Read(format!(
+                        "tree {id} has an invalid entry name {:?}",
+                        name.as_bstr()
+                    )));
+                }
+                let mut path = Vec::with_capacity(prefix.len() + 1 + name.len());
+                path.extend_from_slice(&prefix);
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(name);
+                let oid = entry.oid.to_owned();
+                let kind = match entry.mode.value() {
+                    0o40000 => {
+                        queue.push_back((path, oid));
+                        continue;
+                    }
+                    0o100644 | 0o100664 => EntryKind::Blob,
+                    0o100755 => EntryKind::Executable,
+                    0o120000 => EntryKind::Symlink,
+                    0o160000 => EntryKind::Submodule,
+                    mode => {
+                        return Err(GitError::Read(format!(
+                            "tree {id} has entry {:?} with unknown mode {mode:o}",
+                            name.as_bstr()
+                        )));
+                    }
                 };
-                Some(TreeEntry {
-                    path: BString::into(r.filepath),
-                    id: r.oid,
+                out.push(TreeEntry {
+                    path,
+                    id: oid,
                     kind,
-                })
-            })
-            .collect();
+                });
+            }
+        }
         out.sort_unstable();
         Ok(out)
     }
 
-    /// Reads a blob's bytes. For a symlink these are the link target.
+    /// Reads a blob's bytes exactly as stored: no filters, line-ending
+    /// conversion or LFS smudging are applied. For a symlink these are the
+    /// link target.
     pub fn blob(&self, id: ObjectId) -> Result<Vec<u8>, GitError> {
         let obj = self.inner.find_object(id).map_err(read_err)?;
         if obj.kind != gix::object::Kind::Blob {

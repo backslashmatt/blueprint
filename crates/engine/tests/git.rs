@@ -220,3 +220,87 @@ fn reads_blobs_and_refuses_other_objects() -> R<()> {
     );
     Ok(())
 }
+
+/// Writes a tree object byte for byte, so entries git would never write can
+/// be tested. Each entry is `(mode, name, id)`, in the order given.
+fn raw_tree(repo: &gix::Repository, entries: &[(&[u8], &[u8], ObjectId)]) -> R<ObjectId> {
+    use gix::prelude::Write;
+    let mut body = Vec::new();
+    for (mode, name, oid) in entries {
+        body.extend_from_slice(mode);
+        body.push(b' ');
+        body.extend_from_slice(name);
+        body.push(0);
+        body.extend_from_slice(oid.as_bytes());
+    }
+    Ok(repo.objects.write_buf(gix::objs::Kind::Tree, &body)?)
+}
+
+fn commit_tree(repo: &gix::Repository, tree: ObjectId) -> R<ObjectId> {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let r = format!("refs/heads/t{}", N.fetch_add(1, Ordering::Relaxed));
+    Ok(repo
+        .commit_as(sig(), sig(), r.as_str(), "m", tree, None::<ObjectId>)?
+        .detach())
+}
+
+fn read_error(r: Result<Vec<blueprint_engine::git::TreeEntry>, GitError>) -> String {
+    match r {
+        Err(GitError::Read(e)) => e,
+        other => panic!("expected a read error, got {other:?}"),
+    }
+}
+
+#[test]
+fn names_git_would_reject_are_errors_not_wrong_paths() -> R<()> {
+    let dir = fresh_dir("names");
+    let repo = gix::init_bare(&dir)?;
+    let blob = repo.write_blob(b"x")?.detach();
+    let sub = tree(&repo, vec![(b"b", K::Blob, blob)])?;
+    let r = Repo::open(&dir)?;
+    for bad in [&b""[..], b".", b"..", b"a/b"] {
+        let t = raw_tree(&repo, &[(b"100644", bad, blob), (b"40000", b"a", sub)])?;
+        let e = read_error(r.tree(commit_tree(&repo, t)?));
+        assert!(e.contains("invalid entry name"), "{bad:?}: {e}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unknown_modes_are_errors_not_submodules() -> R<()> {
+    let dir = fresh_dir("modes");
+    let repo = gix::init_bare(&dir)?;
+    let blob = repo.write_blob(b"x")?.detach();
+    let r = Repo::open(&dir)?;
+    for mode in [&b"100"[..], b"100600", b"170000"] {
+        let t = raw_tree(&repo, &[(mode, b"f", blob)])?;
+        let e = read_error(r.tree(commit_tree(&repo, t)?));
+        assert!(e.contains("unknown mode"), "{mode:?}: {e}");
+    }
+    // The legacy group-writable mode and the zero-padded tree mode still read.
+    let sub = raw_tree(&repo, &[(b"100664", b"g", blob)])?;
+    let t = raw_tree(&repo, &[(b"040000", b"d", sub)])?;
+    let got = r.tree(commit_tree(&repo, t)?)?;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].path, b"d/g");
+    assert_eq!(got[0].kind, EntryKind::Blob);
+    Ok(())
+}
+
+#[test]
+fn shared_subtrees_cannot_expand_without_limit() -> R<()> {
+    let dir = fresh_dir("bomb");
+    let repo = gix::init_bare(&dir)?;
+    let blob = repo.write_blob(b"x")?.detach();
+    // 12 levels of {a: T, b: T}: 14 objects, 2^12 files, 2^13 - 2 + 2^12 entries.
+    let mut t = tree(&repo, vec![(b"f", K::Blob, blob)])?;
+    for _ in 0..12 {
+        t = tree(&repo, vec![(b"a", K::Tree, t), (b"b", K::Tree, t)])?;
+    }
+    let c = commit_tree(&repo, t)?;
+    let r = Repo::open(&dir)?;
+    assert_eq!(r.tree(c)?.len(), 4096);
+    let e = read_error(r.tree_limited(c, 1000));
+    assert!(e.contains("more than 1000 entries"), "{e}");
+    Ok(())
+}
