@@ -148,6 +148,17 @@ impl Repo {
         Ok(commit.id)
     }
 
+    /// The id of `commit`'s root tree: a hash of every file in the commit.
+    pub fn tree_id(&self, commit: ObjectId) -> Result<ObjectId, GitError> {
+        Ok(self
+            .inner
+            .find_commit(commit)
+            .map_err(read_err)?
+            .tree_id()
+            .map_err(read_err)?
+            .detach())
+    }
+
     /// Lists every file, symlink and submodule in `commit`'s tree, sorted by path.
     ///
     /// Trees are read breadth first with an explicit queue, so deep nesting

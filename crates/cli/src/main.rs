@@ -1,9 +1,12 @@
 //! `bp`: the headless Blueprint front end. Everything the app can show, this
 //! CLI can print (REQUIREMENTS §5.3). See docs/cli.md.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use blueprint_engine::git::{ObjectId, Repo};
+use blueprint_engine::index::{Index, Indexed};
+use blueprint_engine::l1::Diagnostic;
 use blueprint_engine::source::{Commit, Directory};
 use blueprint_model::{Level, Model};
 
@@ -14,13 +17,17 @@ const EXIT_USAGE: u8 = 2;
 
 const USAGE: &str = "\
 usage: bp model <dir> [--rev <rev>] [--level 1|2] [--json]
+       bp index <repo> [--rev <rev>]
        bp --version
        bp --help
 
 commands:
   model <dir>   Print the architecture model of a directory (L1 systems, L2 modules)
 
-options for model:
+  index <repo>  Analyse a commit (default HEAD) and store its model in the
+                index, so that `bp model --rev` reopens it without analysing
+
+options for model and index:
   --rev <rev>   Read the commit <rev> of the git repository at <dir> instead of
                 its working tree (a branch, tag, commit id or HEAD)
   --level 1|2   The deepest level to include (default 2)
@@ -35,6 +42,10 @@ enum Depth {
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Version,
+    Index {
+        path: PathBuf,
+        rev: String,
+    },
     Help,
     Model {
         path: PathBuf,
@@ -87,6 +98,29 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 rev,
                 level,
                 json,
+            })
+        }
+        "index" => {
+            let (mut path, mut rev) = (None, None);
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--rev" => match it.next() {
+                        Some(r) if !r.is_empty() && !r.starts_with('-') => rev = Some(r.clone()),
+                        _ => return Err("--rev needs a revision, such as HEAD".into()),
+                    },
+                    "--help" | "-h" => return Ok(Command::Help),
+                    flag if flag.starts_with('-') && flag != "-" => {
+                        return Err(format!("unknown option `{flag}`"));
+                    }
+                    p if path.is_none() => path = Some(PathBuf::from(p)),
+                    extra => return Err(format!("unexpected argument `{extra}`")),
+                }
+            }
+            let path = path.ok_or("index needs a repository")?;
+            Ok(Command::Index {
+                path,
+                rev: rev.unwrap_or_else(|| "HEAD".into()),
             })
         }
         other => Err(format!("unknown command `{other}`")),
@@ -166,6 +200,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
+        Command::Index { path, rev } => index(&path, &rev),
         Command::Model {
             path,
             rev,
@@ -175,7 +210,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn model(path: &std::path::Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
+fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
     let (model, diags) = match rev {
         None => match Directory::open(path) {
             Ok((dir, mut diags)) => {
@@ -188,11 +223,10 @@ fn model(path: &std::path::Path, rev: Option<&str>, level: Depth, json: bool) ->
                 return ExitCode::from(EXIT_FAILURE);
             }
         },
-        Some(rev) => match Commit::open(path, rev) {
-            Ok((commit, mut diags)) => {
-                let (model, more) = blueprint_engine::analyse(&commit.paths(), &|p| commit.read(p));
-                diags.extend(more);
-                (model, diags)
+        Some(rev) => match at_rev(path, rev, false) {
+            Ok(r) => {
+                let diags = r.indexed.diagnostics();
+                (r.indexed.model, diags)
             }
             Err(e) => {
                 eprintln!("bp: {}: {e}", path.display());
@@ -213,14 +247,91 @@ fn model(path: &std::path::Path, rev: Option<&str>, level: Depth, json: bool) ->
         text(&model)
     };
     print!("{out}");
-    for d in &diags {
+    warn(&diags);
+    ExitCode::SUCCESS
+}
+
+fn warn(diags: &[Diagnostic]) {
+    for d in diags {
         eprintln!(
             "warning: {}: {}",
             d.path,
             d.message.lines().next().unwrap_or("")
         );
     }
-    ExitCode::SUCCESS
+}
+
+/// The model of a commit, and where it came from.
+struct AtRev {
+    commit: ObjectId,
+    indexed: Indexed,
+    /// Whether it was read from the index rather than analysed.
+    from_index: bool,
+}
+
+/// The model of `rev` in the repository at `path`: from the index if it holds
+/// the commit's tree, otherwise analysed, and then stored if `store` is set.
+/// An index that cannot be opened is a warning, not a failure, unless it has
+/// to be written.
+fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
+    let repo = Repo::open(path).map_err(|e| e.to_string())?;
+    let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
+    let tree = repo.tree_id(commit).map_err(|e| e.to_string())?;
+    let index = match Index::open(path) {
+        Ok(index) => {
+            for d in index.dropped() {
+                eprintln!("warning: index segment dropped and will be rebuilt: {d}");
+            }
+            Some(index)
+        }
+        Err(e) if store => return Err(format!("cannot open the index: {e}")),
+        Err(e) => {
+            eprintln!("warning: cannot open the index, analysing instead: {e}");
+            None
+        }
+    };
+    if let Some(indexed) = index.as_ref().and_then(|i| i.get(tree)) {
+        return Ok(AtRev {
+            commit,
+            indexed,
+            from_index: true,
+        });
+    }
+    let commit_id = commit.to_string();
+    let (source, mut diags) = Commit::open(path, &commit_id).map_err(|e| e.to_string())?;
+    let (model, more) = blueprint_engine::analyse(&source.paths(), &|p| source.read(p));
+    diags.extend(more);
+    diags.sort();
+    let indexed = Indexed::new(model, &diags);
+    if store && let Some(mut index) = index {
+        index
+            .put(tree, &indexed)
+            .map_err(|e| format!("cannot write the index: {e}"))?;
+    }
+    Ok(AtRev {
+        commit,
+        indexed,
+        from_index: false,
+    })
+}
+
+fn index(path: &Path, rev: &str) -> ExitCode {
+    match at_rev(path, rev, true) {
+        Ok(r) => {
+            let nodes = r.indexed.model.nodes().count();
+            if r.from_index {
+                println!("{} already indexed ({nodes} nodes)", r.commit);
+            } else {
+                warn(&r.indexed.diagnostics());
+                println!("{} indexed ({nodes} nodes)", r.commit);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("bp: {}: {e}", path.display());
+            ExitCode::from(EXIT_FAILURE)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +347,20 @@ mod tests {
         assert_eq!(parse(&args(&[])), Ok(Command::Help));
         assert_eq!(parse(&args(&["-V"])), Ok(Command::Version));
         assert_eq!(parse(&args(&["help"])), Ok(Command::Help));
+        assert_eq!(
+            parse(&args(&["index", "r"])),
+            Ok(Command::Index {
+                path: "r".into(),
+                rev: "HEAD".into()
+            })
+        );
+        assert_eq!(
+            parse(&args(&["index", "--rev", "v1", "r"])),
+            Ok(Command::Index {
+                path: "r".into(),
+                rev: "v1".into()
+            })
+        );
         assert_eq!(
             parse(&args(&["model", "d", "--level", "1", "--json"])),
             Ok(Command::Model {
@@ -271,6 +396,10 @@ mod tests {
             &["model", "d", "--rev"],
             &["model", "d", "--rev", ""],
             &["model", "d", "--rev", "--json"],
+            &["index"],
+            &["index", "d", "e"],
+            &["index", "d", "--rev"],
+            &["index", "d", "--level", "1"],
             &["model", "d", "--x"],
             &["nope"],
             &["--version", "x"],
