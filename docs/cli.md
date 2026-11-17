@@ -10,7 +10,7 @@
 | `bp model <dir> --json` | Prints it as JSON, in the form described in [model-json.md](model-json.md) |
 | `bp model <dir> --level 1` | Prints L1 systems and their edges only (`--level 2`, the default, adds L2 modules) |
 | `bp --version`, `bp -V` | Prints `bp <version>` |
-| `bp --help`, `bp help <command>` | Prints usage |
+| `bp --help`, `bp -h`, `bp help`, `bp` | Prints usage |
 
 `bp model` reads the files under `<dir>` and runs every analyser. It never runs anything from the directory (§5.5), never follows symbolic links, and skips `.git`, `.hg`, `.svn`, `target` and `node_modules`.
 

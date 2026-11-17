@@ -15,7 +15,6 @@ path = "src/main.rs"
 blueprint-engine.workspace = true
 blueprint-model.workspace = true
 blueprint-protocol.workspace = true
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 serde_json = "1"
 
 [lints]

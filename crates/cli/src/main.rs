@@ -6,43 +6,79 @@ use std::process::ExitCode;
 
 use blueprint_engine::source::Directory;
 use blueprint_model::{Level, Model};
-use clap::{Parser, Subcommand, ValueEnum};
 
 /// Exit code for a command that ran but could not do its job.
 const EXIT_FAILURE: u8 = 1;
+/// Exit code for a usage error.
+const EXIT_USAGE: u8 = 2;
 
-#[derive(Parser)]
-#[command(
-    name = "bp",
-    version,
-    about = "Blueprint: review code changes as architecture changes"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
+const USAGE: &str = "\
+usage: bp model <dir> [--level 1|2] [--json]
+       bp --version
+       bp --help
+
+commands:
+  model <dir>   Print the architecture model of a directory (L1 systems, L2 modules)
+
+options for model:
+  --level 1|2   The deepest level to include (default 2)
+  --json        Print the model as JSON (docs/model-json.md) instead of text";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    L1,
+    L2,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, PartialEq, Eq)]
 enum Command {
-    /// Print the architecture model of a directory (its L1 systems and L2 modules).
+    Version,
+    Help,
     Model {
-        /// The directory to analyse, usually a repository's working tree.
         path: PathBuf,
-        /// The deepest level to include.
-        #[arg(long, value_enum, default_value_t = Depth::L2)]
         level: Depth,
-        /// Print the model as JSON (docs/model-json.md) instead of text.
-        #[arg(long)]
         json: bool,
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Depth {
-    #[value(name = "1")]
-    L1,
-    #[value(name = "2")]
-    L2,
+/// Parses the arguments after the program name. Hand-written rather than a
+/// parser crate: `bp` start-up is benchmarked (`cli_process_start`), and the
+/// surface is small.
+fn parse(args: &[String]) -> Result<Command, String> {
+    let (first, rest) = match args.split_first() {
+        None => return Ok(Command::Help),
+        Some(split) => split,
+    };
+    match first.as_str() {
+        "--version" | "-V" if rest.is_empty() => Ok(Command::Version),
+        "--help" | "-h" | "help" if rest.is_empty() || first == "help" => Ok(Command::Help),
+        "model" => {
+            let (mut path, mut level, mut json) = (None, Depth::L2, false);
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    "--level" => {
+                        level = match it.next().map(String::as_str) {
+                            Some("1") => Depth::L1,
+                            Some("2") => Depth::L2,
+                            Some(v) => return Err(format!("--level takes 1 or 2, not `{v}`")),
+                            None => return Err("--level needs a value: 1 or 2".into()),
+                        }
+                    }
+                    "--help" | "-h" => return Ok(Command::Help),
+                    flag if flag.starts_with('-') && flag != "-" => {
+                        return Err(format!("unknown option `{flag}`"));
+                    }
+                    p if path.is_none() => path = Some(PathBuf::from(p)),
+                    extra => return Err(format!("unexpected argument `{extra}`")),
+                }
+            }
+            let path = path.ok_or("model needs a directory")?;
+            Ok(Command::Model { path, level, json })
+        }
+        other => Err(format!("unknown command `{other}`")),
+    }
 }
 
 /// The nodes up to `depth` and the edges between them.
@@ -101,40 +137,99 @@ fn text(model: &Model) -> String {
 }
 
 fn main() -> ExitCode {
-    // clap prints usage errors itself and exits with code 2.
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Model { path, level, json } => {
-            let (dir, mut diags) = match Directory::open(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("bp: cannot read {}: {e}", path.display());
-                    return ExitCode::from(EXIT_FAILURE);
-                }
-            };
-            let (model, more) = blueprint_engine::analyse(dir.paths(), &|p| dir.read(p));
-            diags.extend(more);
-            let model = up_to(&model, level);
-            let out = if json {
-                match serde_json::to_string_pretty(&model) {
-                    Ok(s) => s + "\n",
-                    Err(e) => {
-                        eprintln!("bp: cannot serialise the model: {e}");
-                        return ExitCode::from(EXIT_FAILURE);
-                    }
-                }
-            } else {
-                text(&model)
-            };
-            print!("{out}");
-            for d in &diags {
-                eprintln!(
-                    "warning: {}: {}",
-                    d.path,
-                    d.message.lines().next().unwrap_or("")
-                );
-            }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = match parse(&args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("bp: {e}\n{USAGE}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    match command {
+        Command::Version => {
+            println!("bp {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
+        }
+        Command::Help => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Command::Model { path, level, json } => model(&path, level, json),
+    }
+}
+
+fn model(path: &std::path::Path, level: Depth, json: bool) -> ExitCode {
+    let (dir, mut diags) = match Directory::open(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("bp: cannot read {}: {e}", path.display());
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    let (model, more) = blueprint_engine::analyse(dir.paths(), &|p| dir.read(p));
+    diags.extend(more);
+    let model = up_to(&model, level);
+    let out = if json {
+        match serde_json::to_string_pretty(&model) {
+            Ok(s) => s + "\n",
+            Err(e) => {
+                eprintln!("bp: cannot serialise the model: {e}");
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        }
+    } else {
+        text(&model)
+    };
+    print!("{out}");
+    for d in &diags {
+        eprintln!(
+            "warning: {}: {}",
+            d.path,
+            d.message.lines().next().unwrap_or("")
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_every_form() {
+        assert_eq!(parse(&args(&[])), Ok(Command::Help));
+        assert_eq!(parse(&args(&["-V"])), Ok(Command::Version));
+        assert_eq!(parse(&args(&["help"])), Ok(Command::Help));
+        assert_eq!(
+            parse(&args(&["model", "d", "--level", "1", "--json"])),
+            Ok(Command::Model {
+                path: "d".into(),
+                level: Depth::L1,
+                json: true
+            })
+        );
+        assert_eq!(
+            parse(&args(&["model", "--json", "d"])),
+            Ok(Command::Model {
+                path: "d".into(),
+                level: Depth::L2,
+                json: true
+            })
+        );
+        for bad in [
+            &["model"][..],
+            &["model", "d", "e"],
+            &["model", "d", "--level"],
+            &["model", "d", "--level", "3"],
+            &["model", "d", "--x"],
+            &["nope"],
+            &["--version", "x"],
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
     }
 }
