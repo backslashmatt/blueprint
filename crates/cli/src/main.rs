@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use blueprint_engine::source::Directory;
+use blueprint_engine::source::{Commit, Directory};
 use blueprint_model::{Level, Model};
 
 /// Exit code for a command that ran but could not do its job.
@@ -13,7 +13,7 @@ const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
 const USAGE: &str = "\
-usage: bp model <dir> [--level 1|2] [--json]
+usage: bp model <dir> [--rev <rev>] [--level 1|2] [--json]
        bp --version
        bp --help
 
@@ -21,6 +21,8 @@ commands:
   model <dir>   Print the architecture model of a directory (L1 systems, L2 modules)
 
 options for model:
+  --rev <rev>   Read the commit <rev> of the git repository at <dir> instead of
+                its working tree (a branch, tag, commit id or HEAD)
   --level 1|2   The deepest level to include (default 2)
   --json        Print the model as JSON (docs/model-json.md) instead of text";
 
@@ -36,6 +38,7 @@ enum Command {
     Help,
     Model {
         path: PathBuf,
+        rev: Option<String>,
         level: Depth,
         json: bool,
     },
@@ -53,11 +56,15 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "--version" | "-V" if rest.is_empty() => Ok(Command::Version),
         "--help" | "-h" | "help" if rest.is_empty() || first == "help" => Ok(Command::Help),
         "model" => {
-            let (mut path, mut level, mut json) = (None, Depth::L2, false);
+            let (mut path, mut rev, mut level, mut json) = (None, None, Depth::L2, false);
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
+                    "--rev" => match it.next() {
+                        Some(r) if !r.is_empty() && !r.starts_with('-') => rev = Some(r.clone()),
+                        _ => return Err("--rev needs a revision, such as HEAD".into()),
+                    },
                     "--level" => {
                         level = match it.next().map(String::as_str) {
                             Some("1") => Depth::L1,
@@ -75,7 +82,12 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 }
             }
             let path = path.ok_or("model needs a directory")?;
-            Ok(Command::Model { path, level, json })
+            Ok(Command::Model {
+                path,
+                rev,
+                level,
+                json,
+            })
         }
         other => Err(format!("unknown command `{other}`")),
     }
@@ -154,20 +166,40 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Command::Model { path, level, json } => model(&path, level, json),
+        Command::Model {
+            path,
+            rev,
+            level,
+            json,
+        } => model(&path, rev.as_deref(), level, json),
     }
 }
 
-fn model(path: &std::path::Path, level: Depth, json: bool) -> ExitCode {
-    let (dir, mut diags) = match Directory::open(path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("bp: cannot read {}: {e}", path.display());
-            return ExitCode::from(EXIT_FAILURE);
-        }
+fn model(path: &std::path::Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
+    let (model, diags) = match rev {
+        None => match Directory::open(path) {
+            Ok((dir, mut diags)) => {
+                let (model, more) = blueprint_engine::analyse(dir.paths(), &|p| dir.read(p));
+                diags.extend(more);
+                (model, diags)
+            }
+            Err(e) => {
+                eprintln!("bp: cannot read {}: {e}", path.display());
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        },
+        Some(rev) => match Commit::open(path, rev) {
+            Ok((commit, mut diags)) => {
+                let (model, more) = blueprint_engine::analyse(&commit.paths(), &|p| commit.read(p));
+                diags.extend(more);
+                (model, diags)
+            }
+            Err(e) => {
+                eprintln!("bp: {}: {e}", path.display());
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        },
     };
-    let (model, more) = blueprint_engine::analyse(dir.paths(), &|p| dir.read(p));
-    diags.extend(more);
     let model = up_to(&model, level);
     let out = if json {
         match serde_json::to_string_pretty(&model) {
@@ -208,14 +240,25 @@ mod tests {
             parse(&args(&["model", "d", "--level", "1", "--json"])),
             Ok(Command::Model {
                 path: "d".into(),
+                rev: None,
                 level: Depth::L1,
                 json: true
+            })
+        );
+        assert_eq!(
+            parse(&args(&["model", "d", "--rev", "main~2"])),
+            Ok(Command::Model {
+                path: "d".into(),
+                rev: Some("main~2".into()),
+                level: Depth::L2,
+                json: false
             })
         );
         assert_eq!(
             parse(&args(&["model", "--json", "d"])),
             Ok(Command::Model {
                 path: "d".into(),
+                rev: None,
                 level: Depth::L2,
                 json: true
             })
@@ -225,6 +268,9 @@ mod tests {
             &["model", "d", "e"],
             &["model", "d", "--level"],
             &["model", "d", "--level", "3"],
+            &["model", "d", "--rev"],
+            &["model", "d", "--rev", ""],
+            &["model", "d", "--rev", "--json"],
             &["model", "d", "--x"],
             &["nope"],
             &["--version", "x"],

@@ -304,3 +304,34 @@ fn shared_subtrees_cannot_expand_without_limit() -> R<()> {
     assert!(e.contains("more than 1000 entries"), "{e}");
     Ok(())
 }
+
+#[test]
+fn commit_source_reads_files_and_reports_what_it_skips() -> R<()> {
+    use blueprint_engine::source::Commit;
+    let f = fixture()?;
+    let (commit, diags) = Commit::open(&f.dir, "main")?;
+    assert_eq!(commit.id(), f.second);
+    let paths: Vec<String> = commit.paths().iter().map(ToString::to_string).collect();
+    // The symlink is not followed; the submodule and the non-UTF-8 name are
+    // reported instead of read.
+    assert_eq!(paths, ["README.md", "crates/src/lib.rs", "run.sh"]);
+    let messages: Vec<String> = diags
+        .iter()
+        .map(|d| format!("{}: {}", d.path, d.message))
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages.iter().any(|m| m.contains("not UTF-8")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.starts_with("vendor: submodule")),
+        "{messages:?}"
+    );
+    let lib = commit.paths()[1].clone();
+    assert_eq!(commit.read(&lib).as_deref(), Some(&b"pub fn f() {}\n"[..]));
+    let missing = blueprint_model::RepoPath::parse("nope.rs")?;
+    assert_eq!(commit.read(&missing), None);
+    assert!(Commit::open(&f.dir, "no-such-branch").is_err());
+    Ok(())
+}

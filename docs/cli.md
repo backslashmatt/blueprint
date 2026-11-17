@@ -9,12 +9,15 @@
 | `bp model <dir>` | Prints the L1–L2 model of a directory as text |
 | `bp model <dir> --json` | Prints it as JSON, in the form described in [model-json.md](model-json.md) |
 | `bp model <dir> --level 1` | Prints L1 systems and their edges only (`--level 2`, the default, adds L2 modules) |
+| `bp model <dir> --rev <rev>` | Prints the model of commit `<rev>` of the git repository at `<dir>`, not of its working tree. `<rev>` is a branch, tag, full or abbreviated commit id, `HEAD`, or any rev-parse expression such as `main~2` |
 | `bp --version`, `bp -V` | Prints `bp <version>` |
 | `bp --help`, `bp -h`, `bp help`, `bp` | Prints usage |
 
 `bp model` reads the files under `<dir>` and runs every analyser. It never runs anything from the directory (§5.5), never follows symbolic links, and skips `.git`, `.hg`, `.svn`, `target` and `node_modules`.
 
-Reading a commit (`--rev`) and persisting the index (`bp index`) need git access, which arrives with #24. Diffs (`bp diff`) arrive in M2.
+With `--rev`, `bp model` reads the commit's files from git's object database through `gix`. It never checks anything out, never runs the `git` binary, hooks or filters, and ignores the working tree. Every file in the commit is read, including any committed `target/` or `node_modules/`. Symbolic links are not followed. Submodules, and paths that are not UTF-8, are reported as warnings.
+
+Persisting the index (`bp index`) is next. Diffs (`bp diff`) arrive in M2.
 
 ## Output
 
@@ -27,5 +30,5 @@ Reading a commit (`--rev`) and persisting the index (`bp index`) need git access
 | Code | Meaning |
 |---|---|
 | 0 | Success, possibly with warnings |
-| 1 | The command could not do its job, for example `<dir>` cannot be read |
+| 1 | The command could not do its job, for example `<dir>` cannot be read, is not a git repository, or `<rev>` does not name a commit |
 | 2 | Usage error: an unknown command, option or value |
