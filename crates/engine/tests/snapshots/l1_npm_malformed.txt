@@ -1,0 +1,11 @@
+nodes:
+  L1:npm:app#  System  "app"  Exact  app/package.json
+  L1:npm:array#  System  "array"  Unknown  array/package.json
+  L1:npm:broken#  System  "broken"  Unknown  broken/package.json
+  L1:npm:lib#  System  "lib"  Exact  lib/package.json
+  L1:npm:lib2#  System  "lib2"  Exact  lib2/package.json
+edges:
+diagnostics:
+  app/package.json: `missing` uses workspace: but no single workspace package is named `missing`
+  array/package.json: is not a JSON object
+  broken/package.json: EOF while parsing a value at line 1 column 20

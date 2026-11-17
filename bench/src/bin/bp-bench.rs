@@ -19,6 +19,7 @@ use blueprint_bench::measure::{Error, best_ms, confirm, parse_opts};
 use blueprint_bench::report::{Measurement, Report, SCHEMA, failures, markdown};
 use blueprint_bench::repos::{self, RefRepo};
 use blueprint_engine::git::Repo;
+use blueprint_store::{KEY_LEN, Key, SegmentWriter, Store};
 
 const USAGE: &str = "usage: bp-bench fetch [--manifest F] [--dest D]\n       bp-bench run [--manifest F] [--dest D] --bp PATH --out F [--base-bp PATH] [--base-commit SHA] [--commit SHA] [--summary F]";
 
@@ -124,6 +125,39 @@ fn spawn_version(bp: &Path) -> impl FnMut() -> Result<(), Error> + '_ {
     }
 }
 
+/// Runs `bp model <dir> --json`, discarding the output: the whole L1–L2
+/// analysis of a checkout, as the CLI and app run it.
+fn spawn_model<'a>(bp: &'a Path, dir: &'a Path) -> impl FnMut() -> Result<(), Error> + 'a {
+    move || {
+        let status = Command::new(bp)
+            .arg("model")
+            .arg(dir)
+            .arg("--json")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{} model {}` failed: {status}",
+                bp.display(),
+                dir.display()
+            )
+            .into())
+        }
+    }
+}
+
+/// The §4 budget the L1–L2 model of each reference repository is held to.
+fn index_budget(repo: &str) -> Option<String> {
+    match repo {
+        "medium" => Some("index_medium_l2".into()),
+        "large" => Some("index_large_l2".into()),
+        _ => None,
+    }
+}
+
 fn measure(
     bp: &Path,
     base_bp: Option<&Path>,
@@ -157,6 +191,39 @@ fn measure(
         )),
         gated: true,
     });
+
+    out.push(store_reopen()?);
+
+    // L1–L2 of each reference checkout through `bp model` (#30). Read from
+    // the working tree until commits can be read (#24); the budget is the
+    // §4 "L1–L2 on screen" one. Fewer samples on the large repository,
+    // whose runs take long enough that timer noise is negligible.
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let samples = if r.name == "large" { 3 } else { 7 };
+        let mut head = spawn_model(bp, &dir);
+        let mut base = base_bp.map(|b| spawn_model(b, &dir));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "index_l1_l2".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: index_budget(&r.name),
+            samples,
+            note: Some(format!(
+                "`bp model <checkout> --json`, fastest of {samples}; warm cache, read from the working tree"
+            )),
+            gated: true,
+        });
+    }
 
     for r in repos {
         let dir = repos::checkout_dir(dest, r);
@@ -210,4 +277,67 @@ fn measure(
         });
     }
     Ok(out)
+}
+
+/// Entries in the synthetic store: one per file of the large reference
+/// repository.
+const STORE_ENTRIES: u32 = 64_465;
+
+/// Reopening the persisted index (#28): open a store directory holding one
+/// segment, validate it, and look up every key. This is the storage part of
+/// the 200 ms reopen budget; the budget itself needs the L1–L2 model on top.
+fn store_reopen() -> Result<Measurement, Error> {
+    let dir = std::env::temp_dir().join(format!("bp-bench-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let result = store_reopen_in(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn store_reopen_in(dir: &Path) -> Result<Measurement, Error> {
+    let key = |i: u32| {
+        let mut k = [0u8; KEY_LEN];
+        k[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+        k[4..8].copy_from_slice(&i.to_be_bytes());
+        Key(k)
+    };
+    let mut w = SegmentWriter::new();
+    for i in 0..STORE_ENTRIES {
+        // About 200 bytes per entry: the size of a small analysis summary.
+        w.insert(key(i), vec![(i % 251) as u8; 150 + (i % 100) as usize]);
+    }
+    let mut store = Store::open(dir)?;
+    store.add(&w)?;
+    drop(store);
+    let bytes: u64 = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok()?.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+    let samples = 11;
+    let mut found = 0;
+    let mut reopen = || -> Result<(), Error> {
+        let store = Store::open(dir)?;
+        found = (0..STORE_ENTRIES)
+            .filter(|i| store.get(&key(*i)).is_some())
+            .count();
+        Ok(())
+    };
+    let (value, _) = best_ms(samples, 1, &mut reopen, None)?;
+    if found != STORE_ENTRIES as usize {
+        return Err(format!("store_reopen found {found} of {STORE_ENTRIES} keys").into());
+    }
+    Ok(Measurement {
+        name: "store_reopen".into(),
+        repo: None,
+        value,
+        base: None,
+        unit: "ms".into(),
+        budget: None,
+        samples,
+        note: Some(format!(
+            "warm cache; open and checksum a {} MB segment, then look up all {STORE_ENTRIES} keys; storage share of the 200 ms reopen budget",
+            bytes / 1_000_000
+        )),
+        gated: false,
+    })
 }

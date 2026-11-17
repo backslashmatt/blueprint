@@ -1,0 +1,13 @@
+nodes:
+  L1:dotnet:src/App#  System  "App"  Exact  src/App/App.csproj
+  L1:dotnet:src/Core#  System  "Core"  Exact  src/Core/Core.csproj
+  L1:dotnet:src/Data#  System  "Data"  Exact  src/Data/Data.fsproj
+  L1:dotnet:src/Old#  System  "Old"  Exact  src/Old/Old.csproj
+  L1:dotnet:src/Shared#  System  "Shared"  Exact  src/Shared/Shared.csproj
+  L1:dotnet:src/Ui#  System  "Ui"  Exact  src/Ui/Ui.vbproj
+edges:
+  L1:dotnet:src/App# -> L1:dotnet:src/Core#  DependsOn  Exact  {Normal}
+  L1:dotnet:src/App# -> L1:dotnet:src/Data#  DependsOn  Exact  {Normal}
+  L1:dotnet:src/App# -> L1:dotnet:src/Shared#  DependsOn  Inferred  {Normal}
+  L1:dotnet:src/App# -> L1:dotnet:src/Ui#  DependsOn  Exact  {Normal}
+diagnostics:

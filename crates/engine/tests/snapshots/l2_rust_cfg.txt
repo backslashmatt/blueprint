@@ -1,0 +1,14 @@
+nodes:
+  L1:cargo:#  System  "k"  Exact  Cargo.toml
+  L2:cargo:#imp  Module  "imp"  Exact  src/lib.rs  Private
+  L2:cargo:#imp/a  Module  "imp::a"  Exact  src/lib.rs  Public
+  L2:cargo:#imp/b  Module  "imp::b"  Exact  src/lib.rs  Public
+  L2:cargo:#other_os  Module  "other_os"  Inferred  src/other_os.rs  Private
+  L2:cargo:#plain  Module  "plain"  Exact  src/plain.rs  Private
+  L2:cargo:#switched  Module  "switched"  Inferred  src/switched.rs  Private
+  L2:cargo:#sys  Module  "sys"  Exact  src/sys/unix.rs  Private
+  L2:cargo:#sys/fd  Module  "sys::fd"  Exact  src/sys/fd.rs  Public
+  L2:cargo:#sys/handle  Module  "sys::handle"  Exact  src/sys/handle.rs  Public
+  L2:cargo:#unix_only  Module  "unix_only"  Inferred  src/unix_only.rs  Private
+edges:
+diagnostics:

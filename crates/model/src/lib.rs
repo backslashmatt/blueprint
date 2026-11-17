@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod graph;
 pub use graph::{
-    Ecosystem, Edge, EdgeKey, EdgeKind, InvalidPath, Model, ModelError, Node, NodeId, NodeKind,
-    RepoPath, SystemKey,
+    DepKind, Ecosystem, Edge, EdgeKey, EdgeKind, InvalidPath, Model, ModelError, Node, NodeId,
+    NodeKind, RepoPath, SystemKey, Visibility,
 };
 
 /// One of the four fixed levels of the model hierarchy (§3.1).

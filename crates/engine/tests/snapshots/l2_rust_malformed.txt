@@ -1,0 +1,10 @@
+nodes:
+  L1:cargo:#  System  "k"  Exact  Cargo.toml
+  L2:cargo:#bad  Module  "bad"  Unknown  src/bad.rs  Public
+  L2:cargo:#binary  Module  "binary"  Unknown  src/binary.rs  Private
+  L2:cargo:#good  Module  "good"  Exact  src/good.rs  Public
+  L2:cargo:#src%2F  Directory  "src/"  Unknown  src
+edges:
+diagnostics:
+  src/bad.rs: unbalanced brackets, an unterminated comment or string, or not UTF-8; modules read up to the damage
+  src/binary.rs: unbalanced brackets, an unterminated comment or string, or not UTF-8; modules read up to the damage

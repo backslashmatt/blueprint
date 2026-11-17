@@ -1,0 +1,8 @@
+nodes:
+  L1:cargo:a#  System  "a"  Exact  a/Cargo.toml
+  L1:cargo:b#  System  "b"  Exact  b/Cargo.toml
+  L1:cargo:c#  System  "c"  Exact  c/Cargo.toml
+edges:
+  L1:cargo:a# -> L1:cargo:b#  DependsOn  Exact  {Normal}
+  L1:cargo:c# -> L1:cargo:b#  DependsOn  Exact  {Normal}
+diagnostics:
