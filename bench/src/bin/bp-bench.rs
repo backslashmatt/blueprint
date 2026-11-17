@@ -124,6 +124,39 @@ fn spawn_version(bp: &Path) -> impl FnMut() -> Result<(), Error> + '_ {
     }
 }
 
+/// Runs `bp model <dir> --json`, discarding the output: the whole L1–L2
+/// analysis of a checkout, as the CLI and app run it.
+fn spawn_model<'a>(bp: &'a Path, dir: &'a Path) -> impl FnMut() -> Result<(), Error> + 'a {
+    move || {
+        let status = Command::new(bp)
+            .arg("model")
+            .arg(dir)
+            .arg("--json")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{} model {}` failed: {status}",
+                bp.display(),
+                dir.display()
+            )
+            .into())
+        }
+    }
+}
+
+/// The §4 budget the L1–L2 model of each reference repository is held to.
+fn index_budget(repo: &str) -> Option<String> {
+    match repo {
+        "medium" => Some("index_medium_l2".into()),
+        "large" => Some("index_large_l2".into()),
+        _ => None,
+    }
+}
+
 fn measure(
     bp: &Path,
     base_bp: Option<&Path>,
@@ -159,6 +192,37 @@ fn measure(
     });
 
     out.push(store_reopen()?);
+
+    // L1–L2 of each reference checkout through `bp model` (#30). Read from
+    // the working tree until commits can be read (#24); the budget is the
+    // §4 "L1–L2 on screen" one. Fewer samples on the large repository,
+    // whose runs take long enough that timer noise is negligible.
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let samples = if r.name == "large" { 3 } else { 7 };
+        let mut head = spawn_model(bp, &dir);
+        let mut base = base_bp.map(|b| spawn_model(b, &dir));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "index_l1_l2".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: index_budget(&r.name),
+            samples,
+            note: Some(format!(
+                "`bp model <checkout> --json`, fastest of {samples}; warm cache, read from the working tree"
+            )),
+            gated: true,
+        });
+    }
 
     for r in repos {
         let dir = repos::checkout_dir(dest, r);
