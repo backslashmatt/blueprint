@@ -2,6 +2,7 @@
 //! git, storage and diffing. It has no UI dependency and everything it can
 //! show is reachable from the CLI.
 
+pub mod git;
 pub mod l1;
 pub mod l2;
 pub mod source;

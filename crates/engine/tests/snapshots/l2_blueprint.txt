@@ -21,6 +21,7 @@ nodes:
   L2:cargo:bench#repos/tests  Module  "repos::tests"  Exact  bench/src/repos.rs  Private
   L2:cargo:crates/cli#tests  Module  "tests"  Exact  crates/cli/src/main.rs  Private
   L2:cargo:crates/cli#tests%2F  Directory  "tests/"  Unknown  crates/cli/tests
+  L2:cargo:crates/engine#git  Module  "git"  Exact  crates/engine/src/git.rs  Public
   L2:cargo:crates/engine#l1  Module  "l1"  Exact  crates/engine/src/l1/mod.rs  Public
   L2:cargo:crates/engine#l1/bazel  Module  "l1::bazel"  Exact  crates/engine/src/l1/bazel.rs  Public
   L2:cargo:crates/engine#l1/cargo  Module  "l1::cargo"  Exact  crates/engine/src/l1/cargo.rs  Public
