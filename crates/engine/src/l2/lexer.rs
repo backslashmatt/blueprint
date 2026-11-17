@@ -81,17 +81,53 @@ fn lex(src: &str) -> (Vec<Tok<'_>>, bool) {
         while j < n {
             match b[j] {
                 b'\\' if !raw => {
-                    if j + 1 < n {
-                        match b[j + 1] {
-                            b'\\' => s.push('\\'),
-                            b'"' => s.push('"'),
-                            b'\'' => s.push('\''),
-                            b'n' => s.push('\n'),
-                            b't' => s.push('\t'),
-                            _ => {}
+                    let hex = |from: usize, to: usize| -> Option<char> {
+                        u32::from_str_radix(src.get(from..to)?, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                    };
+                    match at(j + 1) {
+                        e @ (b'\\' | b'"' | b'\'') => {
+                            s.push(e as char);
+                            j += 2;
                         }
+                        b'n' => {
+                            s.push('\n');
+                            j += 2;
+                        }
+                        b't' => {
+                            s.push('\t');
+                            j += 2;
+                        }
+                        b'r' => {
+                            s.push('\r');
+                            j += 2;
+                        }
+                        b'0' => {
+                            s.push('\0');
+                            j += 2;
+                        }
+                        b'x' => {
+                            s.extend(hex(j + 2, j + 4));
+                            j += 4;
+                        }
+                        b'u' if at(j + 2) == b'{' => {
+                            let close = (j + 3..n.min(j + 12))
+                                .find(|&k| b[k] == b'}')
+                                .unwrap_or(j + 2);
+                            s.extend(hex(j + 3, close));
+                            j = close + 1;
+                        }
+                        b'\n' | b'\r' => {
+                            // A line continuation: skip the newline and the
+                            // whitespace that follows.
+                            j += 1;
+                            while j < n && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                                j += 1;
+                            }
+                        }
+                        _ => j += 2,
                     }
-                    j += 2;
                     continue;
                 }
                 b'"' if (0..hashes).all(|h| at(j + 1 + h) == b'#') => {
@@ -155,7 +191,8 @@ fn lex(src: &str) -> (Vec<Tok<'_>>, bool) {
             b'\'' => {
                 // A character literal ('x', '\n', '\u{..}') or a lifetime ('a).
                 if at(i + 1) == b'\\' {
-                    let mut j = i + 2;
+                    // Skip the escaped character itself (it may be `'`).
+                    let mut j = i + 3;
                     while j < n && b[j] != b'\'' && b[j] != b'\n' {
                         j += 1;
                     }
@@ -226,7 +263,8 @@ fn lex(src: &str) -> (Vec<Tok<'_>>, bool) {
                                 }
                                 i += d.len_utf8();
                             }
-                            out.push(Tok::Ident(src.get(start..i).unwrap_or("")));
+                            // Kept with its `r#`, so `r#mod` is never the keyword.
+                            out.push(Tok::Ident(src.get(start - 2..i).unwrap_or("")));
                         } else {
                             out.push(Tok::Ident(word));
                         }
@@ -294,8 +332,11 @@ impl Reader<'_, '_> {
         self.toks.get(i)
     }
 
-    /// The items between `start` and `end` (exclusive), at inline depth `depth`.
-    fn items(&self, start: usize, end: usize, depth: usize) -> Vec<ModItem> {
+    /// The items between `start` and `end` (exclusive), at nesting depth
+    /// `depth`. In a macro call (`in_macro`), `{..}` groups that follow `]`,
+    /// `else` or `=>` (as in `cfg_if!`) are read as item lists too; other
+    /// bodies, such as function bodies, are still skipped.
+    fn items(&self, start: usize, end: usize, depth: usize, in_macro: bool) -> Vec<ModItem> {
         let mut out = Vec::new();
         let (mut path_attr, mut cfg_attr_path, mut vis) = (None, false, Visibility::Private);
         let mut i = start;
@@ -323,12 +364,16 @@ impl Reader<'_, '_> {
                         i += 1;
                     }
                 }
+                Some(Tok::Ident("crate")) if self.tok(i + 1) == Some(&Tok::Ident("mod")) => {
+                    vis = Visibility::Restricted;
+                    i += 1;
+                }
                 Some(Tok::Ident("mod")) => {
                     let Some(Tok::Ident(name)) = self.tok(i + 1) else {
                         i += 1;
                         continue;
                     };
-                    let name = name.to_string();
+                    let name = name.strip_prefix("r#").unwrap_or(name).to_string();
                     match self.tok(i + 2) {
                         Some(Tok::Punct(';')) => {
                             out.push(ModItem {
@@ -336,7 +381,7 @@ impl Reader<'_, '_> {
                                 body: None,
                                 path_attr: path_attr.take(),
                                 cfg_attr_path,
-                                in_macro: false,
+                                in_macro,
                                 visibility: vis,
                             });
                             i += 3;
@@ -344,7 +389,7 @@ impl Reader<'_, '_> {
                         Some(Tok::Open('{')) => {
                             let close = self.close[i + 2].min(end);
                             let body = if depth < MAX_INLINE_DEPTH {
-                                self.items(i + 3, close, depth + 1)
+                                self.items(i + 3, close, depth + 1, false)
                             } else {
                                 Vec::new()
                             };
@@ -353,7 +398,7 @@ impl Reader<'_, '_> {
                                 body: Some(body),
                                 path_attr: path_attr.take(),
                                 cfg_attr_path,
-                                in_macro: false,
+                                in_macro,
                                 visibility: vis,
                             });
                             i = close + 1;
@@ -366,9 +411,27 @@ impl Reader<'_, '_> {
                     if self.tok(i + 1) == Some(&Tok::Punct('!'))
                         && matches!(self.tok(i + 2), Some(Tok::Open(_))) =>
                 {
-                    // A macro call such as cfg_if! { .. }: look for `[pub] mod x;`.
+                    // A macro call such as cfg_if! { .. }: read the items inside.
                     let close = self.close[i + 2].min(end);
-                    out.extend(self.macro_mods(i + 3, close));
+                    if depth < MAX_INLINE_DEPTH {
+                        out.extend(self.items(i + 3, close, depth + 1, true));
+                    }
+                    i = close + 1;
+                    (path_attr, cfg_attr_path, vis) = (None, false, Visibility::Private);
+                }
+                Some(Tok::Open('{'))
+                    if in_macro
+                        && (i == start
+                            || matches!(
+                                self.tok(i - 1),
+                                Some(Tok::Close(']') | Tok::Ident("else") | Tok::Punct('>'))
+                            )) =>
+                {
+                    // A branch of a macro such as cfg_if!: an item list.
+                    let close = self.close[i].min(end);
+                    if depth < MAX_INLINE_DEPTH {
+                        out.extend(self.items(i + 1, close, depth + 1, true));
+                    }
                     i = close + 1;
                     (path_attr, cfg_attr_path, vis) = (None, false, Visibility::Private);
                 }
@@ -407,42 +470,6 @@ impl Reader<'_, '_> {
             _ => {}
         }
     }
-
-    /// `[pub[(..)]] mod name;` sequences anywhere inside a macro call.
-    fn macro_mods(&self, start: usize, end: usize) -> Vec<ModItem> {
-        let mut out = Vec::new();
-        for k in start..end {
-            if let (Some(Tok::Ident("mod")), Some(Tok::Ident(name)), Some(Tok::Punct(';'))) =
-                (self.tok(k), self.tok(k + 1), self.tok(k + 2))
-            {
-                let visibility =
-                    match (k.checked_sub(1).and_then(|p| self.tok(p)), k.checked_sub(1)) {
-                        (Some(Tok::Ident("pub")), _) => Visibility::Public,
-                        (Some(Tok::Close(')')), Some(p)) => {
-                            // `pub(crate) mod x;`: find the `(` and check for `pub` before it.
-                            let open = (start..p).rev().find(|&o| self.close.get(o) == Some(&p));
-                            match open
-                                .and_then(|o| o.checked_sub(1))
-                                .and_then(|o| self.tok(o))
-                            {
-                                Some(Tok::Ident("pub")) => Visibility::Restricted,
-                                _ => Visibility::Private,
-                            }
-                        }
-                        _ => Visibility::Private,
-                    };
-                out.push(ModItem {
-                    name: name.to_string(),
-                    body: None,
-                    path_attr: None,
-                    cfg_attr_path: false,
-                    in_macro: true,
-                    visibility,
-                });
-            }
-        }
-        out
-    }
 }
 
 /// Reads the `mod` items of one Rust source file.
@@ -455,7 +482,7 @@ pub fn scan(src: &str) -> Scan {
         close: &close,
     };
     Scan {
-        items: reader.items(0, toks.len(), 0),
+        items: reader.items(0, toks.len(), 0, false),
         clean: lex_ok && brackets_ok,
     }
 }
@@ -536,5 +563,57 @@ impl X { fn g() {} }
         assert!(!scan(&brackets).clean);
         let weird = "'\\u{1F600}' 'é' b'x' br##\"x\"## \u{0}\u{1}";
         let _ = scan(weird);
+    }
+
+    #[test]
+    fn review_findings_escapes_macros_raw_identifiers_and_cost() {
+        // An escaped quote in a char literal does not desynchronise.
+        let s = scan("const Q: [char; 2] = ['\\'','\"'];\nmod hidden;\nconst S: &str = \"x\";");
+        assert!(s.clean);
+        assert_eq!(names(&s.items), ["hidden"]);
+
+        // #[path] escapes decode as rustc does.
+        for (src, want) in [
+            ("#[path = \"a\\x2ers\"] mod a;", "a.rs"),
+            ("#[path = \"c\\u{2e}rs\"] mod c;", "c.rs"),
+            ("#[path = \"dir\\\n    /b.rs\"] mod b;", "dir/b.rs"),
+        ] {
+            assert_eq!(
+                scan(src).items[0].path_attr.as_deref(),
+                Some(want),
+                "{src:?}"
+            );
+        }
+
+        // Inside cfg_if!, attributes and nesting are kept and fn bodies skipped.
+        let s = scan(
+            "cfg_if! { if #[cfg(unix)] { #[path=\"sys/unix.rs\"] mod imp; mod sys { pub mod inner; } fn f() { mod local; } } else { pub(crate) mod other; } }",
+        );
+        assert_eq!(names(&s.items), ["imp", "sys", "sys::inner", "other"]);
+        assert_eq!(s.items[0].path_attr.as_deref(), Some("sys/unix.rs"));
+        assert!(s.items.iter().all(|i| i.in_macro));
+        assert_eq!(s.items[2].visibility, Visibility::Restricted);
+
+        // r#mod is an identifier, not the keyword; crate mod is restricted.
+        assert!(names(&scan("impl r#mod r#x;").items).is_empty());
+        assert_eq!(
+            scan("crate mod c;").items[0].visibility,
+            Visibility::Restricted
+        );
+
+        // pub(..) mod inside deeply nested macro groups stays linear.
+        let k = 20_000;
+        let src = format!(
+            "m! {{ {}{} }}",
+            "(".repeat(k),
+            ") pub(crate) mod a;".repeat(k)
+        );
+        let t = std::time::Instant::now();
+        let _ = scan(&src);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            t.elapsed()
+        );
     }
 }
