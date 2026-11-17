@@ -295,3 +295,21 @@ fn flipping_the_top_bit_of_two_words_is_detected() {
         assert!(Segment::from_bytes(d).is_err(), "bytes {a} and {b}");
     }
 }
+
+#[test]
+fn compact_retain_drops_rejected_keys() -> Result<(), StoreError> {
+    let dir = fresh_dir("retain");
+    let mut store = Store::open(&dir)?;
+    for i in 0..4u32 {
+        store.add(&writer([i]))?;
+    }
+    let even = |k: &Key| (0..4u32).step_by(2).any(|i| key(i) == *k);
+    store.compact_retain(even)?;
+    assert_eq!(store.segment_count(), 1);
+    assert!(store.get(&key(2)).is_some());
+    assert_eq!(store.get(&key(1)), None);
+    let reopened = Store::open(&dir)?;
+    assert_eq!(reopened.get(&key(3)), None);
+    assert!(reopened.get(&key(0)).is_some());
+    Ok(())
+}

@@ -27,7 +27,10 @@ commands:
   index <repo>  Analyse a commit (default HEAD) and store its model in the
                 index, so that `bp model --rev` reopens it without analysing
 
-options for model and index:
+options for index:
+  --rev <rev>   The commit to index (default HEAD)
+
+options for model:
   --rev <rev>   Read the commit <rev> of the git repository at <dir> instead of
                 its working tree (a branch, tag, commit id or HEAD)
   --level 1|2   The deepest level to include (default 2)
@@ -267,6 +270,8 @@ struct AtRev {
     indexed: Indexed,
     /// Whether it was read from the index rather than analysed.
     from_index: bool,
+    /// Whether it was analysed and then written to the index.
+    stored: bool,
 }
 
 /// The model of `rev` in the repository at `path`: from the index if it holds
@@ -277,12 +282,17 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
     let repo = Repo::open(path).map_err(|e| e.to_string())?;
     let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
     let tree = repo.tree_id(commit).map_err(|e| e.to_string())?;
-    let index = match Index::open(path) {
+    let opened = if store {
+        Index::open(path).map(Some)
+    } else {
+        Index::open_existing(path)
+    };
+    let index = match opened {
         Ok(index) => {
-            for d in index.dropped() {
+            for d in index.iter().flat_map(Index::dropped) {
                 eprintln!("warning: index segment dropped and will be rebuilt: {d}");
             }
-            Some(index)
+            index
         }
         Err(e) if store => return Err(format!("cannot open the index: {e}")),
         Err(e) => {
@@ -295,16 +305,30 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
             commit,
             indexed,
             from_index: true,
+            stored: false,
         });
     }
     let commit_id = commit.to_string();
     let (source, mut diags) = Commit::open(path, &commit_id).map_err(|e| e.to_string())?;
     let (model, more) = blueprint_engine::analyse(&source.paths(), &|p| source.read(p));
     diags.extend(more);
+    // A model built without some of its files describes less than the commit,
+    // so it is reported and never stored under the commit's tree.
+    let unreadable = source.unreadable();
+    for path in &unreadable {
+        diags.push(Diagnostic {
+            path: path.clone(),
+            message: "the file's object could not be read (a partial clone?)".into(),
+        });
+    }
     diags.sort();
     let indexed = Indexed::new(model, &diags);
-    if store && let Some(mut index) = index {
-        index
+    let mut stored = false;
+    if store
+        && unreadable.is_empty()
+        && let Some(mut index) = index
+    {
+        stored = index
             .put(tree, &indexed)
             .map_err(|e| format!("cannot write the index: {e}"))?;
     }
@@ -312,6 +336,7 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
         commit,
         indexed,
         from_index: false,
+        stored,
     })
 }
 
@@ -321,11 +346,20 @@ fn index(path: &Path, rev: &str) -> ExitCode {
             let nodes = r.indexed.model.nodes().count();
             if r.from_index {
                 println!("{} already indexed ({nodes} nodes)", r.commit);
-            } else {
-                warn(&r.indexed.diagnostics());
-                println!("{} indexed ({nodes} nodes)", r.commit);
+                return ExitCode::SUCCESS;
             }
-            ExitCode::SUCCESS
+            warn(&r.indexed.diagnostics());
+            if r.stored {
+                println!("{} indexed ({nodes} nodes)", r.commit);
+                ExitCode::SUCCESS
+            } else {
+                eprintln!(
+                    "bp: {}: {} analysed but not indexed: some files could not be read, or its object ids are not SHA-1",
+                    path.display(),
+                    r.commit
+                );
+                ExitCode::from(EXIT_FAILURE)
+            }
         }
         Err(e) => {
             eprintln!("bp: {}: {e}", path.display());

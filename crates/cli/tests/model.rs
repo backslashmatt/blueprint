@@ -313,3 +313,27 @@ fn index_fails_with_exit_1_when_the_revision_does_not_resolve() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(bp(&["index"]).status.code(), Some(2));
 }
+
+#[test]
+fn a_commit_with_unreadable_files_is_reported_and_never_indexed() {
+    let dir = git_fixture("partial");
+    let d = dir.to_str().unwrap();
+    let cache = cache().join("partial-test");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    // `bp model --rev` with no index yet creates nothing in the cache.
+    stdout(&bp_with_cache(&["model", d, "--rev", "HEAD"], &cache));
+    assert!(!cache.exists(), "bp model must not create an index");
+
+    delete_object(&dir, "HEAD:crates/app/Cargo.toml");
+    let out = bp_with_cache(&["index", d], &cache);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("crates/app/Cargo.toml: the file's object could not be read"),
+        "{err}"
+    );
+    assert!(err.contains("not indexed"), "{err}");
+    let again = bp_with_cache(&["index", d], &cache);
+    assert_eq!(again.status.code(), Some(1), "nothing was stored to find");
+}

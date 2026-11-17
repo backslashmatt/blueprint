@@ -107,6 +107,20 @@ impl Index {
         Self::open_at(&dir).map_err(|e| e.to_string())
     }
 
+    /// Opens the index of the repository at `repo` for reading only: `None`
+    /// if there is none yet, and nothing is created. Damaged segments are
+    /// still dropped, as by [`Index::open`].
+    ///
+    /// # Errors
+    /// As [`Index::open`].
+    pub fn open_existing(repo: &Path) -> Result<Option<Self>, String> {
+        let dir = Self::location(repo)?;
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        Self::open_at(&dir).map(Some).map_err(|e| e.to_string())
+    }
+
     /// Opens (creating if needed) an index in `dir`.
     ///
     /// # Errors
@@ -135,23 +149,28 @@ impl Index {
         serde_json::from_slice(bytes).ok()
     }
 
-    /// Stores `indexed` for `tree`. Trees whose ids are not SHA-1 are not
-    /// stored; they are analysed every time.
+    /// Stores `indexed` for `tree`, and returns whether it was stored. Trees
+    /// whose ids are not SHA-1 are not; they are analysed every time.
+    ///
+    /// When the store has too many segments it is compacted, and entries
+    /// written by another [`ANALYSER_VERSION`] are dropped then.
     ///
     /// # Errors
     /// If the segment cannot be written.
-    pub fn put(&mut self, tree: ObjectId, indexed: &Indexed) -> Result<(), String> {
+    pub fn put(&mut self, tree: ObjectId, indexed: &Indexed) -> Result<bool, String> {
         let Some(key) = key(tree) else {
-            return Ok(());
+            return Ok(false);
         };
         let value = serde_json::to_vec(indexed).map_err(|e| e.to_string())?;
         let mut writer = SegmentWriter::new();
         writer.insert(key, value);
         self.store.add(&writer).map_err(|e| e.to_string())?;
         if self.store.segment_count() > MAX_SEGMENTS {
-            self.store.compact().map_err(|e| e.to_string())?;
+            self.store
+                .compact_retain(current_version)
+                .map_err(|e| e.to_string())?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -167,6 +186,11 @@ fn key(tree: ObjectId) -> Option<Key> {
     k[20..24].copy_from_slice(&ANALYSER_VERSION.to_le_bytes());
     k[24] = KIND_L1_L2_MODEL;
     Some(Key(k))
+}
+
+/// Whether `key` was written by this [`ANALYSER_VERSION`].
+fn current_version(key: &Key) -> bool {
+    key.0[20..24] == ANALYSER_VERSION.to_le_bytes()
 }
 
 /// 64-bit FNV-1a: a stable directory name for a path. Collisions only cost

@@ -115,6 +115,8 @@ pub struct Commit {
     id: ObjectId,
     /// Sorted by path, so lookups are a binary search.
     files: Vec<(RepoPath, ObjectId)>,
+    /// Files whose blob could not be read, for example in a partial clone.
+    unreadable: std::cell::RefCell<Vec<RepoPath>>,
 }
 
 impl Commit {
@@ -160,7 +162,15 @@ impl Commit {
         }
         files.sort();
         diags.sort();
-        Ok((Commit { repo, id, files }, diags))
+        Ok((
+            Commit {
+                repo,
+                id,
+                files,
+                unreadable: std::cell::RefCell::default(),
+            },
+            diags,
+        ))
     }
 
     /// The commit id that the revision resolved to.
@@ -175,10 +185,27 @@ impl Commit {
         self.files.iter().map(|(p, _)| p.clone()).collect()
     }
 
-    /// Reads one file's bytes as stored in the commit.
+    /// Reads one file's bytes as stored in the commit. A file that is in the
+    /// commit but whose blob cannot be read is remembered; see
+    /// [`Commit::unreadable`].
     #[must_use]
     pub fn read(&self, path: &RepoPath) -> Option<Vec<u8>> {
         let i = self.files.binary_search_by(|(p, _)| p.cmp(path)).ok()?;
-        self.repo.blob(self.files[i].1).ok()
+        let bytes = self.repo.blob(self.files[i].1).ok();
+        if bytes.is_none() {
+            self.unreadable.borrow_mut().push(path.clone());
+        }
+        bytes
+    }
+
+    /// Files in the commit that [`Commit::read`] was asked for but could not
+    /// read, sorted. A model built while any were missing describes less than
+    /// the commit, so it must not be stored as the commit's model.
+    #[must_use]
+    pub fn unreadable(&self) -> Vec<RepoPath> {
+        let mut v = self.unreadable.borrow().clone();
+        v.sort();
+        v.dedup();
+        v
     }
 }

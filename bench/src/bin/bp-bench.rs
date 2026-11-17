@@ -149,27 +149,73 @@ fn spawn_model<'a>(bp: &'a Path, dir: &'a Path) -> impl FnMut() -> Result<(), Er
     }
 }
 
-/// The §4 budget the L1–L2 model of each reference repository is held to.
-/// Runs `bp index <dir> --rev <rev>` with its cache in `cache`.
-fn bp_index(bp: &Path, dir: &Path, rev: &str, cache: &Path) -> Result<(), Error> {
-    let status = Command::new(bp)
-        .arg("index")
-        .arg(dir)
-        .args(["--rev", rev])
-        .env("BLUEPRINT_CACHE_DIR", cache)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "`{} index {}` failed: {status}",
-            bp.display(),
-            dir.display()
-        )
-        .into())
+/// `open_indexed` for each reference repository, with the caches under
+/// `cache`.
+fn open_indexed(
+    bp: &Path,
+    base_bp: Option<&Path>,
+    dest: &Path,
+    repos: &[RefRepo],
+    cache: &Path,
+) -> Result<Vec<Measurement>, Error> {
+    let mut out = Vec::new();
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let head_cache = cache.join(&r.name).join("head");
+        let base_cache = cache.join(&r.name).join("base");
+        bp_index(bp, &dir, &r.commit, &head_cache)?;
+        let base_bp = base_bp.filter(|b| bp_index(b, &dir, &r.commit, &base_cache).is_ok());
+        let samples = if r.name == "large" { 5 } else { 11 };
+        let mut head = spawn_reopen(bp, &dir, &r.commit, &head_cache);
+        let mut base = base_bp.map(|b| spawn_reopen(b, &dir, &r.commit, &base_cache));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "open_indexed".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: (r.name != "small").then(|| "open_indexed".into()),
+            samples,
+            note: Some(format!(
+                "`bp model <checkout> --rev <pinned> --json` after `bp index`, fastest of {samples}; warm cache"
+            )),
+            gated: true,
+        });
     }
+    Ok(out)
+}
+
+/// Runs `bp index <dir> --rev <rev>` twice with its cache in `cache`, and
+/// checks that the second run found the first one's entry. That is the same
+/// lookup `bp model --rev` makes, so the timed reopen really reads the index.
+fn bp_index(bp: &Path, dir: &Path, rev: &str, cache: &Path) -> Result<(), Error> {
+    for expect in [" indexed (", " already indexed ("] {
+        let out = Command::new(bp)
+            .arg("index")
+            .arg(dir)
+            .args(["--rev", rev])
+            .env("BLUEPRINT_CACHE_DIR", cache)
+            .stderr(std::process::Stdio::null())
+            .output()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || !stdout.contains(expect) {
+            return Err(format!(
+                "`{} index {}` did not report{expect}...: {} {stdout}",
+                bp.display(),
+                dir.display(),
+                out.status
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn spawn_reopen<'a>(
@@ -200,6 +246,7 @@ fn spawn_reopen<'a>(
     }
 }
 
+/// The §4 budget the L1–L2 model of each reference repository is held to.
 fn index_budget(repo: &str) -> Option<String> {
     match repo {
         "medium" => Some("index_medium_l2".into()),
@@ -281,37 +328,9 @@ fn measure(
     // cache. A base build without `bp index` is not compared.
     let cache = std::env::temp_dir().join(format!("bp-bench-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
-    for r in repos {
-        let dir = repos::checkout_dir(dest, r);
-        let head_cache = cache.join("head");
-        let base_cache = cache.join("base");
-        bp_index(bp, &dir, &r.commit, &head_cache)?;
-        let base_bp = base_bp.filter(|b| bp_index(b, &dir, &r.commit, &base_cache).is_ok());
-        let samples = if r.name == "large" { 5 } else { 11 };
-        let mut head = spawn_reopen(bp, &dir, &r.commit, &head_cache);
-        let mut base = base_bp.map(|b| spawn_reopen(b, &dir, &r.commit, &base_cache));
-        let (value, base) = best_ms(
-            samples,
-            1,
-            &mut head,
-            base.as_mut()
-                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
-        )?;
-        out.push(Measurement {
-            name: "open_indexed".into(),
-            repo: Some(r.name.clone()),
-            value,
-            base,
-            unit: "ms".into(),
-            budget: (r.name != "small").then(|| "open_indexed".into()),
-            samples,
-            note: Some(format!(
-                "`bp model <checkout> --rev <pinned> --json` after `bp index`, fastest of {samples}; warm cache"
-            )),
-            gated: true,
-        });
-    }
+    let reopened = open_indexed(bp, base_bp, dest, repos, &cache);
     let _ = std::fs::remove_dir_all(&cache);
+    out.extend(reopened?);
 
     for r in repos {
         let dir = repos::checkout_dir(dest, r);

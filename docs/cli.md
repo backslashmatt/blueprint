@@ -18,9 +18,11 @@
 
 With `--rev`, `bp model` reads the commit's files from git's object database through `gix`. It never checks anything out, never runs the `git` binary, hooks or filters, and ignores the working tree. Every file in the commit is read, including any committed `target/` or `node_modules/`. Symbolic links are not followed. Submodules, and paths that are not UTF-8, are reported as warnings.
 
-`bp model --rev` reads the model from the index when the commit's tree is already there, and otherwise analyses the commit without storing it. `bp index` analyses and stores it, then prints `<commit> indexed (<n> nodes)`, or `<commit> already indexed (<n> nodes)`.
+`bp model --rev` reads the model from the index when the commit's tree is already there, and otherwise analyses the commit without storing it. It never creates an index. `bp index` analyses and stores it, then prints `<commit> indexed (<n> nodes)`, or `<commit> already indexed (<n> nodes)`.
 
-The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set `BLUEPRINT_CACHE_DIR` to use another directory. Nothing is ever written inside the repository. The index can be deleted at any time. A damaged index is dropped with a warning and rebuilt, never fatal. Entries are keyed by the commit's tree id, so commits with the same files share one (DR 0007).
+If some of a commit's files cannot be read, for example in a partial clone, each one is reported as a warning. The model is then never stored, and `bp index` exits with code 1.
+
+The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set `BLUEPRINT_CACHE_DIR` to use another directory. Nothing is ever written inside the repository. The index can be deleted at any time. A damaged index is dropped with a warning and rebuilt, never fatal. Entries are keyed by the commit's tree id, so commits with the same files share one (DR 0007). Entries written by an older version of the analysers are dropped when the index is compacted.
 
 Diffs (`bp diff`) arrive in M2.
 
@@ -35,5 +37,5 @@ Diffs (`bp diff`) arrive in M2.
 | Code | Meaning |
 |---|---|
 | 0 | Success, possibly with warnings |
-| 1 | The command could not do its job, for example `<dir>` cannot be read, is not a git repository, `<rev>` does not name a commit, or `bp index` cannot write the index |
+| 1 | The command could not do its job, for example `<dir>` cannot be read, is not a git repository, `<rev>` does not name a commit, or `bp index` cannot read every file or write the index |
 | 2 | Usage error: an unknown command, option or value |

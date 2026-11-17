@@ -19,7 +19,8 @@ DR 0005 put the index in the platform cache, under a hash of the repository's ca
 
 - **Correct without the check.** A tree id is a hash of every file the analysers read. So a stored model is correct for any commit, in any repository, whose tree has that id. A cache that ends up shared, whether by a path-hash collision or by moving or replacing a repository, can only return a correct model.
 - **Saves work across commits.** Commits with the same tree, such as a merge with no conflicts or a revert, share one entry.
-- **Analyser changes:** `ANALYSER_VERSION` must be bumped whenever any analyser's output changes for the same files. Entries from older code then stop matching and are rebuilt.
+- **Unreadable files:** a model is only as complete as the files it was built from. A missing blob, as in a partial clone or after a gc race, would otherwise store an incomplete model under the complete tree's id. So a commit with any unreadable file is analysed and reported, never stored.
+- **Analyser changes:** `ANALYSER_VERSION` must be bumped whenever any analyser's output changes for the same files. Entries from older code then stop matching and are rebuilt. Compaction, which runs once a repository's index has more than 16 segments, drops them. The index is not otherwise bounded: deleting the cache is always safe.
 - **Storage format:** the value is the model and its diagnostics, as JSON, in one store segment entry. A damaged segment is dropped and rebuilt, as before (§5.5).
 
 ## Measured
