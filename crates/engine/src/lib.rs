@@ -3,6 +3,7 @@
 //! show is reachable from the CLI.
 
 pub mod git;
+pub mod index;
 pub mod l1;
 pub mod l2;
 pub mod source;

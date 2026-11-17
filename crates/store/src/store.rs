@@ -148,12 +148,21 @@ impl Store {
     /// [`StoreError::Io`] if the merged segment cannot be written. The old
     /// segments are deleted only after it has been written.
     pub fn compact(&mut self) -> Result<(), StoreError> {
+        self.compact_retain(|_| true)
+    }
+
+    /// Merges every segment into one, keeping only the entries whose key
+    /// `keep` accepts, and deletes the others.
+    ///
+    /// # Errors
+    /// As [`Store::compact`].
+    pub fn compact_retain(&mut self, keep: impl Fn(&Key) -> bool) -> Result<(), StoreError> {
         if self.segments.len() < 2 {
             return Ok(());
         }
         let mut merged = SegmentWriter::new();
         for (_, seg) in &self.segments {
-            for (k, v) in seg.iter() {
+            for (k, v) in seg.iter().filter(|(k, _)| keep(k)) {
                 merged.insert(k, v);
             }
         }

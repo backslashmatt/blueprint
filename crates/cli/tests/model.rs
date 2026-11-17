@@ -47,9 +47,19 @@ fn fixture() -> PathBuf {
     dir
 }
 
+/// The cache every test uses, so nothing is written to the user's cache.
+fn cache() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("bp-cache-{}", std::process::id()))
+}
+
 fn bp(args: &[&str]) -> Output {
+    bp_with_cache(args, &cache())
+}
+
+fn bp_with_cache(args: &[&str], cache: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bp"))
         .args(args)
+        .env("BLUEPRINT_CACHE_DIR", cache)
         .output()
         .expect("run bp")
 }
@@ -216,4 +226,114 @@ fn rev_that_does_not_resolve_fails_with_exit_1() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-branch"));
     let out = bp(&["model", "/no/such/repository/for/bp", "--rev", "HEAD"]);
     assert_eq!(out.status.code(), Some(1));
+}
+
+fn stdout(out: &Output) -> String {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout.clone()).unwrap()
+}
+
+/// Deletes the loose object holding `spec` (e.g. `HEAD:path`), so that only
+/// the index can still supply what was analysed from it.
+fn delete_object(repo: &Path, spec: &str) {
+    let r = gix::open(repo).unwrap();
+    let id = r.rev_parse_single(spec).unwrap().detach().to_string();
+    let file = repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    std::fs::remove_file(&file).unwrap();
+}
+
+#[test]
+fn index_then_model_reads_the_index_not_the_objects() {
+    let dir = git_fixture("index");
+    let d = dir.to_str().unwrap();
+    let cache = cache().join("index-test");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    let first = stdout(&bp_with_cache(&["index", d], &cache));
+    assert!(first.ends_with(" indexed (8 nodes)\n"), "{first}");
+    let again = stdout(&bp_with_cache(&["index", d, "--rev", "HEAD"], &cache));
+    assert!(again.ends_with(" already indexed (8 nodes)\n"), "{again}");
+    let index_dirs = std::fs::read_dir(cache.join("index")).unwrap().count();
+    assert_eq!(index_dirs, 1, "one index directory per repository");
+
+    // Without the app's manifest the analysers would find a different model,
+    // so a snapshot match means the model came from the index.
+    delete_object(&dir, "HEAD:crates/app/Cargo.toml");
+    let json = stdout(&bp_with_cache(
+        &["model", d, "--rev", "HEAD", "--json"],
+        &cache,
+    ));
+    snapshot("model_fixture.json", &json);
+    let analysed = stdout(&bp_with_cache(
+        &["model", d, "--rev", "HEAD", "--json"],
+        &cache.join("elsewhere"),
+    ));
+    assert_ne!(analysed, json, "a fresh cache analyses the damaged commit");
+}
+
+#[test]
+fn a_damaged_index_is_dropped_and_rebuilt() {
+    let dir = git_fixture("damaged");
+    let d = dir.to_str().unwrap();
+    let cache = cache().join("damaged-test");
+    let _ = std::fs::remove_dir_all(&cache);
+    stdout(&bp_with_cache(&["index", d], &cache));
+    let store = std::fs::read_dir(cache.join("index"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for seg in std::fs::read_dir(&store).unwrap() {
+        let seg = seg.unwrap().path();
+        let mut bytes = std::fs::read(&seg).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&seg, bytes).unwrap();
+    }
+    let out = bp_with_cache(&["model", d, "--rev", "HEAD", "--json"], &cache);
+    snapshot("model_fixture.json", &stdout(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("dropped and will be rebuilt"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rebuilt = stdout(&bp_with_cache(&["index", d], &cache));
+    assert!(rebuilt.ends_with(" indexed (8 nodes)\n"), "{rebuilt}");
+}
+
+#[test]
+fn index_fails_with_exit_1_when_the_revision_does_not_resolve() {
+    let dir = git_fixture("index-bad-rev");
+    let out = bp(&["index", dir.to_str().unwrap(), "--rev", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(bp(&["index"]).status.code(), Some(2));
+}
+
+#[test]
+fn a_commit_with_unreadable_files_is_reported_and_never_indexed() {
+    let dir = git_fixture("partial");
+    let d = dir.to_str().unwrap();
+    let cache = cache().join("partial-test");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    // `bp model --rev` with no index yet creates nothing in the cache.
+    stdout(&bp_with_cache(&["model", d, "--rev", "HEAD"], &cache));
+    assert!(!cache.exists(), "bp model must not create an index");
+
+    delete_object(&dir, "HEAD:crates/app/Cargo.toml");
+    let out = bp_with_cache(&["index", d], &cache);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("crates/app/Cargo.toml: the file's object could not be read"),
+        "{err}"
+    );
+    assert!(err.contains("not indexed"), "{err}");
+    let again = bp_with_cache(&["index", d], &cache);
+    assert_eq!(again.status.code(), Some(1), "nothing was stored to find");
 }
