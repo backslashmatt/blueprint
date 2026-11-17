@@ -42,7 +42,9 @@ name = "blueprint-cli"
 version = "0.1.0"
 dependencies = [
  "blueprint-engine",
+ "blueprint-model",
  "blueprint-protocol",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,83 @@
+{
+  "nodes": [
+    {
+      "id": "L1:cargo:crates/app#",
+      "kind": "system",
+      "name": "app",
+      "source": "crates/app/Cargo.toml",
+      "parent": null,
+      "confidence": "exact"
+    },
+    {
+      "id": "L1:cargo:crates/core#",
+      "kind": "system",
+      "name": "core",
+      "source": "crates/core/Cargo.toml",
+      "parent": null,
+      "confidence": "exact"
+    },
+    {
+      "id": "L1:npm:web#",
+      "kind": "system",
+      "name": "web",
+      "source": "web/package.json",
+      "parent": null,
+      "confidence": "exact"
+    },
+    {
+      "id": "L1:unowned:#",
+      "kind": "unowned",
+      "name": "(unowned)",
+      "source": "",
+      "parent": null,
+      "confidence": "unknown"
+    },
+    {
+      "id": "L2:cargo:crates/app#cli",
+      "kind": "module",
+      "name": "cli",
+      "source": "crates/app/src/cli.rs",
+      "parent": "L1:cargo:crates/app#",
+      "confidence": "exact",
+      "visibility": "private"
+    },
+    {
+      "id": "L2:cargo:crates/core#graph",
+      "kind": "module",
+      "name": "graph",
+      "source": "crates/core/src/graph.rs",
+      "parent": "L1:cargo:crates/core#",
+      "confidence": "exact",
+      "visibility": "public"
+    },
+    {
+      "id": "L2:cargo:crates/core#util",
+      "kind": "module",
+      "name": "util",
+      "source": "crates/core/src/util.rs",
+      "parent": "L1:cargo:crates/core#",
+      "confidence": "exact",
+      "visibility": "restricted"
+    },
+    {
+      "id": "L2:unowned:#docs%2F",
+      "kind": "directory",
+      "name": "docs/",
+      "source": "docs",
+      "parent": "L1:unowned:#",
+      "confidence": "unknown"
+    }
+  ],
+  "edges": [
+    {
+      "from": "L1:cargo:crates/app#",
+      "to": "L1:cargo:crates/core#",
+      "kind": "depends-on",
+      "confidence": "exact",
+      "evidence": [],
+      "dependency": [
+        "normal"
+      ]
+    }
+  ]
+}
