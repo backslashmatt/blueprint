@@ -42,3 +42,10 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# Whole-program optimisation for shipped binaries: linking gix into `bp`
+# made start-up slower, and fat LTO with one codegen unit drops the unused
+# parts (#57).
+[profile.release]
+lto = "fat"
+codegen-units = 1
