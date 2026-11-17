@@ -11,6 +11,7 @@
 //!
 //! Every L2 node's parent is its L1 system; nesting is in the node's path.
 
+mod lexer;
 pub mod rust;
 
 use std::collections::{BTreeMap, BTreeSet};

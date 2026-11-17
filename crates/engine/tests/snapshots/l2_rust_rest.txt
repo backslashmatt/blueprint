@@ -8,4 +8,4 @@ nodes:
   L2:cargo:#tests%2F  Directory  "tests/"  Unknown  tests
 edges:
 diagnostics:
-  src/lib.rs: syntax errors; modules read from the recovered tree
+  src/lib.rs: unbalanced brackets, an unterminated comment or string, or not UTF-8; modules read up to the damage
