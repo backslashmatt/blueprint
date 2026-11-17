@@ -6,6 +6,7 @@ nodes:
   L1:cargo:crates/model#  System  "blueprint-model"  Exact  crates/model/Cargo.toml
   L1:cargo:crates/protocol#  System  "blueprint-protocol"  Exact  crates/protocol/Cargo.toml
   L1:cargo:crates/store#  System  "blueprint-store"  Exact  crates/store/Cargo.toml
+  L1:cargo:crates/store/fuzz#  System  "blueprint-store-fuzz"  Exact  crates/store/fuzz/Cargo.toml
   L1:cargo:crates/ui#  System  "blueprint-ui"  Exact  crates/ui/Cargo.toml
   L1:cargo:xtask#  System  "xtask"  Exact  xtask/Cargo.toml
 edges:
@@ -20,5 +21,6 @@ edges:
   L1:cargo:crates/engine# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/protocol# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/store/fuzz# -> L1:cargo:crates/store#  DependsOn  Exact  {Normal}
   L1:cargo:crates/ui# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
 diagnostics:
