@@ -68,6 +68,7 @@ dependencies = [
  "blueprint-engine",
  "blueprint-model",
  "blueprint-protocol",
+ "gix",
  "serde_json",
 ]
 

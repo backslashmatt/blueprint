@@ -6,27 +6,31 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// The fixture's files that a commit would hold.
+const FILES: &[(&str, &str)] = &[
+    ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+    (
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
+    ),
+    ("crates/app/src/main.rs", "mod cli;\nfn main() {}\n"),
+    ("crates/app/src/cli.rs", ""),
+    ("crates/core/Cargo.toml", "[package]\nname = \"core\"\n"),
+    (
+        "crates/core/src/lib.rs",
+        "pub mod graph;\npub(crate) mod util;\n",
+    ),
+    ("crates/core/src/graph.rs", ""),
+    ("crates/core/src/util.rs", ""),
+    ("web/package.json", r#"{ "name": "web" }"#),
+    ("docs/guide.md", "# guide\n"),
+];
+
 fn fixture() -> PathBuf {
     let dir =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("bp-model-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let files: &[(&str, &str)] = &[
-        ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
-        (
-            "crates/app/Cargo.toml",
-            "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
-        ),
-        ("crates/app/src/main.rs", "mod cli;\nfn main() {}\n"),
-        ("crates/app/src/cli.rs", ""),
-        ("crates/core/Cargo.toml", "[package]\nname = \"core\"\n"),
-        (
-            "crates/core/src/lib.rs",
-            "pub mod graph;\npub(crate) mod util;\n",
-        ),
-        ("crates/core/src/graph.rs", ""),
-        ("crates/core/src/util.rs", ""),
-        ("web/package.json", r#"{ "name": "web" }"#),
-        ("docs/guide.md", "# guide\n"),
+    let skipped: &[(&str, &str)] = &[
         // Skipped: version control and build output.
         (".git/HEAD", "ref: refs/heads/main\n"),
         (
@@ -35,7 +39,7 @@ fn fixture() -> PathBuf {
         ),
         ("web/node_modules/dep/package.json", r#"{ "name": "dep" }"#),
     ];
-    for (path, body) in files {
+    for (path, body) in FILES.iter().chain(skipped) {
         let p = dir.join(path);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
@@ -108,4 +112,108 @@ fn missing_directory_fails_with_exit_1_and_bad_usage_with_exit_2() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
     let out = bp(&["model", ".", "--level", "7"]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// Writes the tree for `files` (path, blob id) and returns its id.
+fn write_tree(repo: &gix::Repository, files: &[(&str, gix::ObjectId)]) -> gix::ObjectId {
+    use gix::objs::tree::{Entry, EntryKind};
+    use std::collections::BTreeMap;
+    let mut here: BTreeMap<&str, Vec<(&str, gix::ObjectId)>> = BTreeMap::new();
+    let mut tree = gix::objs::Tree::empty();
+    for (path, id) in files {
+        match path.split_once('/') {
+            Some((dir, rest)) => here.entry(dir).or_default().push((rest, *id)),
+            None => tree.entries.push(Entry {
+                mode: EntryKind::Blob.into(),
+                filename: (*path).into(),
+                oid: *id,
+            }),
+        }
+    }
+    for (dir, children) in here {
+        tree.entries.push(Entry {
+            mode: EntryKind::Tree.into(),
+            filename: dir.into(),
+            oid: write_tree(repo, &children),
+        });
+    }
+    tree.entries.sort();
+    repo.write_object(&tree).unwrap().detach()
+}
+
+/// A git repository whose first commit holds only `crates/core` and whose
+/// second (`HEAD`) holds the whole fixture. The working tree on disk holds
+/// something else entirely, which `--rev` must ignore.
+fn git_fixture(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("bp-model-git-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = gix::init(&dir).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"worktree-only\"\n",
+    )
+    .unwrap();
+    let blobs: Vec<(&str, gix::ObjectId)> = FILES
+        .iter()
+        .map(|(p, body)| (*p, repo.write_blob(body.as_bytes()).unwrap().detach()))
+        .collect();
+    let sig = gix::actor::SignatureRef {
+        name: "Fixture".into(),
+        email: "fixture@example.invalid".into(),
+        time: "1700000000 +0000",
+    };
+    let core: Vec<_> = blobs
+        .iter()
+        .copied()
+        .filter(|(p, _)| p.starts_with("crates/core/"))
+        .collect();
+    let first = repo
+        .commit_as(
+            sig,
+            sig,
+            "HEAD",
+            "core",
+            write_tree(&repo, &core),
+            None::<gix::ObjectId>,
+        )
+        .unwrap()
+        .detach();
+    repo.commit_as(sig, sig, "HEAD", "all", write_tree(&repo, &blobs), [first])
+        .unwrap();
+    dir
+}
+
+#[test]
+fn rev_reads_the_commit_not_the_working_tree() {
+    let dir = git_fixture("rev");
+    let d = dir.to_str().unwrap();
+    let out = bp(&["model", d, "--rev", "HEAD", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The commit holds the same files as the directory fixture, so the model
+    // is byte for byte the directory snapshot.
+    snapshot(
+        "model_fixture.json",
+        &String::from_utf8(out.stdout).unwrap(),
+    );
+
+    let first =
+        String::from_utf8(bp(&["model", d, "--rev", "HEAD~1", "--level", "1"]).stdout).unwrap();
+    assert_eq!(first, "L1:cargo:crates/core#\tsystem\tcore\texact\n");
+    let worktree = String::from_utf8(bp(&["model", d, "--level", "1"]).stdout).unwrap();
+    assert!(worktree.contains("worktree-only"), "{worktree}");
+}
+
+#[test]
+fn rev_that_does_not_resolve_fails_with_exit_1() {
+    let dir = git_fixture("bad-rev");
+    let out = bp(&["model", dir.to_str().unwrap(), "--rev", "no-such-branch"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-branch"));
+    let out = bp(&["model", "/no/such/repository/for/bp", "--rev", "HEAD"]);
+    assert_eq!(out.status.code(), Some(1));
 }
