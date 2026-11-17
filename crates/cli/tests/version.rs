@@ -23,5 +23,5 @@ fn unknown_command_fails_with_usage() {
         .expect("run bp");
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).expect("utf8");
-    assert!(stderr.contains("usage: bp"), "stderr was: {stderr}");
+    assert!(stderr.contains("Usage: bp"), "stderr was: {stderr}");
 }

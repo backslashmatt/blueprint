@@ -1,0 +1,5 @@
+L1:cargo:crates/app#	system	app	exact
+L1:cargo:crates/core#	system	core	exact
+L1:npm:web#	system	web	exact
+L1:unowned:#	unowned	(unowned)	unknown
+L1:cargo:crates/app# -> L1:cargo:crates/core#	depends-on	exact	normal

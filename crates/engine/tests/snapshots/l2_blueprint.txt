@@ -31,6 +31,7 @@ nodes:
   L2:cargo:crates/engine#l1/path/tests  Module  "l1::path::tests"  Exact  crates/engine/src/l1/path.rs  Private
   L2:cargo:crates/engine#l2  Module  "l2"  Exact  crates/engine/src/l2/mod.rs  Public
   L2:cargo:crates/engine#l2/rust  Module  "l2::rust"  Exact  crates/engine/src/l2/rust.rs  Public
+  L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
   L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
@@ -51,6 +52,7 @@ edges:
   L1:cargo:crates/app# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/app# -> L1:cargo:crates/ui#  DependsOn  Exact  {Normal}
   L1:cargo:crates/cli# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/cli# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/cli# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
