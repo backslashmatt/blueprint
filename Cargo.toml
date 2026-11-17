@@ -11,6 +11,8 @@ members = [
     "bench",
     "xtask",
 ]
+# cargo-fuzz targets need nightly Rust and build on their own.
+exclude = ["crates/store/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
