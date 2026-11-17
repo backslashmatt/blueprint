@@ -31,6 +31,8 @@ nodes:
   L2:cargo:crates/engine#l1/path  Module  "l1::path"  Exact  crates/engine/src/l1/path.rs  Public
   L2:cargo:crates/engine#l1/path/tests  Module  "l1::path::tests"  Exact  crates/engine/src/l1/path.rs  Private
   L2:cargo:crates/engine#l2  Module  "l2"  Exact  crates/engine/src/l2/mod.rs  Public
+  L2:cargo:crates/engine#l2/lexer  Module  "l2::lexer"  Exact  crates/engine/src/l2/lexer.rs  Private
+  L2:cargo:crates/engine#l2/lexer/tests  Module  "l2::lexer::tests"  Exact  crates/engine/src/l2/lexer.rs  Private
   L2:cargo:crates/engine#l2/rust  Module  "l2::rust"  Exact  crates/engine/src/l2/rust.rs  Public
   L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
   L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests

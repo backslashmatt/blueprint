@@ -3,7 +3,7 @@
 //! **Crate roots** come from the package's `Cargo.toml`: `[lib] path` (else
 //! `src/lib.rs`), each `[[bin]] path`, and, unless `autobins = false`,
 //! `src/main.rs`, `src/bin/*.rs` and `src/bin/*/main.rs`. Each root file is
-//! parsed with `tree-sitter-rust` and only its `mod` items are read; every
+//! read by a shallow lexer for its `mod` items only (DR 0006); every
 //! module becomes an L2 node whose path is its module path (`l1::cargo` is
 //! `["l1", "cargo"]`). Modules declared by several roots, or by several
 //! `cfg` variants, become one node holding all of their children.
@@ -25,7 +25,7 @@
 //! - `inferred`: the file is missing, a `cfg_attr` may change its path, it
 //!   was declared inside a macro, or nesting went past [`MAX_DEPTH`];
 //! - `unknown`: the file cannot be read or has syntax errors. Modules are
-//!   still read from tree-sitter's recovered tree.
+//!   read up to the damage.
 //!
 //! Recursion is bounded by [`MAX_DEPTH`] and the work per crate by
 //! [`MAX_FILE_WALKS`], so hostile input cannot exhaust the stack or time.
@@ -36,8 +36,8 @@ use blueprint_model::{
     Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey, Visibility,
 };
 use toml::{Table, Value};
-use tree_sitter::{Node as TsNode, Parser};
 
+use super::lexer::{ModItem, scan};
 use crate::l1::{Diagnostic, Read};
 
 /// Module nesting, inline or by file, deeper than this is not followed.
@@ -52,7 +52,6 @@ struct Ctx<'a> {
     key: &'a SystemKey,
     files: &'a BTreeSet<&'a RepoPath>,
     read: Read<'a>,
-    parser: Parser,
     /// Files on the current inclusion chain, to stop `#[path]` cycles.
     stack: Vec<Vec<String>>,
     walks: usize,
@@ -60,25 +59,6 @@ struct Ctx<'a> {
     reached: BTreeSet<RepoPath>,
     model: &'a mut Model,
     diags: &'a mut Vec<Diagnostic>,
-}
-
-/// A `mod` declaration.
-struct ModItem<'t> {
-    name: String,
-    body: Option<TsNode<'t>>,
-    path_attr: Option<String>,
-    cfg_attr_path: bool,
-    in_macro: bool,
-    visibility: Visibility,
-}
-
-/// The visibility a `pub`, `pub(..)` or absent modifier gives.
-fn visibility_of(modifier: Option<&str>) -> Visibility {
-    match modifier.map(str::trim) {
-        Some("pub") => Visibility::Public,
-        Some(m) if m.starts_with("pub") || m == "crate" => Visibility::Restricted,
-        _ => Visibility::Private,
-    }
 }
 
 /// Adds the module tree of the package `system` to `model`, and returns the
@@ -96,20 +76,11 @@ pub fn analyse_crate(
     if roots.is_empty() {
         return None;
     }
-    let mut parser = Parser::new();
-    if let Err(e) = parser.set_language(&tree_sitter_rust::LANGUAGE.into()) {
-        diags.push(Diagnostic {
-            path: key.dir.clone(),
-            message: format!("Rust grammar: {e}"),
-        });
-        return None;
-    }
     let mut ctx = Ctx {
         system,
         key,
         files,
         read,
-        parser,
         stack: Vec::new(),
         walks: 0,
         reached: BTreeSet::new(),
@@ -199,135 +170,6 @@ fn normalise(base: &[String], rel: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// The text of a string literal node.
-fn string_value(node: TsNode<'_>, src: &[u8]) -> Option<String> {
-    let mut cur = node.walk();
-    let content = node
-        .children(&mut cur)
-        .find(|c| c.kind() == "string_content")?;
-    content.utf8_text(src).ok().map(str::to_owned)
-}
-
-/// The leaf tokens under `node`, in order, without recursion.
-fn leaves<'t>(node: TsNode<'t>) -> Vec<TsNode<'t>> {
-    let mut out = Vec::new();
-    let mut cur = node.walk();
-    'walk: loop {
-        let n = cur.node();
-        if n.child_count() == 0 {
-            out.push(n);
-        } else if cur.goto_first_child() {
-            continue;
-        }
-        loop {
-            if cur.goto_next_sibling() {
-                continue 'walk;
-            }
-            if !cur.goto_parent() || cur.node().id() == node.id() {
-                break 'walk;
-            }
-        }
-    }
-    out
-}
-
-/// Whether a `cfg_attr` attribute sets `path = ..`.
-fn sets_path(attr: TsNode<'_>, src: &[u8]) -> bool {
-    let toks: Vec<&str> = leaves(attr)
-        .iter()
-        .filter_map(|t| t.utf8_text(src).ok())
-        .collect();
-    toks.windows(2).any(|w| w == ["path", "="])
-}
-
-/// The `mod` declarations directly inside `list` (a `source_file` or a
-/// `declaration_list`), with the attributes written just before each, and
-/// those found by a token scan of macro calls.
-fn mod_items<'t>(list: TsNode<'t>, src: &[u8]) -> Vec<ModItem<'t>> {
-    let mut out = Vec::new();
-    let mut path_attr = None;
-    let mut cfg_attr_path = false;
-    let mut cur = list.walk();
-    for child in list.named_children(&mut cur) {
-        match child.kind() {
-            "attribute_item" => {
-                if let Some(attr) = child.named_child(0) {
-                    let name = attr
-                        .named_child(0)
-                        .and_then(|n| n.utf8_text(src).ok())
-                        .unwrap_or("");
-                    if name == "path" {
-                        path_attr = attr
-                            .child_by_field_name("value")
-                            .and_then(|v| string_value(v, src));
-                    } else if name == "cfg_attr" {
-                        cfg_attr_path |= sets_path(attr, src);
-                    }
-                }
-                continue;
-            }
-            "line_comment" | "block_comment" => continue,
-            "mod_item" => {
-                let name = child
-                    .child_by_field_name("name")
-                    .and_then(|n| n.utf8_text(src).ok())
-                    .map(|s| s.strip_prefix("r#").unwrap_or(s).to_owned());
-                if let Some(name) = name {
-                    out.push(ModItem {
-                        name,
-                        body: child.child_by_field_name("body"),
-                        path_attr: path_attr.take(),
-                        cfg_attr_path,
-                        in_macro: false,
-                        visibility: visibility_of(
-                            child
-                                .named_child(0)
-                                .filter(|c| c.kind() == "visibility_modifier")
-                                .and_then(|c| c.utf8_text(src).ok()),
-                        ),
-                    });
-                }
-            }
-            "macro_invocation" | "expression_statement" => {
-                let toks: Vec<TsNode<'t>> = leaves(child);
-                let text = |i: usize| {
-                    toks.get(i)
-                        .and_then(|t| t.utf8_text(src).ok())
-                        .unwrap_or("")
-                };
-                for i in 0..toks.len() {
-                    if text(i) == "mod"
-                        && text(i + 2) == ";"
-                        && toks.get(i + 1).is_some_and(|t| t.kind() == "identifier")
-                    {
-                        let n = text(i + 1);
-                        out.push(ModItem {
-                            name: n.strip_prefix("r#").unwrap_or(n).to_owned(),
-                            body: None,
-                            path_attr: None,
-                            cfg_attr_path: false,
-                            in_macro: true,
-                            // `pub mod x;` or `pub(crate) mod x;` in tokens.
-                            visibility: match (
-                                i.checked_sub(1).map(text),
-                                i.checked_sub(4).map(text),
-                            ) {
-                                (Some("pub"), _) => Visibility::Public,
-                                (Some(")"), Some("pub")) => Visibility::Restricted,
-                                _ => Visibility::Private,
-                            },
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-        path_attr = None;
-        cfg_attr_path = false;
-    }
-    out
-}
-
 impl Ctx<'_> {
     fn id(&self, module: &[String]) -> NodeId {
         NodeId::within(Level::Module, self.key.clone(), module.to_vec())
@@ -402,22 +244,18 @@ impl Ctx<'_> {
             self.diag(file, "cannot be read");
             return Confidence::Unknown;
         };
-        let Some(tree) = self.parser.parse(&bytes, None) else {
-            self.diag(file, "parse cancelled");
-            return Confidence::Unknown;
-        };
-        let root = tree.root_node();
-        let conf = if root.has_error() {
-            self.diag(file, "syntax errors; modules read from the recovered tree");
-            Confidence::Unknown
-        } else {
+        let text = String::from_utf8_lossy(&bytes);
+        let found = scan(&text);
+        let conf = if found.clean && std::str::from_utf8(&bytes).is_ok() {
             Confidence::Exact
+        } else {
+            self.diag(file, "unbalanced brackets, an unterminated comment or string, or not UTF-8; modules read up to the damage");
+            Confidence::Unknown
         };
         let parent_dir = file[..file.len() - 1].to_vec();
         self.stack.push(file.to_vec());
         self.walk_items(
-            root,
-            &bytes,
+            &found.items,
             file,
             conf,
             &parent_dir,
@@ -435,8 +273,7 @@ impl Ctx<'_> {
     #[allow(clippy::too_many_arguments)]
     fn walk_items(
         &mut self,
-        list: TsNode<'_>,
-        src: &[u8],
+        items: &[ModItem],
         file: &[String],
         file_conf: Confidence,
         path_base: &[String],
@@ -444,7 +281,7 @@ impl Ctx<'_> {
         module: &[String],
         depth: usize,
     ) {
-        for item in mod_items(list, src) {
+        for item in items {
             let mut sub = module.to_vec();
             sub.push(item.name.clone());
             if depth >= MAX_DEPTH {
@@ -456,7 +293,7 @@ impl Ctx<'_> {
                 }
                 continue;
             }
-            if let Some(body) = item.body {
+            if let Some(body) = &item.body {
                 let inner = match &item.path_attr {
                     Some(p) => normalise(path_base, p),
                     None => Some([child_dir, std::slice::from_ref(&item.name)].concat()),
@@ -477,7 +314,7 @@ impl Ctx<'_> {
                     item.visibility,
                 );
                 if let Some(inner) = inner {
-                    self.walk_items(body, src, file, file_conf, &inner, &inner, &sub, depth + 1);
+                    self.walk_items(body, file, file_conf, &inner, &inner, &sub, depth + 1);
                 }
                 continue;
             }
