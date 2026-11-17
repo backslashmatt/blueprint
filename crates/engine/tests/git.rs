@@ -247,7 +247,7 @@ fn commit_tree(repo: &gix::Repository, tree: ObjectId) -> R<ObjectId> {
 fn read_error(r: Result<Vec<blueprint_engine::git::TreeEntry>, GitError>) -> String {
     match r {
         Err(GitError::Read(e)) => e,
-        other => panic!("expected a read error, got {other:?}"),
+        other => format!("expected a read error, got {other:?}"),
     }
 }
 
