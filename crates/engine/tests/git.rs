@@ -185,12 +185,52 @@ fn logs_commits_newest_first_with_their_details() -> R<()> {
 }
 
 #[test]
+fn suggests_the_branch_against_its_merge_base_with_the_default_branch() -> R<()> {
+    let f = fixture()?;
+    let git = gix::open(&f.dir)?;
+    let topic_tree = tree(&git, vec![(b"TOPIC.md", K::Blob, f.readme)])?;
+    let topic = git
+        .commit_as(
+            sig(),
+            sig(),
+            "refs/heads/topic",
+            "topic",
+            topic_tree,
+            [f.second],
+        )?
+        .detach();
+    let repo = Repo::open(&f.dir)?;
+    assert_eq!(repo.head_branch().as_deref(), Some("refs/heads/main"));
+    assert_eq!(
+        repo.suggested_review(),
+        Some((f.first, f.second)),
+        "on main: HEAD against its parent"
+    );
+    std::fs::write(f.dir.join("HEAD"), "ref: refs/heads/topic\n")?;
+    let repo = Repo::open(&f.dir)?;
+    assert_eq!(repo.head_branch().as_deref(), Some("refs/heads/topic"));
+    assert_eq!(
+        repo.default_branch(),
+        Some(("refs/heads/main".to_string(), f.second))
+    );
+    assert_eq!(repo.merge_base(topic, f.second)?, Some(f.second));
+    assert_eq!(repo.suggested_review(), Some((f.second, topic)));
+    // Detached HEAD: no branch, still a suggestion.
+    std::fs::write(f.dir.join("HEAD"), format!("{topic}\n"))?;
+    let repo = Repo::open(&f.dir)?;
+    assert_eq!(repo.head_branch(), None);
+    assert_eq!(repo.suggested_review(), Some((f.second, topic)));
+    Ok(())
+}
+
+#[test]
 fn an_empty_repository_has_no_head() -> R<()> {
     let dir = fresh_dir("empty");
     gix::init_bare(&dir)?;
     let repo = Repo::open(&dir)?;
     assert_eq!(repo.head(), None);
     assert!(repo.refs()?.is_empty());
+    assert_eq!(repo.suggested_review(), None);
     Ok(())
 }
 

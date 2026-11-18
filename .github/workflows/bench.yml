@@ -27,7 +27,8 @@ jobs:
     name: bench (linux x64)
     # The fixed runner class (DR 0002).
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # Two cold release builds (fat LTO, the app included) can take 40 min on their own.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml

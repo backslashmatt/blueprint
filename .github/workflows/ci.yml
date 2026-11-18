@@ -45,6 +45,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The app test reviews this repository's last change.
+          fetch-depth: 2
       - name: Install toolchain from rust-toolchain.toml
         shell: bash
         run: rustup toolchain install
@@ -72,6 +75,21 @@ jobs:
             timeout 120 target/debug/blueprint --cold-start-report cold-start.json
           fi
           cat cold-start.json
+      # The app test of #90: open this repository, choose two commits by keyboard, reach the review.
+      - name: app review by keyboard
+        shell: bash
+        run: |
+          # Base: the last row (the oldest commit listed); head: the first (a ref at HEAD).
+          keys=end,b,home,h,enter
+          if [ "$RUNNER_OS" = Linux ]; then
+            timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script $keys --review-report review.json
+          else
+            timeout 300 target/debug/blueprint . --script $keys --review-report review.json
+          fi
+          cat review.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
+            echo "the keys chose the same commit as base and head"; exit 1
+          fi
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
@@ -88,6 +106,8 @@ jobs:
           libX11-devel libxcb-devel fontconfig-devel vulkan-loader mesa-vulkan-drivers
           xorg-x11-server-Xvfb openbox procps-ng
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
       - name: Trust the checkout (the container runs as root; the runner owns the files)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install toolchain from rust-toolchain.toml
@@ -105,3 +125,10 @@ jobs:
           cargo build --locked -p blueprint-app
           timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
           cat cold-start.json
+      - name: app review by keyboard
+        run: |
+          timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script end,b,home,h,enter --review-report review.json
+          cat review.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
+            echo "the keys chose the same commit as base and head"; exit 1
+          fi

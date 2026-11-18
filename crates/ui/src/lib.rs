@@ -7,6 +7,8 @@ use gpui::{
 };
 
 pub mod layout;
+pub mod review_list;
+pub mod workspace;
 
 /// The colours of one theme (§5.5: light and dark, following the system).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

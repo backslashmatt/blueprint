@@ -161,6 +161,12 @@ pub enum Response {
         refs: Vec<Ref>,
         /// Recent commits from `HEAD`, newest first.
         commits: Vec<CommitSummary>,
+        /// The branch `HEAD` is on (`refs/heads/…`); `None` when detached.
+        current: Option<String>,
+        /// The review to start from, `(base, head)` commit ids: `HEAD`
+        /// against its merge base with the default branch, or against its
+        /// first parent when that merge base is `HEAD` itself.
+        suggested: Option<(String, String)>,
     },
     /// A commit's model, at `detail`.
     Model {
