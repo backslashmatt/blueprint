@@ -86,6 +86,8 @@ fn bp_diff(dir: &Path) -> Vec<String> {
     let mut lines: Vec<String> = String::from_utf8(out.stdout)
         .unwrap()
         .lines()
+        // Change weight has cases of its own below.
+        .filter(|l| !l.starts_with("weight\t"))
         .map(str::to_owned)
         .collect();
     lines.sort();
@@ -722,5 +724,116 @@ fn every_hand_written_change_gives_its_expected_diff() {
         failed.len(),
         cases.len(),
         failed.join("\n")
+    );
+}
+
+/// Change weight: lines removed plus lines added, split into signature and
+/// body, rolled up to every ancestor.
+#[test]
+fn change_weight_counts_lines_by_node_and_rolls_them_up() {
+    let weights = |name: &str, base: Files<'_>, head: Files<'_>| -> Vec<String> {
+        let dir = repo(name, base, head);
+        let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bp-diff-suite-cache");
+        let out = Command::new(env!("CARGO_BIN_EXE_bp"))
+            .args(["diff", dir.to_str().unwrap(), "HEAD~1", "HEAD"])
+            .env("BLUEPRINT_CACHE_DIR", cache)
+            .output()
+            .unwrap();
+        let mut w: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("weight\t"))
+            .map(str::to_owned)
+            .collect();
+        w.sort();
+        w
+    };
+    // One line of signature and one of body changed: each is a line removed
+    // and a line added.
+    assert_eq!(
+        weights(
+            "weight-edit",
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", "pub fn f() {\n    let x = 1;\n}\n"),
+                ("src/b.rs", "")
+            ],
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", "pub fn f(y: u8) {\n    let x = 2;\n}\n"),
+                ("src/b.rs", "")
+            ],
+        ),
+        [
+            "weight\tL1:cargo:#\t2\t2",
+            "weight\tL2:cargo:#a\t2\t2",
+            "weight\tL3:cargo:#a/(functions)\t2\t2",
+            "weight\tL4:cargo:#a/(functions)/f\t2\t2",
+        ]
+    );
+    // A new three-line function: its first line is signature.
+    assert_eq!(
+        weights(
+            "weight-added",
+            &[MANIFEST, LIB, ("src/a.rs", ""), ("src/b.rs", "")],
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", ""),
+                ("src/b.rs", "pub fn n() {\n    let _ = 1;\n}\n")
+            ],
+        ),
+        [
+            "weight\tL1:cargo:#\t1\t2",
+            "weight\tL2:cargo:#b\t1\t2",
+            "weight\tL3:cargo:#b/(functions)\t1\t2",
+            "weight\tL4:cargo:#b/(functions)/n\t1\t2",
+        ]
+    );
+    // A line outside any item counts for the file's module.
+    assert_eq!(
+        weights(
+            "weight-module-line",
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", "pub fn f() {}\n"),
+                ("src/b.rs", "")
+            ],
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", "use std::fmt;\npub fn f() {}\n"),
+                ("src/b.rs", "")
+            ],
+        ),
+        ["weight\tL1:cargo:#\t0\t1", "weight\tL2:cargo:#a\t0\t1"]
+    );
+    // A file no analyser reads: all its changed lines, under its directory.
+    assert_eq!(
+        weights(
+            "weight-unknown-file",
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", ""),
+                ("src/b.rs", ""),
+                ("README.md", "one\ntwo\n")
+            ],
+            &[
+                MANIFEST,
+                LIB,
+                ("src/a.rs", ""),
+                ("src/b.rs", ""),
+                ("README.md", "one\n2\nthree\n")
+            ],
+        ),
+        [
+            "weight\tL1:cargo:#\t0\t3",
+            "weight\tL2:cargo:#.%2F\t0\t3",
+            "weight\tL3:cargo:#.%2F/README.md\t0\t3",
+        ]
     );
 }

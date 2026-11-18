@@ -478,15 +478,22 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
 fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
     let index = existing_index(path);
     // Both models at once: decoding stored ones is most of the time.
-    let built: Vec<Result<(Model, Vec<Diagnostic>), String>> = std::thread::scope(|s| {
+    // The files that differ are listed on a third thread, for weights.
+    let (built, changed): (Vec<Built>, _) = std::thread::scope(|s| {
         let index = index.as_ref();
+        let changed = s.spawn(move || changed_files(path, base, head));
         let jobs: Vec<_> = [base, head]
             .into_iter()
             .map(|rev| s.spawn(move || deep_model(path, rev, index)))
             .collect();
-        jobs.into_iter()
+        let built = jobs
+            .into_iter()
             .map(|j| j.join().unwrap_or_else(|_| Err("analysis failed".into())))
-            .collect()
+            .collect();
+        let changed = changed
+            .join()
+            .unwrap_or_else(|_| Err("listing changed files failed".into()));
+        (built, changed)
     });
     let mut models = Vec::new();
     for b in built {
@@ -501,7 +508,21 @@ fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
             }
         }
     }
-    let d = blueprint_engine::diff::diff(&models[0], &models[1]);
+    let mut d = blueprint_engine::diff::diff(&models[0], &models[1]);
+    match changed {
+        Ok(files) => {
+            let files: Vec<blueprint_engine::diff::ChangedFile<'_>> = files
+                .iter()
+                .map(|(p, b, h)| blueprint_engine::diff::ChangedFile {
+                    path: p,
+                    base: b.as_deref(),
+                    head: h.as_deref(),
+                })
+                .collect();
+            blueprint_engine::diff::weigh(&mut d, &models[0], &models[1], &files);
+        }
+        Err(e) => eprintln!("warning: change weight not computed: {e}"),
+    }
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let written = if json {
@@ -520,6 +541,34 @@ fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
     std::mem::forget(models);
     std::mem::forget(index);
     ExitCode::SUCCESS
+}
+
+/// A model and its diagnostics, or why it could not be had.
+type Built = Result<(Model, Vec<Diagnostic>), String>;
+
+/// Each file whose blob differs between `base` and `head`, with its bytes
+/// in each (`None` where it does not exist).
+type Changed = Vec<(RepoPath, Option<Vec<u8>>, Option<Vec<u8>>)>;
+
+fn changed_files(path: &Path, base: &str, head: &str) -> Result<Changed, String> {
+    let repo = Repo::open(path).map_err(|e| e.to_string())?;
+    let (b, h) = (
+        repo.resolve(base).map_err(|e| e.to_string())?,
+        repo.resolve(head).map_err(|e| e.to_string())?,
+    );
+    let read = |id: Option<ObjectId>| id.and_then(|id| repo.blob(id).ok());
+    let mut out = Vec::new();
+    for (p, bid, hid) in repo.changed_blobs(b, h).map_err(|e| e.to_string())? {
+        // Paths that are not valid repository paths are not in either model.
+        let Some(p) = std::str::from_utf8(&p)
+            .ok()
+            .and_then(|p| RepoPath::parse(p).ok())
+        else {
+            continue;
+        };
+        out.push((p, read(bid), read(hid)));
+    }
+    Ok(out)
 }
 
 /// The text form of a diff: one tab-separated line per finding, node change
@@ -570,6 +619,13 @@ fn diff_text(d: &blueprint_engine::diff::Diff) -> String {
     }
     for k in &d.removed_edges {
         let _ = writeln!(s, "-edge\t{}", edge(k));
+    }
+    for w in &d.weights {
+        let _ = writeln!(
+            s,
+            "weight\t{}\t{}\t{}",
+            w.id, w.lines.signature, w.lines.body
+        );
     }
     s
 }

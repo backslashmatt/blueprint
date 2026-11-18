@@ -335,3 +335,64 @@ fn commit_source_reads_files_and_reports_what_it_skips() -> R<()> {
     assert!(Commit::open(&f.dir, "no-such-branch").is_err());
     Ok(())
 }
+
+#[test]
+fn changed_blobs_reads_only_what_differs() -> R<()> {
+    let dir = fresh_dir("changed");
+    let repo = gix::init(&dir)?;
+    let blob = |s: &str| -> R<ObjectId> { Ok(repo.write_blob(s.as_bytes())?.detach()) };
+    let (same, old, new, gone, added) = (
+        blob("same")?,
+        blob("old")?,
+        blob("new")?,
+        blob("gone")?,
+        blob("added")?,
+    );
+    // Base: keep/same, src/deep/f (old), src/gone, x/ (a directory).
+    let deep_base = tree(&repo, vec![(b"f", K::Blob, old)])?;
+    let x_dir = tree(&repo, vec![(b"inside", K::Blob, same)])?;
+    let keep = tree(&repo, vec![(b"same", K::Blob, same)])?;
+    let src_base = tree(
+        &repo,
+        vec![(b"deep", K::Tree, deep_base), (b"gone", K::Blob, gone)],
+    )?;
+    let base = tree(
+        &repo,
+        vec![
+            (b"keep", K::Tree, keep),
+            (b"src", K::Tree, src_base),
+            (b"x", K::Tree, x_dir),
+        ],
+    )?;
+    // Head: keep/ unchanged, src/deep/f (new), src/added, x is now a file.
+    let deep_head = tree(&repo, vec![(b"f", K::Blob, new)])?;
+    let src_head = tree(
+        &repo,
+        vec![(b"added", K::Blob, added), (b"deep", K::Tree, deep_head)],
+    )?;
+    let head = tree(
+        &repo,
+        vec![
+            (b"keep", K::Tree, keep),
+            (b"src", K::Tree, src_head),
+            (b"x", K::Blob, added),
+        ],
+    )?;
+    let (b, h) = (commit_tree(&repo, base)?, commit_tree(&repo, head)?);
+    let r = Repo::open(&dir)?;
+    let got: Vec<(String, Option<ObjectId>, Option<ObjectId>)> = r
+        .changed_blobs(b, h)?
+        .into_iter()
+        .map(|(p, x, y)| (String::from_utf8_lossy(&p).into_owned(), x, y))
+        .collect();
+    let want = vec![
+        ("src/added".to_owned(), None, Some(added)),
+        ("src/deep/f".to_owned(), Some(old), Some(new)),
+        ("src/gone".to_owned(), Some(gone), None),
+        ("x".to_owned(), None, Some(added)),
+        ("x/inside".to_owned(), Some(same), None),
+    ];
+    assert_eq!(got, want);
+    assert!(r.changed_blobs(h, h)?.is_empty());
+    Ok(())
+}

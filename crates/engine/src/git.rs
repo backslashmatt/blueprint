@@ -106,6 +106,10 @@ fn read_err(e: impl fmt::Display) -> GitError {
     GitError::Read(e.to_string())
 }
 
+/// A file whose content differs between two commits: its path, and its
+/// blob in each (`None` where it does not exist).
+pub type ChangedBlob = (Vec<u8>, Option<ObjectId>, Option<ObjectId>);
+
 /// A repository opened for reading objects.
 pub struct Repo {
     inner: gix::Repository,
@@ -231,6 +235,102 @@ impl Repo {
             }
         }
         out.sort_unstable();
+        Ok(out)
+    }
+
+    /// The regular and executable files whose content differs between the
+    /// trees of `base` and `head`, sorted by path: each with its blob in
+    /// base and in head (`None` where it does not exist there). Only
+    /// subtrees whose ids differ are read, so this costs what changed, not
+    /// the size of the trees. Symbolic links and submodules are skipped, as
+    /// [`crate::source::Commit`] skips them.
+    pub fn changed_blobs(
+        &self,
+        base: ObjectId,
+        head: ObjectId,
+    ) -> Result<Vec<ChangedBlob>, GitError> {
+        let (a, b) = (self.tree_id(base)?, self.tree_id(head)?);
+        let mut out = Vec::new();
+        let mut seen = 0usize;
+        let mut queue = std::collections::VecDeque::from([(Vec::<u8>::new(), Some(a), Some(b))]);
+        while let Some((prefix, a, b)) = queue.pop_front() {
+            if a == b {
+                continue;
+            }
+            let side = |id: Option<ObjectId>| -> Result<Vec<(Vec<u8>, ObjectId, u32)>, GitError> {
+                let Some(id) = id else {
+                    return Ok(Vec::new());
+                };
+                let tree = self.inner.find_tree(id).map_err(read_err)?;
+                let decoded = tree.decode().map_err(read_err)?;
+                let mut v = Vec::with_capacity(decoded.entries.len());
+                for e in decoded.entries {
+                    if !valid_name(e.filename) {
+                        return Err(GitError::Read(format!(
+                            "tree {id} has an invalid entry name {:?}",
+                            e.filename.as_bstr()
+                        )));
+                    }
+                    v.push((e.filename.to_vec(), e.oid.to_owned(), e.mode.value().into()));
+                }
+                v.sort();
+                Ok(v)
+            };
+            let (left, right) = (side(a)?, side(b)?);
+            seen += left.len() + right.len();
+            if seen > MAX_TREE_ENTRIES {
+                return Err(GitError::Read(format!(
+                    "trees of {base} and {head} differ in more than {MAX_TREE_ENTRIES} entries"
+                )));
+            }
+            let join = |name: &[u8]| {
+                let mut p = prefix.clone();
+                if !p.is_empty() {
+                    p.push(b'/');
+                }
+                p.extend_from_slice(name);
+                p
+            };
+            let is_dir = |mode: u32| mode == 0o40000;
+            let is_file = |mode: u32| matches!(mode, 0o100644 | 0o100664 | 0o100755);
+            let (mut i, mut j) = (0, 0);
+            while i < left.len() || j < right.len() {
+                let (l, r) = (left.get(i), right.get(j));
+                let order = match (l, r) {
+                    (Some(x), Some(y)) => x.0.cmp(&y.0),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Greater,
+                };
+                let (l, r) = match order {
+                    std::cmp::Ordering::Less => {
+                        i += 1;
+                        (l, None)
+                    }
+                    std::cmp::Ordering::Greater => {
+                        j += 1;
+                        (None, r)
+                    }
+                    std::cmp::Ordering::Equal => {
+                        i += 1;
+                        j += 1;
+                        (l, r)
+                    }
+                };
+                let name = l.or(r).map_or(&[][..], |e| e.0.as_slice());
+                let dir =
+                    |e: Option<&(Vec<u8>, ObjectId, u32)>| e.filter(|e| is_dir(e.2)).map(|e| e.1);
+                let file =
+                    |e: Option<&(Vec<u8>, ObjectId, u32)>| e.filter(|e| is_file(e.2)).map(|e| e.1);
+                if dir(l).is_some() || dir(r).is_some() {
+                    queue.push_back((join(name), dir(l), dir(r)));
+                }
+                let (fl, fr) = (file(l), file(r));
+                if (fl.is_some() || fr.is_some()) && fl != fr {
+                    out.push((join(name), fl, fr));
+                }
+            }
+        }
+        out.sort();
         Ok(out)
     }
 

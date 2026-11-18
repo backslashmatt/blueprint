@@ -14,7 +14,8 @@
     { "change": "moved", "from": "…", "to": "…" }
   ],
   "added_edges": [{ "from": "…", "to": "…", "kind": "calls" }],
-  "removed_edges": []
+  "removed_edges": [],
+  "weights": [{ "id": "L4:cargo:#a/(functions)/f", "signature": 2, "body": 2 }]
 }
 ```
 
@@ -38,8 +39,13 @@
 
 A node whose lines moved but whose signature and body did not change is not reported. Moves and renames are paired greedily in id order. A body edited as it moved is reported as `removed` plus `added`. A node with no body, such as a struct or an enum, is paired by its whole definition instead: the same kind, name and signature in another parent is `moved`. Such a node cannot be told apart from a new one when renamed, so a renamed struct is `removed` plus `added`.
 
-## Not yet
+## Change weight
 
-- Change weight (lines changed per node, split into signature and body) arrives with #64's follow-up.
+`weights` lists every node with changed lines, sorted by id. Its lines are lines removed from base plus lines added in head, found by a line diff (`imara-diff`, Histogram) of each file whose content differs.
+
+- Each removed line counts for the innermost base item whose span holds it, and each added line for the innermost head item.
+- A line before the item's body, or the line the item starts on, is a `signature` line. Any other line is a `body` line.
+- Lines that no item holds, such as `use` lines, count as `body` for the file's own node: its module, or the component of a file no analyser reads.
+- Each node's numbers include its descendants', rolled up through each model's parents. A node only in base is weighed through base's parents.
 
 Both models are read from the index when `bp index --level 4` stored them (DR 0009). Otherwise they are built, with each Rust file's facts taken from the index where it holds them.
