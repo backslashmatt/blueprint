@@ -372,3 +372,72 @@ fn an_impl_of_a_local_trait_for_a_foreign_type_gives_no_edge() {
     assert!(model.edges().all(|e| e.key.kind != EdgeKind::Implements));
     assert!(edge(&model, "L1:cargo:x#", "L1:cargo:y#", EdgeKind::Implements).is_none());
 }
+
+#[test]
+fn calls_resolve_by_path_and_roll_up() {
+    let entries: &[(&str, &str)] = &[
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"lib\"]\n"),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\nlib = { path = \"../lib\" }\n",
+        ),
+        (
+            "app/src/main.rs",
+            "mod util;\nuse util::helper;\nuse lib::Graph;\nfn main() {\n    local();\n    helper();\n    util::other();\n    Graph::new();\n    lib::build();\n    main();\n    x.method();\n}\nfn local() {}\n",
+        ),
+        (
+            "app/src/util.rs",
+            "pub fn helper() {}\npub fn other() {}\npub struct Cfg;\nimpl Cfg {\n    pub fn load() -> Self { Self::parse() }\n    fn parse() -> Self { Cfg }\n}\n",
+        ),
+        ("lib/Cargo.toml", "[package]\nname = \"lib\"\n"),
+        (
+            "lib/src/lib.rs",
+            "pub struct Graph;\nimpl Graph { pub fn new() -> Self { Graph } }\npub fn build() {}\n",
+        ),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let calls = |from: &str, to: &str| edge(&model, from, to, EdgeKind::Calls);
+    let main = "L4:cargo:app#(functions)/main";
+    let inf = Some(Confidence::Inferred);
+    assert_eq!(calls(main, "L4:cargo:app#(functions)/local"), inf);
+    assert_eq!(
+        calls(main, "L4:cargo:app#util/(functions)/helper"),
+        inf,
+        "imported"
+    );
+    assert_eq!(
+        calls(main, "L4:cargo:app#util/(functions)/other"),
+        inf,
+        "module path"
+    );
+    assert_eq!(calls(main, "L4:cargo:lib#Graph/new"), inf, "imported type");
+    assert_eq!(
+        calls(main, "L4:cargo:lib#(functions)/build"),
+        inf,
+        "crate path"
+    );
+    assert_eq!(
+        calls("L4:cargo:app#util/Cfg/load", "L4:cargo:app#util/Cfg/parse"),
+        inf,
+        "Self::"
+    );
+    assert!(calls(main, main).is_none(), "recursion is not an edge");
+    let from_main = model
+        .edges()
+        .filter(|e| String::from(e.key.from.clone()) == main && e.key.kind == EdgeKind::Calls)
+        .count();
+    assert_eq!(from_main, 5, "the method call is not resolved");
+    // Rolled up to L3 and L2; calls never become system dependencies.
+    assert_eq!(
+        calls("L3:cargo:app#(functions)", "L3:cargo:app#util/(functions)"),
+        inf
+    );
+    assert_eq!(calls("L2:cargo:app#", "L2:cargo:app#util"), inf);
+    assert!(
+        model
+            .edges()
+            .all(|e| !(e.key.kind == EdgeKind::Calls && e.key.from.level() == Level::System))
+    );
+}

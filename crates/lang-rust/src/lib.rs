@@ -34,7 +34,7 @@ impl LanguageAnalyser for Rust {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -302,6 +302,7 @@ impl<'s> Out<'s> {
                 .child_by_field_name("body")
                 .map(|b| line(b.start_position().row)),
         };
+        let kind_is_fn = !matches!(kind, ItemKind::Type { .. });
         let item = Item {
             kind,
             name: text(src, name_node),
@@ -314,9 +315,50 @@ impl<'s> Out<'s> {
             visibility,
             signature_hash,
             body_hash,
+            calls: if kind_is_fn {
+                node.child_by_field_name("body")
+                    .map(|b| calls(src, b))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         };
         self.items.push((first.start_byte(), item));
     }
+}
+
+/// The paths called in `body`, in source order, without repeats. Calls in
+/// nested closures count; nested functions and macro arguments do not.
+fn calls(src: &[u8], body: Node<'_>) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "function_item" | "macro_invocation" => continue,
+            "call_expression" => {
+                let mut callee = n.child_by_field_name("function");
+                // `foo::<T>()`: the function without its arguments.
+                if let Some(c) = callee.filter(|c| c.kind() == "generic_function") {
+                    callee = c.child_by_field_name("function");
+                }
+                if let Some(c) = callee
+                    && matches!(c.kind(), "identifier" | "scoped_identifier")
+                {
+                    // Keep the names; drop generic arguments' tokens.
+                    let mut path = segments(src, c);
+                    path.retain(|s| s.chars().all(|ch| ch.is_alphanumeric() || ch == '_'));
+                    if !path.is_empty() && !out.contains(&path) {
+                        out.push(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        let children: Vec<Node<'_>> = n.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    out
 }
 
 fn is_function(kind: &str) -> bool {
@@ -536,7 +578,7 @@ fn segments(src: &[u8], node: Node<'_>) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
-        if n.kind().ends_with("comment") {
+        if n.kind().ends_with("comment") || n.kind() == "type_arguments" {
             continue;
         }
         if n.child_count() == 0 {

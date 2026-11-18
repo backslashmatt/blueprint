@@ -41,6 +41,8 @@ struct Resolved {
     item: Option<String>,
     /// Whether that item (or, with no item, the module) exists.
     found: bool,
+    /// Whether the item is the path's last segment (nothing follows it).
+    item_tail_is_last: bool,
 }
 
 /// The crates each Cargo system can name: extern name -> system.
@@ -129,7 +131,12 @@ fn crate_names(b: &Builder<'_>, read: Read<'_>) -> Crates {
     out
 }
 
-pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>], read: Read<'_>) {
+pub(super) fn add(
+    b: &mut Builder<'_>,
+    parsed: &[Parsed<'_>],
+    functions: &HashMap<(usize, usize), NodeId>,
+    read: Read<'_>,
+) {
     let crates = crate_names(b, read);
     // Names bound by `use` in each module: name -> path. `impl` resolution
     // needs every one in its module; use resolution needs only renames and
@@ -174,8 +181,45 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>], read: Read<'_>) {
         index: &index,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
-    for (path, place, file_module, facts) in parsed {
+    for (f, (path, place, file_module, facts)) in parsed.iter().enumerate() {
         let system = &place.system;
+        // What each module of this file imports, for its calls.
+        let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
+        for reference in &facts.references {
+            if let Reference::Use {
+                path,
+                alias,
+                module,
+            } = reference
+            {
+                let bound = alias.as_deref().or_else(|| path.last().map(String::as_str));
+                if let Some(bound) = bound.filter(|n| *n != "*" && *n != "self") {
+                    local
+                        .entry(module.as_slice())
+                        .or_default()
+                        .insert(bound, path.as_slice());
+                }
+            }
+        }
+        for (i, item) in facts.items.iter().enumerate() {
+            let Some(caller) = functions.get(&(f, i)) else {
+                continue;
+            };
+            let m = [file_module.as_slice(), item.module.as_slice()].concat();
+            let imported = local.get(item.module.as_slice());
+            for call in &item.calls {
+                if let Some(callee) = r.callee(system, &m, caller, call, imported)
+                    && callee != *caller
+                {
+                    let key = EdgeKey {
+                        from: caller.clone(),
+                        to: callee,
+                        kind: EdgeKind::Calls,
+                    };
+                    found.push((key, Confidence::Inferred, (*path).clone()));
+                }
+            }
+        }
         for reference in &facts.references {
             match reference {
                 Reference::Use {
@@ -417,6 +461,7 @@ impl Resolver<'_, '_> {
             i += 1;
         }
         let item = segs.get(i).cloned();
+        let item_tail_is_last = i + 1 == segs.len();
         let found = match &item {
             None => true,
             Some(name) => self.has_item(&sys, &cur, name),
@@ -426,7 +471,76 @@ impl Resolver<'_, '_> {
             module: cur,
             item,
             found,
+            item_tail_is_last,
         })
+    }
+
+    /// The L4 function a call path names, from `caller` in module `m`:
+    /// a free function in `m` or imported into it, `module::f`, an inherent
+    /// method `Type::f`, or `Self::f` on the caller's own type. Calls are
+    /// resolved by name alone (a local closure can shadow them), so the
+    /// edges are `inferred`.
+    fn callee(
+        &self,
+        system: &SystemKey,
+        m: &[String],
+        caller: &NodeId,
+        call: &[String],
+        imported: Option<&HashMap<&str, &[String]>>,
+    ) -> Option<NodeId> {
+        let model = &self.b.model;
+        let at = |sys: &SystemKey, mut path: Vec<String>| {
+            let id = NodeId::within(Level::Code, sys.clone(), {
+                path.shrink_to_fit();
+                path
+            });
+            model.node(&id).map(|_| id)
+        };
+        let free = |sys: &SystemKey, module: &[String], name: &str| {
+            at(
+                sys,
+                [module, &[FUNCTIONS.to_owned(), name.to_owned()]].concat(),
+            )
+        };
+        let (name, prefix) = call.split_last()?;
+        let import = |first: &str| imported.and_then(|i| i.get(first)).copied();
+        if prefix.is_empty() {
+            if let Some(id) = free(system, m, name) {
+                return Some(id);
+            }
+            let target = import(name)?;
+            let r = self.resolve(system, m, target, false)?;
+            return free(&r.system, &r.module, r.item.as_deref()?);
+        }
+        if prefix == ["Self"] {
+            let ty = model.node(caller)?.parent.clone()?;
+            return at(
+                ty.system_key(),
+                [ty.path(), std::slice::from_ref(name)].concat(),
+            );
+        }
+        let mut whole: Vec<String> = match import(&prefix[0]) {
+            Some(target) => [target, &prefix[1..]].concat(),
+            None => prefix.to_vec(),
+        };
+        if let Some(r) = self.resolve(system, m, &whole, false) {
+            match r.item {
+                // `module::f`
+                None => return free(&r.system, &r.module, name),
+                // `module::Type::f`
+                Some(ty) if r.found && r.item_tail_is_last => {
+                    return at(&r.system, [r.module, vec![ty, name.clone()]].concat());
+                }
+                _ => {}
+            }
+        }
+        // `Type::f` with `Type` declared or imported here.
+        whole = prefix.to_vec();
+        let ty = self.item(system, m, &whole)?;
+        at(
+            ty.system_key(),
+            [ty.path(), std::slice::from_ref(name)].concat(),
+        )
     }
 
     /// The L3 node a type or trait path names, written in module `m`.

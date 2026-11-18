@@ -363,3 +363,20 @@ fn impls_and_aliases_are_references() {
         "an inherent impl implements nothing"
     );
 }
+
+#[test]
+fn functions_record_the_paths_they_call() {
+    let f = analyse(
+        b"fn f() {\n    helper();\n    a::b::run(1);\n    Vec::<u8>::new();\n    Self::x();\n    helper();\n    x.method();\n    println!(\"{}\", inner());\n    let g = || later();\n    fn nested() { hidden(); }\n}\nstruct S;\n",
+    );
+    let calls: Vec<String> = by_name(&f, "f")
+        .calls
+        .iter()
+        .map(|c| c.join("::"))
+        .collect();
+    assert_eq!(
+        calls,
+        ["helper", "a::b::run", "Vec::new", "Self::x", "later"]
+    );
+    assert!(by_name(&f, "S").calls.is_empty());
+}
