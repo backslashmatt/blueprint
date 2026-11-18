@@ -59,7 +59,7 @@ pub fn analyse_cached(
     parsed: &mut dyn FnMut(&RepoPath, &FileFacts),
     model: &mut Model,
 ) -> Vec<Diagnostic> {
-    run(placed, read, cached, parsed, model).0
+    run(placed, read, cached, parsed, model, false).0
 }
 
 /// What the L3–L4 pass knows about one analysed file, kept by a resident
@@ -89,14 +89,16 @@ impl State {
     }
 }
 
-/// [`analyse_cached`], also returning the state a resident engine keeps.
+/// [`analyse_cached`]; with `keep`, also returns the state a resident engine
+/// keeps. Without it, nothing extra is built.
 pub(crate) fn run(
     placed: &BTreeMap<RepoPath, Placement>,
     read: Read<'_>,
     cached: Cached<'_>,
     parsed: &mut dyn FnMut(&RepoPath, &FileFacts),
     model: &mut Model,
-) -> (Vec<Diagnostic>, State) {
+    keep: bool,
+) -> (Vec<Diagnostic>, Option<State>) {
     let rust = Rust;
     let mut wanted = Vec::new();
     let mut plain = Vec::new();
@@ -146,15 +148,24 @@ pub(crate) fn run(
         types: HashMap::new(),
     };
     // The node each item became, by file and item index.
-    let mut nodes: Vec<Vec<Option<NodeId>>> = parsed
-        .iter()
-        .map(|(_, _, _, facts)| vec![None; facts.items.len()])
-        .collect();
+    let mut nodes: Vec<Vec<Option<NodeId>>> = if keep {
+        parsed
+            .iter()
+            .map(|(_, _, _, facts)| vec![None; facts.items.len()])
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut record = |f: usize, i: usize, id: Option<NodeId>| {
+        if let Some(slot) = nodes.get_mut(f).and_then(|n| n.get_mut(i)) {
+            *slot = id;
+        }
+    };
     // Types first, so that a method finds its type wherever the type is.
     for (f, (path, place, module, facts)) in parsed.iter().enumerate() {
         for (i, item) in facts.items.iter().enumerate() {
             if matches!(item.kind, ItemKind::Type { .. }) {
-                nodes[f][i] = b.add_type(path, &place.system, module, item, facts);
+                record(f, i, b.add_type(path, &place.system, module, item, facts));
             }
         }
     }
@@ -165,7 +176,9 @@ pub(crate) fn run(
             if !matches!(item.kind, ItemKind::Type { .. })
                 && let Some(id) = b.add_function(path, &place.system, module, item, facts)
             {
-                nodes[f][i] = Some(id.clone());
+                if keep {
+                    record(f, i, Some(id.clone()));
+                }
                 functions.insert((f, i), id);
             }
         }
@@ -173,8 +186,11 @@ pub(crate) fn run(
     for (path, place) in plain {
         b.add_file(path, place);
     }
-    let (context, calls) = edges::add(&mut b, &parsed, &functions, read);
+    let kept = edges::add(&mut b, &parsed, &functions, read, keep);
     b.diags.sort();
+    let Some((context, calls)) = kept else {
+        return (b.diags, None);
+    };
     let files = parsed
         .into_iter()
         .zip(nodes)
@@ -190,7 +206,7 @@ pub(crate) fn run(
             (path.clone(), state)
         })
         .collect();
-    (b.diags, State { files, context })
+    (b.diags, Some(State { files, context }))
 }
 
 /// Why [`update_body`] could not update a file alone.

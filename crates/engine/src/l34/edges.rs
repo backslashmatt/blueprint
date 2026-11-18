@@ -141,14 +141,16 @@ pub(crate) struct Context {
     index: Index,
 }
 
-/// Adds every edge the facts give, rolled up, and returns the resolution
-/// context and each file's `calls` edges (by its index in `parsed`).
+/// Adds every edge the facts give, rolled up. With `keep`, also returns the
+/// resolution context and each file's `calls` edges (by its index in
+/// `parsed`), for a resident engine.
 pub(super) fn add(
     b: &mut Builder<'_>,
     parsed: &[Parsed<'_>],
     functions: &HashMap<(usize, usize), NodeId>,
     read: Read<'_>,
-) -> (Context, Vec<BTreeSet<EdgeKey>>) {
+    keep: bool,
+) -> Option<(Context, Vec<BTreeSet<EdgeKey>>)> {
     let crates = crate_names(b, read);
     // Names bound by `use` in each module: name -> path. `impl` resolution
     // needs every one in its module; use resolution needs only renames and
@@ -197,11 +199,13 @@ pub(super) fn add(
     for (f, (path, place, file_module, facts)) in parsed.iter().enumerate() {
         let system = &place.system;
         let mine = r.file_calls(system, file_module, facts, |i| functions.get(&(f, i)));
+        if keep {
+            calls.push(mine.iter().cloned().collect());
+        }
         found.extend(
-            mine.iter()
-                .map(|k| (k.clone(), Confidence::Inferred, (*path).clone())),
+            mine.into_iter()
+                .map(|k| (k, Confidence::Inferred, (*path).clone())),
         );
-        calls.push(mine);
         for reference in &facts.references {
             match reference {
                 Reference::Use {
@@ -287,14 +291,14 @@ pub(super) fn add(
         }
     }
     roll_up(b);
-    (
+    keep.then_some((
         Context {
             crates,
             imports,
             index,
         },
         calls,
-    )
+    ))
 }
 
 /// The `calls` edges of one file's functions, resolved against `model` and
@@ -314,6 +318,8 @@ pub(crate) fn calls_of<'n>(
         index: &ctx.index,
     };
     r.file_calls(system, file_module, facts, node)
+        .into_iter()
+        .collect()
 }
 
 /// Adds the direct edge `key` and rolls it up, as [`roll_up`] would: the
@@ -462,7 +468,7 @@ impl Resolver<'_> {
         file_module: &[String],
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
-    ) -> BTreeSet<EdgeKey> {
+    ) -> Vec<EdgeKey> {
         // What each module of this file imports, for its calls.
         let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
         let mut globs: HashMap<&[String], Vec<&[String]>> = HashMap::new();
@@ -487,7 +493,7 @@ impl Resolver<'_> {
                 }
             }
         }
-        let mut out = BTreeSet::new();
+        let mut out = Vec::new();
         for (i, item) in facts.items.iter().enumerate() {
             let Some(caller) = node(i) else {
                 continue;
@@ -501,7 +507,7 @@ impl Resolver<'_> {
                 if let Some(callee) = self.callee(system, &m, caller, call, imported, glob)
                     && callee != *caller
                 {
-                    out.insert(EdgeKey {
+                    out.push(EdgeKey {
                         from: caller.clone(),
                         to: callee,
                         kind: EdgeKind::Calls,

@@ -46,7 +46,8 @@ impl Resident {
         let mut diags = l1::analyse(paths, read, &mut model);
         let (more, placed) = l2::analyse_placed(paths, read, &mut model);
         diags.extend(more);
-        let (more, state) = l34::run(&placed, read, &|_| None, &mut |_, _| {}, &mut model);
+        let (more, state) = l34::run(&placed, read, &|_| None, &mut |_, _| {}, &mut model, true);
+        let state = state.unwrap_or_else(|| unreachable!("kept"));
         diags.extend(more);
         diags.sort();
         let shapes = shapes(&placed, &state, read);
