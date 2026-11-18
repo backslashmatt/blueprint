@@ -405,8 +405,104 @@ fn deep_index(
             )),
             gated: true,
         });
+
+        // The architectural diff of the pinned commit's first parent and
+        // the commit itself, both indexed to level 4 (#64, DR 0009).
+        if r.name == "medium" {
+            out.push(diff_medium(
+                bp,
+                base_bp,
+                &dir,
+                &r.commit,
+                &head_cache,
+                &base_cache,
+            )?);
+        }
     }
     Ok(out)
+}
+
+/// `diff_medium`: `bp diff <checkout> <pinned>~1 <pinned>` with both
+/// commits indexed to level 4 in the given caches, fastest of 11. A base
+/// build without `bp diff` is not compared.
+fn diff_medium(
+    bp: &Path,
+    base_bp: Option<&Path>,
+    dir: &Path,
+    commit: &str,
+    head_cache: &Path,
+    base_cache: &Path,
+) -> Result<Measurement, Error> {
+    let parent = format!("{commit}~1");
+    let index = |bp: &Path, cache: &Path| -> Result<(), Error> {
+        let out = Command::new(bp)
+            .arg("index")
+            .arg(dir)
+            .args(["--rev", &parent, "--level", "4"])
+            .env("BLUEPRINT_CACHE_DIR", cache)
+            .stderr(std::process::Stdio::null())
+            .output()?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{} index {} --rev {parent} --level 4` failed",
+                bp.display(),
+                dir.display()
+            )
+            .into())
+        }
+    };
+    let supports_diff = |bp: &Path| {
+        Command::new(bp)
+            .arg("--help")
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("bp diff"))
+    };
+    index(bp, head_cache)?;
+    let base_bp = base_bp.filter(|b| supports_diff(b) && index(b, base_cache).is_ok());
+    let spawn = |bp: &'_ Path, cache: &'_ Path| {
+        let (dir, parent, commit) = (dir.to_path_buf(), parent.clone(), commit.to_owned());
+        let (bp, cache) = (bp.to_path_buf(), cache.to_path_buf());
+        move || -> Result<(), Error> {
+            let status = Command::new(&bp)
+                .arg("diff")
+                .arg(&dir)
+                .args([&parent, &commit])
+                .env("BLUEPRINT_CACHE_DIR", &cache)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("`{} diff` failed: {status}", bp.display()).into())
+            }
+        }
+    };
+    let samples = 11;
+    let mut head = spawn(bp, head_cache);
+    let mut base = base_bp.map(|b| spawn(b, base_cache));
+    let (value, base) = best_ms(
+        samples,
+        1,
+        &mut head,
+        base.as_mut()
+            .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+    )?;
+    Ok(Measurement {
+        name: "diff_medium".into(),
+        repo: Some("medium".into()),
+        value,
+        base,
+        unit: "ms".into(),
+        budget: Some("diff_medium".into()),
+        samples,
+        note: Some(format!(
+            "`bp diff <checkout> <pinned>~1 <pinned>`, both indexed to level 4; fastest of {samples}"
+        )),
+        gated: true,
+    })
 }
 
 /// `reindex_one_file` (#63), in process with the engine resident, as the

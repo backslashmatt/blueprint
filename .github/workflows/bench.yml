@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bench/repos
-          key: refrepos-v2-${{ hashFiles('bench/repos.json') }}
+          key: refrepos-v3-${{ hashFiles('bench/repos.json') }}
       - name: Fetch reference repositories (read only; nothing in them is run)
         run: target/release/bp-bench fetch
       - name: Run benchmarks

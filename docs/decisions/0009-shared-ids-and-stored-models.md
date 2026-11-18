@@ -20,6 +20,7 @@ Even a trusted bulk build of the maps took 78 ms, and a plain clone of the model
 ## Decision
 
 - **A `NodeId` is a reference-counted handle (`Arc`)** to its parts. Cloning it is a count, its API is unchanged, and ids from any two models still compare by value. Measured on medium's L4 model: cloning the model fell from 105 ms to 20 ms, and a bulk build from parts from 78 ms to about 60 ms.
+- **A `RepoPath` is shared the same way.** Thousands of nodes share each source file, and copying the path per node was most of what decoding still allocated.
 - **`model::codec`** encodes a model to bytes and back:
   - every string once, in a table;
   - every id once, by index;
@@ -27,6 +28,7 @@ Even a trusted bulk build of the maps took 78 ms, and a plain clone of the model
   
   Decoding shares one `Arc` per id and builds the maps in bulk with `Model::from_trusted_parts`, without checking each insert. Decoding never panics: an out-of-range index or a truncated buffer is an error, and the store's checksums (DR 0005) catch damage first.
 - **`bp index --level 4` also stores the L1–L4 model,** under its own key kind and the versions of every analyser that built it. `bp model --rev --level 3|4` and `bp diff` load it when it is there, and otherwise build the model from facts as before.
+- **`bp diff` decodes both stored models on two threads, and does not free them before exiting**, since the process ends there anyway. Measured: `diff_medium` takes 82–114 ms in this container, against 150 ms. Freeing the two models took 40–50 ms.
 - **JSON stays the external format** (`docs/model-json.md`). The binary form is internal to the index and versioned with it.
 
 ## Revisit when

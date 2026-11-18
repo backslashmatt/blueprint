@@ -41,4 +41,5 @@ A node whose lines moved but whose signature and body did not change is not repo
 ## Not yet
 
 - Change weight (lines changed per node, split into signature and body) arrives with #64's follow-up.
-- `diff_medium` (§4: 150 ms) needs the L1–L4 model stored in the index in a compact form; until then both models are built from facts.
+
+Both models are read from the index when `bp index --level 4` stored them (DR 0009). Otherwise they are built, with each Rust file's facts taken from the index where it holds them.

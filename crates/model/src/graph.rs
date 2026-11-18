@@ -69,7 +69,7 @@ impl Ecosystem {
 /// `..` segments, no backslashes. The repository root is the empty path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RepoPath(pub(crate) Vec<String>);
+pub struct RepoPath(pub(crate) std::sync::Arc<[String]>);
 
 /// Why a string is not a valid [`RepoPath`] or [`NodeId`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl std::error::Error for InvalidPath {}
 impl RepoPath {
     /// The repository root.
     pub fn root() -> RepoPath {
-        RepoPath(Vec::new())
+        RepoPath(std::sync::Arc::from(Vec::new()))
     }
 
     /// Parses a normalised path. Callers convert platform paths first.
@@ -103,7 +103,7 @@ impl RepoPath {
         if segments.iter().any(bad) {
             return Err(InvalidPath(s.to_owned()));
         }
-        Ok(RepoPath(segments))
+        Ok(RepoPath(segments.into()))
     }
 
     /// The path's segments.
