@@ -121,3 +121,23 @@ fn confidence_follows_the_module_and_the_parse() {
         .all(|n| n.confidence == Confidence::Unknown);
     assert!(unknown, "every file component is unknown");
 }
+
+/// This repository at L3–L4: every Rust item is placed, with no node
+/// rejected by the model. Not snapshotted: it changes with every function.
+#[test]
+fn this_repository_l3_l4_model() {
+    let repo = common::this_repository(|_| true);
+    let paths: Vec<RepoPath> = repo.keys().cloned().collect();
+    let (model, diags) = analyse_deep(&paths, &|p| repo.get(p).cloned());
+    let rejected: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("node") || d.message.contains("parent"))
+        .collect();
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert!(model.level(Level::Component).count() > 100);
+    assert!(model.level(Level::Code).count() > 300);
+    let analyse = model
+        .nodes()
+        .find(|n| String::from(n.id.clone()) == "L4:cargo:crates/engine#(functions)/analyse_deep");
+    assert!(analyse.is_some(), "engine::analyse_deep is an L4 node");
+}
