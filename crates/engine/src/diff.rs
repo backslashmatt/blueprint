@@ -21,96 +21,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use blueprint_model::{EdgeKey, EdgeKind, Level, Model, Node, NodeId, Visibility};
-use serde::Serialize;
 
-/// How one node changed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(tag = "change", rename_all = "kebab-case")]
-pub enum NodeChange {
-    /// Only in head.
-    Added {
-        /// The node.
-        id: NodeId,
-    },
-    /// Only in base.
-    Removed {
-        /// The node.
-        id: NodeId,
-    },
-    /// The same body under a different parent.
-    Moved {
-        /// The node's id in base.
-        from: NodeId,
-        /// Its id in head.
-        to: NodeId,
-    },
-    /// The same body and parent under a different name.
-    Renamed {
-        /// The node's id in base.
-        from: NodeId,
-        /// Its id in head.
-        to: NodeId,
-    },
-    /// A visible node whose signature or visibility changed.
-    Surface {
-        /// The node.
-        id: NodeId,
-    },
-    /// Only the body changed, and no edge from or to the node did.
-    Contained {
-        /// The node.
-        id: NodeId,
-    },
-    /// Anything else: a private signature, a body change that adds or
-    /// removes edges, or a change of confidence or source.
-    Changed {
-        /// The node.
-        id: NodeId,
-    },
-}
-
-/// Something a reviewer should see before the detail.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(tag = "finding", rename_all = "kebab-case")]
-pub enum Finding {
-    /// A new edge between two systems (L1) or two modules (L2).
-    NewDependency {
-        /// The edge.
-        edge: EdgeKey,
-    },
-    /// A `depends-on` cycle at one level, closed by edges new in head.
-    NewCycle {
-        /// The level: 1 or 2.
-        level: u8,
-        /// The nodes on the cycle, sorted.
-        nodes: Vec<NodeId>,
-        /// The cycle's edges that are new in head, sorted.
-        new_edges: Vec<EdgeKey>,
-    },
-}
-
-/// The architectural diff of two models.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct Diff {
-    /// The findings, sorted.
-    pub findings: Vec<Finding>,
-    /// Every node that changed, sorted.
-    pub nodes: Vec<NodeChange>,
-    /// Edges only in head, sorted.
-    pub added_edges: Vec<EdgeKey>,
-    /// Edges only in base, sorted.
-    pub removed_edges: Vec<EdgeKey>,
-    /// Each node's change weight, sorted by id; empty until [`weigh`].
-    pub weights: Vec<Weight>,
-}
-
-impl Diff {
-    /// Whether nothing changed.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.added_edges.is_empty() && self.removed_edges.is_empty()
-    }
-}
+pub use blueprint_model::diff::{Diff, Finding, Lines, NodeChange, Weight};
 
 /// The diff from `base` to `head`.
 #[must_use]
@@ -399,59 +311,6 @@ fn tarjan(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::tarjan;
-
-    #[test]
-    fn tarjan_finds_cycles_and_singletons() {
-        // 0 -> 1 -> 2 -> 0, 2 -> 3, 3 -> 4 -> 3, 5 alone.
-        let adj = vec![vec![1], vec![2], vec![0, 3], vec![4], vec![3], vec![]];
-        let mut sccs: Vec<Vec<usize>> = tarjan(&adj)
-            .into_iter()
-            .map(|mut c| {
-                c.sort();
-                c
-            })
-            .collect();
-        sccs.sort();
-        assert_eq!(sccs, vec![vec![0, 1, 2], vec![3, 4], vec![5]]);
-    }
-}
-
-/// Lines changed in one node and everything under it (DR 0008 decision 6:
-/// change weight): lines removed from base plus lines added in head. A line
-/// before the node's body, or the line the node starts on, is a signature
-/// line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct Lines {
-    /// Changed lines in signatures.
-    pub signature: u32,
-    /// Changed lines in bodies, and anything else.
-    pub body: u32,
-}
-
-impl Lines {
-    fn add(&mut self, other: Lines) {
-        self.signature += other.signature;
-        self.body += other.body;
-    }
-
-    fn is_zero(self) -> bool {
-        self.signature == 0 && self.body == 0
-    }
-}
-
-/// One node's change weight.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct Weight {
-    /// The node.
-    pub id: NodeId,
-    /// Its changed lines, its descendants' included.
-    #[serde(flatten)]
-    pub lines: Lines,
-}
-
 /// A file that differs between the two commits: its bytes in base and in
 /// head, `None` where it does not exist.
 pub struct ChangedFile<'a> {
@@ -593,4 +452,24 @@ fn attribute(lines: &[u32], nodes: &[&Node]) -> Vec<(NodeId, Lines)> {
         }
     }
     out.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tarjan;
+
+    #[test]
+    fn tarjan_finds_cycles_and_singletons() {
+        // 0 -> 1 -> 2 -> 0, 2 -> 3, 3 -> 4 -> 3, 5 alone.
+        let adj = vec![vec![1], vec![2], vec![0, 3], vec![4], vec![3], vec![]];
+        let mut sccs: Vec<Vec<usize>> = tarjan(&adj)
+            .into_iter()
+            .map(|mut c| {
+                c.sort();
+                c
+            })
+            .collect();
+        sccs.sort();
+        assert_eq!(sccs, vec![vec![0, 1, 2], vec![3, 4], vec![5]]);
+    }
 }
