@@ -49,6 +49,8 @@ nodes:
   L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
   L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests
   L2:cargo:crates/lang-rust#tests%2F  Directory  "tests/"  Unknown  crates/lang-rust/tests
+  L2:cargo:crates/model#codec  Module  "codec"  Exact  crates/model/src/codec.rs  Public
+  L2:cargo:crates/model#codec/tests  Module  "codec::tests"  Exact  crates/model/src/codec.rs  Private
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
   L2:cargo:crates/model#lang  Module  "lang"  Exact  crates/model/src/lang.rs  Public
