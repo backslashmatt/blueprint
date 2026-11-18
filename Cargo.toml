@@ -1,6 +1,4 @@
 [workspace]
-# Spikes are throwaway experiments with their own lockfiles; they are not product crates.
-exclude = ["spikes"]
 resolver = "3"
 members = [
     "crates/model",
@@ -14,8 +12,9 @@ members = [
     "bench",
     "xtask",
 ]
-# cargo-fuzz targets need nightly Rust and build on their own.
-exclude = ["crates/store/fuzz"]
+# Spikes are throwaway experiments with their own lockfiles, and cargo-fuzz
+# targets need nightly Rust; neither is a product crate.
+exclude = ["spikes", "crates/store/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
