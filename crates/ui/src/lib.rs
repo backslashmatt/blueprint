@@ -6,6 +6,8 @@ use gpui::{
     Context, IntoElement, ParentElement, Render, Styled, Window, WindowAppearance, div, rgb,
 };
 
+pub mod layout;
+
 /// The colours of one theme (§5.5: light and dark, following the system).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
