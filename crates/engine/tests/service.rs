@@ -165,9 +165,21 @@ fn open_refs_diff_and_source() {
     assert_eq!(head.summary, "commit 1");
 
     service.send(3, Request::Refs { limit: 10 });
-    let Response::Refs { refs, commits } = &until_last(&rx, 3, &mut others)[0] else {
+    let Response::Refs {
+        refs,
+        commits,
+        current,
+        suggested,
+    } = &until_last(&rx, 3, &mut others)[0]
+    else {
         panic!("no refs");
     };
+    assert_eq!(current.as_deref(), Some("refs/heads/main"));
+    assert_eq!(
+        suggested,
+        &Some((commits[1].id.clone(), commits[0].id.clone())),
+        "on the default branch: HEAD against its parent"
+    );
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].name, "refs/heads/main");
     assert_eq!(refs[0].kind, RefKind::Branch);

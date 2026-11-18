@@ -263,7 +263,14 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                     .collect(),
                 None => Vec::new(),
             };
-            sent(emit(Response::Refs { refs, commits }))
+            sent(emit(Response::Refs {
+                refs,
+                commits,
+                current: repo.head_branch(),
+                suggested: repo
+                    .suggested_review()
+                    .map(|(b, h)| (b.to_string(), h.to_string())),
+            }))
         }
         Request::Model { rev } => {
             let path = repo()?;

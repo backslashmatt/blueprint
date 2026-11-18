@@ -24,6 +24,7 @@ nodes:
   L2:cargo:bench#repos  Module  "repos"  Exact  bench/src/repos.rs  Public
   L2:cargo:bench#repos/tests  Module  "repos::tests"  Exact  bench/src/repos.rs  Private
   L2:cargo:crates/app#(bin blueprint)  Module  "(bin blueprint)"  Exact  crates/app/src/main.rs  Public
+  L2:cargo:crates/app#(bin blueprint)/tests  Module  "(bin blueprint)::tests"  Exact  crates/app/src/main.rs  Private
   L2:cargo:crates/cli#tests  Module  "tests"  Exact  crates/cli/src/main.rs  Private
   L2:cargo:crates/cli#tests%2F  Directory  "tests/"  Unknown  crates/cli/tests
   L2:cargo:crates/engine#commits  Module  "commits"  Exact  crates/engine/src/commits.rs  Public
@@ -65,7 +66,10 @@ nodes:
   L2:cargo:crates/store#segment  Module  "segment"  Exact  crates/store/src/segment.rs  Private
   L2:cargo:crates/store#store  Module  "store"  Exact  crates/store/src/store.rs  Private
   L2:cargo:crates/store#tests%2F  Directory  "tests/"  Unknown  crates/store/tests
+  L2:cargo:crates/ui#review_list  Module  "review_list"  Exact  crates/ui/src/review_list.rs  Public
+  L2:cargo:crates/ui#review_list/tests  Module  "review_list::tests"  Exact  crates/ui/src/review_list.rs  Private
   L2:cargo:crates/ui#tests  Module  "tests"  Exact  crates/ui/src/lib.rs  Private
+  L2:cargo:crates/ui#workspace  Module  "workspace"  Exact  crates/ui/src/workspace.rs  Public
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs  Public
   L2:cargo:xtask#layering/tests  Module  "layering::tests"  Exact  xtask/src/layering.rs  Private

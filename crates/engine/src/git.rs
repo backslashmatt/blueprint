@@ -391,6 +391,66 @@ impl Repo {
         Ok(out)
     }
 
+    /// The branch `HEAD` is on, as a full name (`refs/heads/…`), or `None`
+    /// when `HEAD` is detached.
+    pub fn head_branch(&self) -> Option<String> {
+        self.inner
+            .head_name()
+            .ok()
+            .flatten()
+            .map(|n| n.as_bstr().to_str_lossy().into_owned())
+    }
+
+    /// The branch changes are usually merged into: what `origin/HEAD`
+    /// points at, else the first of `main`, `master`, `origin/main` and
+    /// `origin/master` that exists. Its full name and commit.
+    pub fn default_branch(&self) -> Option<(String, ObjectId)> {
+        let symbolic = self
+            .inner
+            .find_reference("refs/remotes/origin/HEAD")
+            .ok()
+            .and_then(|r| match r.target() {
+                gix::refs::TargetRef::Symbolic(name) => {
+                    Some(name.as_bstr().to_str_lossy().into_owned())
+                }
+                gix::refs::TargetRef::Object(_) => None,
+            });
+        symbolic
+            .into_iter()
+            .chain(
+                [
+                    "refs/heads/main",
+                    "refs/heads/master",
+                    "refs/remotes/origin/main",
+                    "refs/remotes/origin/master",
+                ]
+                .map(str::to_owned),
+            )
+            .find_map(|name| self.resolve(&name).ok().map(|c| (name, c)))
+    }
+
+    /// The best common ancestor of two commits, if they have one.
+    pub fn merge_base(&self, one: ObjectId, two: ObjectId) -> Result<Option<ObjectId>, GitError> {
+        Ok(self
+            .inner
+            .merge_base(one, two)
+            .map_err(read_err)?
+            .map(gix::Id::detach))
+    }
+
+    /// The pair a review starts from: `HEAD` against its merge base with
+    /// the default branch, or, when `HEAD` is on the default branch (or
+    /// there is none), `HEAD` against its first parent. `(base, head)`.
+    pub fn suggested_review(&self) -> Option<(ObjectId, ObjectId)> {
+        let head = self.head()?;
+        let base = self
+            .default_branch()
+            .and_then(|(_, tip)| self.merge_base(head, tip).ok().flatten())
+            .filter(|b| *b != head)
+            .or_else(|| self.commit_info(head).ok()?.parents.first().copied())?;
+        Some((base, head))
+    }
+
     /// Up to `limit` commits reachable from `from`, newest first by commit
     /// time, `from` included.
     pub fn log(&self, from: ObjectId, limit: usize) -> Result<Vec<CommitInfo>, GitError> {
