@@ -365,6 +365,7 @@ impl Workspace {
                         node.source.clone(),
                         node.name.clone(),
                         node.lines,
+                        node.lines_in_base,
                     ));
                     self.next_id += 1;
                     let id = self.next_id;
@@ -674,7 +675,13 @@ fn token_colour(class: TokenClass, dark: bool) -> u32 {
 }
 
 /// One side of a row: its line number and its highlighted text.
-fn side(text: &FileText, line: Option<u32>, tint: Option<u32>, dark: bool) -> gpui::Div {
+fn side(
+    text: &FileText,
+    line: Option<u32>,
+    tint: Option<u32>,
+    column: usize,
+    dark: bool,
+) -> gpui::Div {
     let mut cell = div()
         .w_1_2()
         .flex()
@@ -687,18 +694,30 @@ fn side(text: &FileText, line: Option<u32>, tint: Option<u32>, dark: bool) -> gp
     let Some(i) = line.map(|l| l as usize) else {
         return cell;
     };
-    let body = text.lines.get(i).cloned().unwrap_or_default();
+    let full = text.lines.get(i).map(String::as_str).unwrap_or_default();
+    // Scrolled sideways by whole characters.
+    let skip = full
+        .char_indices()
+        .nth(column)
+        .map_or(full.len(), |(b, _)| b);
+    let body = full[skip..].to_owned();
     let spans: Vec<(std::ops::Range<usize>, HighlightStyle)> = text
         .highlights
         .get(i)
         .into_iter()
         .flatten()
-        .filter(|s| body.get(s.start as usize..s.end as usize).is_some())
-        .map(|s| {
+        .filter_map(|s| {
+            let (a, b) = (
+                (s.start as usize).max(skip) - skip,
+                (s.end as usize).saturating_sub(skip),
+            );
+            (b > a && body.get(a..b).is_some()).then_some((a, b, s.class))
+        })
+        .map(|(a, b, class)| {
             (
-                s.start as usize..s.end as usize,
+                a..b,
                 HighlightStyle {
-                    color: Some(rgb(token_colour(s.class, dark)).into()),
+                    color: Some(rgb(token_colour(class, dark)).into()),
                     ..HighlightStyle::default()
                 },
             )
@@ -724,13 +743,14 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
         (None, Some(Detail::Full)) => format!("{} rows", code.rows()),
     };
     let header = div().child(format!(
-        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, n p next or previous change, Backspace back to the map.",
+        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, Backspace back to the map.",
         code.path, code.title
     ));
     let Some(diff) = code.diff.clone() else {
         return div().flex().flex_col().flex_1().child(header);
     };
     let cursor = code.cursor;
+    let column = code.column;
     let (removed, added, cursor_bg) = if dark {
         (0x3d1d1d, 0x1d3d24, 0x2d333b)
     } else {
@@ -753,8 +773,8 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
                     .flex_row()
                     .text_size(px(13.0))
                     .font_family(mono_font())
-                    .child(side(&diff.base, r.base, left, dark))
-                    .child(side(&diff.head, r.head, right, dark));
+                    .child(side(&diff.base, r.base, left, column, dark))
+                    .child(side(&diff.head, r.head, right, column, dark));
                 if i == cursor {
                     row = row.bg(rgb(cursor_bg));
                 }

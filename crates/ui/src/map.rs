@@ -63,8 +63,10 @@ pub struct MapNode {
     /// The file or directory that defines it, `/`-separated.
     pub source: String,
     /// Its lines in that file, 1-based and inclusive, for code nodes (in
-    /// head, or in base for a removed node).
+    /// head, or in base for a node only there: see `lines_in_base`).
     pub lines: Option<(u32, u32)>,
+    /// Whether `lines` count base's lines: the node is not in head.
+    pub lines_in_base: bool,
 }
 
 /// One rolled-up edge of a view, between two of its nodes.
@@ -343,6 +345,7 @@ fn view(
                 has_children,
                 source: node.map(|n| n.source.to_string()).unwrap_or_default(),
                 lines: node.and_then(|n| n.code).map(|c| c.lines),
+                lines_in_base: head.node(id).is_none(),
             }
         })
         .collect();

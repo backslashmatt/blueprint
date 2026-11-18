@@ -47,11 +47,12 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 
 ## Code
 
-Opening a node's code (#93) shows its file's diff side by side, base on the left and head on the right, scrolled to the node's lines. Removed lines are tinted red and added ones green; a changed line is tinted on both sides. The plain diff comes first, and the colours follow once the engine has highlighted the file (`open_50k_file`: 8 ms at 50,000 lines before highlighting). Only the rows on screen are drawn.
+Opening a node's code (#93) shows its file's diff side by side, base on the left and head on the right, scrolled to the node's lines (base's, for a node that is only in base). Removed lines are tinted red and added ones green; a changed line is tinted on both sides. The plain diff comes first, and the colours follow once the engine has highlighted the file (`open_50k_file`: 8 ms at 50,000 lines before highlighting). Only the rows on screen are drawn.
 
 | Key | Action |
 |---|---|
 | ↑ ↓ PgUp PgDn Home End | Move |
+| ← → | Scroll both sides sideways, for lines wider than their half |
 | `n` `p` | Next or previous change |
 | Backspace, Esc | Back to the map |
 

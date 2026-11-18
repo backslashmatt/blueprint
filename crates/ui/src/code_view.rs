@@ -11,6 +11,9 @@ use blueprint_protocol::model::diff::{DiffRow, FileDiff, RowKind};
 /// Rows a page key moves.
 pub const PAGE: usize = 30;
 
+/// Characters a left or right key scrolls.
+pub const COLUMNS: usize = 8;
+
 /// One file's diff on screen.
 #[derive(Debug, Clone)]
 pub struct CodeView {
@@ -18,8 +21,13 @@ pub struct CodeView {
     pub path: String,
     /// What was opened, for the header: the node's name.
     pub title: String,
-    /// The node's lines in head (or base), 1-based, to scroll to.
+    /// The node's lines, 1-based, to scroll to.
     pub lines: Option<(u32, u32)>,
+    /// Whether `lines` are base's (a node only in base) rather than head's.
+    pub lines_in_base: bool,
+    /// Characters scrolled off the left of both sides, for lines wider
+    /// than their half of the window.
+    pub column: usize,
     /// The diff once it has arrived: plain first, then highlighted.
     pub diff: Option<Arc<FileDiff>>,
     /// How much of it has arrived.
@@ -33,11 +41,18 @@ pub struct CodeView {
 impl CodeView {
     /// A view of `path`, waiting for its diff.
     #[must_use]
-    pub fn new(path: String, title: String, lines: Option<(u32, u32)>) -> CodeView {
+    pub fn new(
+        path: String,
+        title: String,
+        lines: Option<(u32, u32)>,
+        lines_in_base: bool,
+    ) -> CodeView {
         CodeView {
             path,
             title,
             lines,
+            lines_in_base,
+            column: 0,
             diff: None,
             detail: None,
             cursor: 0,
@@ -51,7 +66,7 @@ impl CodeView {
     pub fn receive(&mut self, detail: Detail, diff: Arc<FileDiff>) {
         let first = self.diff.is_none();
         if first {
-            self.cursor = focus(&diff.rows, self.lines);
+            self.cursor = focus(&diff.rows, self.lines, self.lines_in_base);
         }
         self.diff = Some(diff);
         self.detail = Some(detail);
@@ -74,6 +89,15 @@ impl CodeView {
             "pagedown" => (self.cursor + PAGE).min(last),
             "home" => 0,
             "end" => last,
+            "left" | "right" => {
+                let before = self.column;
+                self.column = if key == "left" {
+                    self.column.saturating_sub(COLUMNS)
+                } else {
+                    self.column + COLUMNS
+                };
+                return self.column != before;
+            }
             "n" => self.next_change(true).unwrap_or(self.cursor),
             "p" => self.next_change(false).unwrap_or(self.cursor),
             _ => return false,
@@ -96,15 +120,14 @@ impl CodeView {
     }
 }
 
-/// The row to open on: the first row of the node's lines in head (or in
-/// base, for a node only there), else the first changed row, else the top.
-fn focus(rows: &[DiffRow], lines: Option<(u32, u32)>) -> usize {
+/// The row to open on: the first row of the node's lines, on the side
+/// they count (base for a node only there), else the first changed row,
+/// else the top.
+fn focus(rows: &[DiffRow], lines: Option<(u32, u32)>, in_base: bool) -> usize {
     if let Some((first, _)) = lines {
         let line = first.saturating_sub(1);
-        if let Some(i) = rows.iter().position(|r| r.head.is_some_and(|h| h >= line)) {
-            return i;
-        }
-        if let Some(i) = rows.iter().position(|r| r.base.is_some_and(|b| b >= line)) {
+        let side = |r: &DiffRow| if in_base { r.base } else { r.head };
+        if let Some(i) = rows.iter().position(|r| side(r).is_some_and(|l| l >= line)) {
             return i;
         }
     }
@@ -139,22 +162,35 @@ mod tests {
 
     #[test]
     fn opens_on_the_nodes_lines_and_keeps_its_place_when_highlights_arrive() {
-        let mut v = CodeView::new("a.rs".into(), "f".into(), Some((5, 6)));
+        let mut v = CodeView::new("a.rs".into(), "f".into(), Some((5, 6)), false);
         v.receive(Detail::Coarse, diff());
         assert_eq!(v.cursor, 4, "head line 5 is row 4");
         v.key("up");
         v.receive(Detail::Full, diff());
         assert_eq!(v.cursor, 3);
         assert_eq!(v.detail, Some(Detail::Full));
-        let mut none = CodeView::new("a.rs".into(), "a".into(), None);
+        let mut none = CodeView::new("a.rs".into(), "a".into(), None, false);
+        none.receive(Detail::Coarse, diff());
+        assert_eq!(none.cursor, 1, "without lines, the first change");
+        // A removed node's lines count base's: base line 5 is the removed
+        // row 6, not head line 5 (row 4).
+        let mut removed = CodeView::new("a.rs".into(), "g".into(), Some((5, 5)), true);
+        removed.receive(Detail::Coarse, diff());
+        assert_eq!(removed.cursor, 6);
+        let mut none = CodeView::new("a.rs".into(), "a".into(), None, false);
         none.receive(Detail::Coarse, diff());
         assert_eq!(none.cursor, 1, "without lines, the first change");
     }
 
     #[test]
     fn keys_move_within_the_rows_and_jump_between_changes() {
-        let mut v = CodeView::new("a.rs".into(), "a".into(), None);
+        let mut v = CodeView::new("a.rs".into(), "a".into(), None, false);
         assert!(!v.key("down"), "nothing to move through yet");
+        assert!(!v.key("left"), "already at the first column");
+        assert!(v.key("right"));
+        assert_eq!(v.column, COLUMNS);
+        assert!(v.key("left"));
+        assert_eq!(v.column, 0);
         v.receive(Detail::Coarse, diff());
         assert!(v.key("n"));
         assert_eq!(v.cursor, 3);
