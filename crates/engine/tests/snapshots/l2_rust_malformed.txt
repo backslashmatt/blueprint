@@ -1,7 +1,5 @@
 nodes:
   L1:cargo:#  System  "k"  Exact  Cargo.toml
-  L2:cargo:#  Module  "k"  Exact  src/lib.rs  Public
-  L2:cargo:#.%2F  Directory  "./"  Unknown  
   L2:cargo:#bad  Module  "bad"  Unknown  src/bad.rs  Public
   L2:cargo:#binary  Module  "binary"  Unknown  src/binary.rs  Private
   L2:cargo:#good  Module  "good"  Exact  src/good.rs  Public

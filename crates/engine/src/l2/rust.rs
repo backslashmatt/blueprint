@@ -90,17 +90,14 @@ pub fn analyse_crate(
     };
     for (root, module) in roots {
         let dir = root[..root.len() - 1].to_vec();
-        // The crate itself is an L2 module too, so its own items have a
-        // parent: named for the package at the top, `(bin name)` below.
-        let name = match module.first() {
-            Some(bin) => bin.clone(),
-            None => ctx
-                .model
-                .node(system)
-                .map_or_else(|| "crate".to_owned(), |n| n.name.clone()),
-        };
         let conf = ctx.walk_file(&root, &dir, &module, 0);
-        ctx.add_root(&module, &name, &root, conf);
+        // A binary's namespace is an L2 module, holding its modules. The
+        // primary crate's own root is the system itself at L2; L3 adds a
+        // node for it when items need a parent.
+        if let Some(bin) = module.first() {
+            let bin = bin.clone();
+            ctx.add_root(&module, &bin, &root, conf);
+        }
     }
     Some(ctx.reached)
 }

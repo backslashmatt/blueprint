@@ -1,7 +1,5 @@
 nodes:
   L1:cargo:#  System  "k"  Exact  Cargo.toml
-  L2:cargo:#  Module  "k"  Exact  src/lib.rs  Public
-  L2:cargo:#.%2F  Directory  "./"  Unknown  
   L2:cargo:#looping  Module  "looping"  Exact  src/loop.rs  Private
   L2:cargo:#looping/again  Module  "looping::again"  Inferred  src/loop.rs  Private
   L2:cargo:#one  Module  "one"  Exact  src/shared/m.rs  Private

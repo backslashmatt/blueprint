@@ -33,23 +33,6 @@
       "confidence": "unknown"
     },
     {
-      "id": "L2:cargo:crates/app#",
-      "kind": "module",
-      "name": "app",
-      "source": "crates/app/src/main.rs",
-      "parent": "L1:cargo:crates/app#",
-      "confidence": "exact",
-      "visibility": "public"
-    },
-    {
-      "id": "L2:cargo:crates/app#.%2F",
-      "kind": "directory",
-      "name": "./",
-      "source": "crates/app",
-      "parent": "L1:cargo:crates/app#",
-      "confidence": "unknown"
-    },
-    {
       "id": "L2:cargo:crates/app#cli",
       "kind": "module",
       "name": "cli",
@@ -57,23 +40,6 @@
       "parent": "L1:cargo:crates/app#",
       "confidence": "exact",
       "visibility": "private"
-    },
-    {
-      "id": "L2:cargo:crates/core#",
-      "kind": "module",
-      "name": "core",
-      "source": "crates/core/src/lib.rs",
-      "parent": "L1:cargo:crates/core#",
-      "confidence": "exact",
-      "visibility": "public"
-    },
-    {
-      "id": "L2:cargo:crates/core#.%2F",
-      "kind": "directory",
-      "name": "./",
-      "source": "crates/core",
-      "parent": "L1:cargo:crates/core#",
-      "confidence": "unknown"
     },
     {
       "id": "L2:cargo:crates/core#graph",
@@ -92,22 +58,6 @@
       "parent": "L1:cargo:crates/core#",
       "confidence": "exact",
       "visibility": "restricted"
-    },
-    {
-      "id": "L2:npm:web#.%2F",
-      "kind": "directory",
-      "name": "./",
-      "source": "web",
-      "parent": "L1:npm:web#",
-      "confidence": "unknown"
-    },
-    {
-      "id": "L2:unowned:#.%2F",
-      "kind": "directory",
-      "name": "./",
-      "source": "",
-      "parent": "L1:unowned:#",
-      "confidence": "unknown"
     },
     {
       "id": "L2:unowned:#docs%2F",

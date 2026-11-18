@@ -5,7 +5,6 @@ L1:unowned:#	unowned	(unowned)	unknown
 L2:cargo:crates/app#	module	app	exact	public
 L2:cargo:crates/app#.%2F	directory	./	unknown
 L2:cargo:crates/app#cli	module	cli	exact	private
-L2:cargo:crates/core#	module	core	exact	public
 L2:cargo:crates/core#.%2F	directory	./	unknown
 L2:cargo:crates/core#graph	module	graph	exact	public
 L2:cargo:crates/core#util	module	util	exact	restricted

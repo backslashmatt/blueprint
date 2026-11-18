@@ -197,12 +197,12 @@ fn deeply_nested_inline_modules_stop_at_the_depth_limit() {
         "took {:?}",
         start.elapsed()
     );
-    // The nested modules up to the limit, plus the crate root.
+    // The nested modules up to the limit (the crate root is the system).
     let modules = model
         .level(Level::Module)
         .filter(|n| n.kind == NodeKind::Module)
         .count();
-    assert_eq!(modules, l2::rust::MAX_DEPTH + 2);
+    assert_eq!(modules, l2::rust::MAX_DEPTH + 1);
     assert!(
         diags.iter().any(|d| d.message.contains("deeper than")),
         "{diags:?}"

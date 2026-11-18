@@ -53,8 +53,15 @@ pub fn analyse(
         .map(|(path, place, module, bytes)| (path, place, module, rust.analyse(path, &bytes)))
         .collect();
 
+    let roots = placed
+        .iter()
+        .filter(|(_, p)| p.module.as_ref().is_some_and(Vec::is_empty))
+        .map(|(path, p)| (p.system.clone(), path.clone()))
+        .rev()
+        .collect();
     let mut b = Builder {
         model,
+        roots,
         diags: Vec::new(),
         types: HashMap::new(),
     };
@@ -83,6 +90,8 @@ pub fn analyse(
 struct Builder<'a> {
     model: &'a mut Model,
     diags: Vec<Diagnostic>,
+    /// Each system's crate root file: the file placed at module `[]`.
+    roots: HashMap<SystemKey, RepoPath>,
     /// Every type added, by system and name: the L3 ids of that name.
     types: HashMap<(SystemKey, String), Vec<NodeId>>,
 }
@@ -126,6 +135,9 @@ impl Builder<'_> {
         }
         let root = NodeId::within(Level::Module, system.clone(), Vec::new());
         if self.model.node(&root).is_none() {
+            // Named and sourced like the crate: the root file is the one
+            // placed at the top of the module tree.
+            let source = self.roots.get(system).unwrap_or(source).clone();
             let parent = NodeId::system(system.clone());
             let name = self
                 .model
