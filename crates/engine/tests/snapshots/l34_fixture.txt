@@ -1,0 +1,54 @@
+nodes:
+  L1:cargo:core#  System  "core"  Exact  core/Cargo.toml
+  L1:npm:web#  System  "web"  Exact  web/package.json
+  L1:unowned:#  Unowned  "(unowned)"  Unknown  
+  L2:cargo:core#  Module  "core"  Exact  core/src/lib.rs  Public
+  L2:cargo:core#(bin main)  Module  "(bin main)"  Exact  core/src/main.rs  Public
+  L2:cargo:core#(bin tool)  Module  "(bin tool)"  Exact  core/src/bin/tool.rs  Public
+  L2:cargo:core#.%2F  Directory  "./"  Unknown  core
+  L2:cargo:core#graph  Module  "graph"  Exact  core/src/graph.rs  Public
+  L2:cargo:core#graph/inner  Module  "graph::inner"  Exact  core/src/graph.rs  Private
+  L2:cargo:core#tests%2F  Directory  "tests/"  Unknown  core/tests
+  L2:cargo:core#util  Module  "util"  Exact  core/src/util.rs  Private
+  L2:npm:web#.%2F  Directory  "./"  Unknown  web
+  L2:npm:web#src%2F  Directory  "src/"  Unknown  web/src
+  L2:unowned:#.%2F  Directory  "./"  Unknown  
+  L3:cargo:core#(bin main)/(functions)  Component  "(functions)"  Exact  core/src/main.rs
+  L3:cargo:core#(bin main)/Args  Component  "Args"  Exact  core/src/main.rs  Private  lines 1-1  no-body
+  L3:cargo:core#(bin tool)/(functions)  Component  "(functions)"  Exact  core/src/bin/tool.rs
+  L3:cargo:core#(bin tool)/Args  Component  "Args"  Exact  core/src/bin/tool.rs  Private  lines 1-1  no-body
+  L3:cargo:core#(functions)  Component  "(functions)"  Exact  core/src/lib.rs
+  L3:cargo:core#.%2F/Cargo.toml  Component  "Cargo.toml"  Unknown  core/Cargo.toml
+  L3:cargo:core#Root  Component  "Root"  Exact  core/src/lib.rs  Public  lines 5-5  no-body
+  L3:cargo:core#graph/Graph  Component  "Graph"  Exact  core/src/graph.rs  Public  lines 1-1  no-body
+  L3:cargo:core#graph/Walk  Component  "Walk"  Exact  core/src/graph.rs  Public  lines 11-13
+  L3:cargo:core#graph/inner/(functions)  Component  "(functions)"  Exact  core/src/graph.rs
+  L3:cargo:core#tests%2F/tests%2Fit.rs  Component  "it.rs"  Unknown  core/tests/it.rs
+  L3:cargo:core#util/(functions)  Component  "(functions)"  Exact  core/src/util.rs
+  L3:cargo:core#util/Graph2  Component  "Graph2"  Inferred  core/src/util.rs  Public  lines 11-11  no-body
+  L3:cargo:core#util/impl Foreign  Component  "impl Foreign"  Inferred  core/src/util.rs
+  L3:cargo:core#util/impl Graph  Component  "impl Graph"  Inferred  core/src/util.rs
+  L3:npm:web#.%2F/package.json  Component  "package.json"  Unknown  web/package.json
+  L3:npm:web#src%2F/src%2Findex.ts  Component  "index.ts"  Unknown  web/src/index.ts
+  L3:unowned:#.%2F/Cargo.toml  Component  "Cargo.toml"  Unknown  Cargo.toml
+  L3:unowned:#.%2F/README.md  Component  "README.md"  Unknown  README.md
+  L4:cargo:core#(bin main)/(functions)/main  Function  "main"  Exact  core/src/main.rs  Private  lines 3-3
+  L4:cargo:core#(bin main)/Args/parse  Function  "parse"  Exact  core/src/main.rs  Private  lines 2-2
+  L4:cargo:core#(bin tool)/(functions)/main  Function  "main"  Exact  core/src/bin/tool.rs  Private  lines 3-3
+  L4:cargo:core#(bin tool)/Args/parse  Function  "parse"  Exact  core/src/bin/tool.rs  Private  lines 2-2
+  L4:cargo:core#(functions)/top  Function  "top"  Exact  core/src/lib.rs  Public  lines 7-7
+  L4:cargo:core#(functions)/twice  Function  "twice"  Exact  core/src/lib.rs  Private  lines 9-10
+  L4:cargo:core#(functions)/twice~2  Function  "twice"  Exact  core/src/lib.rs  Private  lines 11-12
+  L4:cargo:core#graph/Graph/<Default>%3A%3Adefault  Function  "default"  Exact  core/src/graph.rs  lines 8-8
+  L4:cargo:core#graph/Graph/<Walk>%3A%3Awalk  Function  "walk"  Exact  core/src/graph.rs  lines 16-16
+  L4:cargo:core#graph/Graph/new  Function  "new"  Exact  core/src/graph.rs  Public  lines 4-4
+  L4:cargo:core#graph/Walk/walk  Function  "walk"  Exact  core/src/graph.rs  Public  lines 12-12  no-body
+  L4:cargo:core#graph/inner/(functions)/helper  Function  "helper"  Exact  core/src/graph.rs  Public  lines 20-20
+  L4:cargo:core#util/(functions)/broken  Function  "broken"  Inferred  core/src/util.rs  Private  lines 12-12
+  L4:cargo:core#util/impl Foreign/odd  Function  "odd"  Inferred  core/src/util.rs  Private  lines 8-8
+  L4:cargo:core#util/impl Graph/len  Function  "len"  Inferred  core/src/util.rs  Public  lines 4-4
+edges:
+  L2:cargo:core#util -> L2:cargo:core#graph  DependsOn  Exact  {}
+  L3:cargo:core#graph/Graph -> L3:cargo:core#graph/Walk  Implements  Exact  {}
+  L4:cargo:core#graph/Graph/<Default>%3A%3Adefault -> L4:cargo:core#graph/Graph/new  Calls  Inferred  {}
+diagnostics:

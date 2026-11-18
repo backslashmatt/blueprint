@@ -1,0 +1,26 @@
+{
+  "comment": "Reference repositories for REQUIREMENTS §4, pinned by commit. See docs/decisions/0001-reference-repositories.md. Only read, never built or executed.",
+  "repos": [
+    {
+      "name": "small",
+      "url": "https://github.com/tokio-rs/bytes",
+      "commit": "f2cf483f13c9956a0f24ce2b7527f2318b0c8a2c",
+      "text_lines": 14888,
+      "files": 46
+    },
+    {
+      "name": "medium",
+      "url": "https://github.com/rust-lang/rust-analyzer",
+      "commit": "b664fd5c7e7055c9569960f7fe73f21c7d00c9cd",
+      "text_lines": 696846,
+      "files": 2389
+    },
+    {
+      "name": "large",
+      "url": "https://github.com/rust-lang/rust",
+      "commit": "5f4effd579500175af844241eb179e756190f1e7",
+      "text_lines": 6398809,
+      "files": 64483
+    }
+  ]
+}

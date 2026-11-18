@@ -1,0 +1,11 @@
+nodes:
+  L1:go:api#  System  "example.com/api"  Exact  api/go.mod
+  L1:go:shared#  System  "example.com/shared"  Exact  shared/go.mod
+  L1:go:svc#  System  "example.com/svc"  Exact  svc/go.mod
+  L1:go:third_party/lib#  System  "example.com/lib"  Exact  third_party/lib/go.mod
+  L1:go:tools#  System  "example.com/tools"  Exact  tools/go.mod
+edges:
+  L1:go:api# -> L1:go:shared#  DependsOn  Inferred  {Normal}
+  L1:go:svc# -> L1:go:api#  DependsOn  Exact  {Normal}
+  L1:go:svc# -> L1:go:third_party/lib#  DependsOn  Exact  {Normal}
+diagnostics:

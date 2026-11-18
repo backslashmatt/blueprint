@@ -5,6 +5,8 @@ resolver = "3"
 members = [
     "crates/model",
     "crates/engine",
+    "crates/lang-rust",
+    "crates/store",
     "crates/protocol",
     "crates/cli",
     "crates/ui",
@@ -12,6 +14,8 @@ members = [
     "bench",
     "xtask",
 ]
+# cargo-fuzz targets need nightly Rust and build on their own.
+exclude = ["crates/store/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,10 +27,17 @@ publish = false
 [workspace.dependencies]
 blueprint-model = { path = "crates/model" }
 blueprint-engine = { path = "crates/engine" }
+blueprint-lang-rust = { path = "crates/lang-rust" }
+blueprint-store = { path = "crates/store" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
+# Git object access (DR 0005). Pure-Rust compression; `revision` for rev-parse.
+gix = { version = "0.90", default-features = false, features = ["max-performance", "sha1", "revision"] }
 
 [workspace.lints.rust]
+# rustc rejects any attempt to allow it. The one exception, crates/store,
+# declares its own copy of these lints with `deny`; xtask checks that copy
+# (REQUIREMENTS §5.3).
 unsafe_code = "forbid"
 missing_docs = "warn"
 
@@ -37,3 +48,10 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# Whole-program optimisation for shipped binaries: linking gix into `bp`
+# made start-up slower, and fat LTO with one codegen unit drops the unused
+# parts (#57).
+[profile.release]
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,27 @@
+L1:cargo:crates/app#	system	app	exact
+L1:cargo:crates/core#	system	core	exact
+L1:npm:web#	system	web	exact
+L1:unowned:#	unowned	(unowned)	unknown
+L2:cargo:crates/app#	module	app	exact	public
+L2:cargo:crates/app#.%2F	directory	./	unknown
+L2:cargo:crates/app#cli	module	cli	exact	private
+L2:cargo:crates/core#.%2F	directory	./	unknown
+L2:cargo:crates/core#graph	module	graph	exact	public
+L2:cargo:crates/core#util	module	util	exact	restricted
+L2:npm:web#.%2F	directory	./	unknown
+L2:unowned:#.%2F	directory	./	unknown
+L2:unowned:#docs%2F	directory	docs/	unknown
+L3:cargo:crates/app#(functions)	component	(functions)	exact
+L3:cargo:crates/app#.%2F/Cargo.toml	component	Cargo.toml	unknown
+L3:cargo:crates/app#cli/Args	component	Args	exact	public
+L3:cargo:crates/core#.%2F/Cargo.toml	component	Cargo.toml	unknown
+L3:cargo:crates/core#graph/Graph	component	Graph	exact	public
+L3:cargo:crates/core#graph/Walk	component	Walk	exact	public
+L3:npm:web#.%2F/package.json	component	package.json	unknown
+L3:unowned:#.%2F/Cargo.toml	component	Cargo.toml	unknown
+L3:unowned:#docs%2F/docs%2Fguide.md	component	guide.md	unknown
+L4:cargo:crates/app#(functions)/main	function	main	exact	private
+L4:cargo:crates/app#cli/Args/parse	function	parse	exact	public
+L1:cargo:crates/app# -> L1:cargo:crates/core#	depends-on	exact	normal
+L2:cargo:crates/app# -> L2:cargo:crates/core#graph	depends-on	exact
+L3:cargo:crates/core#graph/Graph -> L3:cargo:crates/core#graph/Walk	implements	exact
