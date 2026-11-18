@@ -213,11 +213,15 @@ impl Builder<'_> {
                     _ => item.name.clone(),
                 };
                 match self.type_for(system, &module_id, self_type) {
-                    Some(ty) => (ty, segment, conf),
+                    // In the impl's own module: resolved.
+                    Some((ty, true)) => (ty, segment, conf),
+                    // Elsewhere in the crate: matched by name only.
+                    Some((ty, false)) => (ty, segment, Confidence::Inferred.min(conf)),
                     None => {
+                        let conf = Confidence::Inferred.min(conf);
                         let group =
                             self.group(&module_id, &format!("impl {self_type}"), path, conf);
-                        (group, segment, Confidence::Inferred.min(conf))
+                        (group, segment, conf)
                     }
                 }
             }
@@ -240,18 +244,20 @@ impl Builder<'_> {
         });
     }
 
-    /// The L3 node of the type `name` for a method in `module`: the one in
-    /// that module if there is one, else the only one of that name in the
-    /// system. `None` if there is none, or several and none in `module`.
-    fn type_for(&self, system: &SystemKey, module: &NodeId, name: &str) -> Option<NodeId> {
+    /// The L3 node of the type `name` for a method in `module`, and whether
+    /// it is in that module: the one in that module if there is one, else
+    /// the only one of that name in the system. `None` if there is none, or
+    /// several and none in `module`.
+    fn type_for(&self, system: &SystemKey, module: &NodeId, name: &str) -> Option<(NodeId, bool)> {
         let found = self.types.get(&(system.clone(), name.to_owned()))?;
-        found
-            .iter()
-            .find(|t| {
-                t.path().len() == module.path().len() + 1 && t.path().starts_with(module.path())
-            })
-            .or_else(|| (found.len() == 1).then(|| &found[0]))
-            .cloned()
+        let here = found.iter().find(|t| {
+            t.path().len() == module.path().len() + 1 && t.path().starts_with(module.path())
+        });
+        match (here, found.as_slice()) {
+            (Some(t), _) => Some((t.clone(), true)),
+            (None, [only]) => Some((only.clone(), false)),
+            _ => None,
+        }
     }
 
     /// A synthetic L3 component under `module`, added when first needed.

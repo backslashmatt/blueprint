@@ -345,8 +345,10 @@ pub struct Code {
     pub body_line: Option<u32>,
     /// Hash of everything outside the body: the public surface.
     pub signature_hash: u64,
-    /// Hash of the body.
-    pub body_hash: u64,
+    /// Hash of the body; `None` for an item without one, which is never
+    /// paired as a move or rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hash: Option<u64>,
 }
 
 /// How visible a node is outside its parent (§3.3: public surface changes).

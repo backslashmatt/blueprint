@@ -29,6 +29,19 @@ pub fn render(model: &Model, diags: &[Diagnostic]) -> String {
             n.source,
             n.visibility.map(|v| format!("  {v:?}")).unwrap_or_default()
         );
+        if let Some(code) = n.code {
+            out.pop();
+            out += &format!(
+                "  lines {}-{}{}\n",
+                code.lines.0,
+                code.lines.1,
+                if code.body_hash.is_some() {
+                    ""
+                } else {
+                    "  no-body"
+                }
+            );
+        }
     }
     out += "edges:\n";
     for e in model.edges() {

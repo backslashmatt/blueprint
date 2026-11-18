@@ -14,7 +14,10 @@ const FILES: &[(&str, &str)] = &[
         "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
     ),
     ("crates/app/src/main.rs", "mod cli;\nfn main() {}\n"),
-    ("crates/app/src/cli.rs", ""),
+    (
+        "crates/app/src/cli.rs",
+        "pub struct Args {\n    pub verbose: bool,\n}\n\nimpl Args {\n    pub fn parse() -> Self {\n        Args { verbose: false }\n    }\n}\n",
+    ),
     ("crates/core/Cargo.toml", "[package]\nname = \"core\"\n"),
     (
         "crates/core/src/lib.rs",
@@ -26,9 +29,9 @@ const FILES: &[(&str, &str)] = &[
     ("docs/guide.md", "# guide\n"),
 ];
 
-fn fixture() -> PathBuf {
-    let dir =
-        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("bp-model-{}", std::process::id()));
+fn fixture(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("bp-model-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let skipped: &[(&str, &str)] = &[
         // Skipped: version control and build output.
@@ -88,7 +91,7 @@ fn snapshot(name: &str, actual: &str) {
 
 #[test]
 fn model_json_and_text_are_deterministic_and_snapshotted() {
-    let dir = fixture();
+    let dir = fixture("snapshot");
     let d = dir.to_str().unwrap();
     let json = bp(&["model", d, "--json"]);
     assert!(
@@ -354,4 +357,23 @@ fn peak_rss_is_reported_only_when_asked() {
         .unwrap_or_else(|| panic!("no peak_rss_kb in {err:?}"));
     assert!(kb > 0);
     assert!(bp(&["--version"]).stderr.is_empty());
+}
+
+#[test]
+fn level_4_reads_types_and_functions_the_same_from_disk_and_from_git() {
+    let dir = git_fixture("level4");
+    let d = dir.to_str().unwrap();
+    let text = stdout(&bp(&["model", d, "--rev", "HEAD", "--level", "4"]));
+    snapshot("model_fixture_l4.txt", &text);
+    assert!(text.lines().any(|l| l.starts_with("L4:")), "{text}");
+    let disk = stdout(&bp(&[
+        "model",
+        fixture("level4").to_str().unwrap(),
+        "--level",
+        "4",
+    ]));
+    assert_eq!(
+        disk, text,
+        "the working tree and the commit hold the same files"
+    );
 }
