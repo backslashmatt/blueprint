@@ -511,8 +511,11 @@ fn diff_medium(
 /// file, two blank lines added at the top and taken away again, so every
 /// item in it moves. The budget row uses the file at the 90th percentile of
 /// size, a large but ordinary file; `reindex_one_file_p99` reports the
-/// 99th, which on these repositories is generated code. Medium and large
-/// only. The engine is linked into bp-bench, so there is no base.
+/// 99th, which on these repositories is generated code.
+/// `reindex_one_file_items` adds `pub fn new() {}` to the p90 file and takes
+/// it away again, an edit to its items (#81) with a name many files
+/// mention, held to the same budget. Medium
+/// and large only. The engine is linked into bp-bench, so there is no base.
 fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, Error> {
     use blueprint_engine::resident::{Resident, Update};
     use blueprint_engine::source::Commit;
@@ -535,14 +538,32 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
             .filter_map(|p| Some((commit.read(p)?.len(), p.clone())))
             .collect();
         by_size.sort();
-        for (name, percentile) in [("reindex_one_file", 90), ("reindex_one_file_p99", 99)] {
+        for (name, percentile, structural) in [
+            ("reindex_one_file", 90, false),
+            ("reindex_one_file_p99", 99, false),
+            ("reindex_one_file_items", 90, true),
+        ] {
             let (_, target) = by_size
                 .get(by_size.len() * percentile / 100)
                 .ok_or("no analysed Rust file")?
                 .clone();
             let original = commit.read(&target).ok_or("unreadable target")?;
-            let mut edited = b"\n\n".to_vec();
-            edited.extend_from_slice(&original);
+            // Inside items: two blank lines at the top. Items: a function
+            // added at the end (#81).
+            let edited = if structural {
+                let mut e = original.clone();
+                e.extend_from_slice(b"\npub fn new() {}\n");
+                e
+            } else {
+                let mut e = b"\n\n".to_vec();
+                e.extend_from_slice(&original);
+                e
+            };
+            let expected = if structural {
+                Update::Items
+            } else {
+                Update::InPlace
+            };
             let samples = 11;
             let mut best = f64::INFINITY;
             for i in 0..samples * 2 {
@@ -557,7 +578,7 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
                 let start = std::time::Instant::now();
                 let how = resident.update(&target, &read);
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                if how != Update::InPlace {
+                if how != expected {
                     return Err(
                         format!("{target}: the edit was not applied in place ({how:?})").into(),
                     );
@@ -573,9 +594,14 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
                 budget: (r.name == "large" && percentile == 90).then(|| "reindex_one_file".into()),
                 samples: samples * 2,
                 note: Some(format!(
-                    "in process, engine resident: {target} (p{percentile} of {} analysed files by size, {} KB) gains or loses two leading blank lines; fastest of {}",
+                    "in process, engine resident: {target} (p{percentile} of {} analysed files by size, {} KB) {}; fastest of {}",
                     by_size.len(),
                     original.len() / 1024,
+                    if structural {
+                        "gains or loses `pub fn new() {}`"
+                    } else {
+                        "gains or loses two leading blank lines"
+                    },
                     samples * 2
                 )),
                 gated: true,

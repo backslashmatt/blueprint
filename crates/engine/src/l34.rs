@@ -17,9 +17,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use blueprint_lang_rust::Rust;
-use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser};
+use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser, Reference};
 use blueprint_model::{
-    Code, Confidence, EdgeKey, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey,
+    Code, Confidence, EdgeKey, EdgeKind, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey,
     Visibility,
 };
 use rayon::prelude::*;
@@ -63,7 +63,8 @@ pub fn analyse_cached(
 }
 
 /// What the L3–L4 pass knows about one analysed file, kept by a resident
-/// engine so that the file can be updated alone ([`update_body`]).
+/// engine so that the file can be updated alone ([`update_body`],
+/// [`update_items`]).
 pub(crate) struct FileState {
     system: SystemKey,
     /// The module the file is.
@@ -71,15 +72,29 @@ pub(crate) struct FileState {
     facts: FileFacts,
     /// The node each item became, by its index in the facts.
     nodes: Vec<Option<NodeId>>,
-    /// The file's `calls` edges.
-    calls: BTreeSet<EdgeKey>,
+    /// Every L3–L4 node the file made: its items and their groups.
+    owned: Vec<NodeId>,
+    /// The file's direct edges.
+    edges: edges::Contributions,
 }
 
-/// Everything [`update_body`] needs: each analysed file's state, and the
-/// context references were resolved in.
+/// Everything a resident engine needs to update one file: each analysed
+/// file's state, the context references were resolved in, and indexes of
+/// who gives each edge and who mentions each name.
 pub(crate) struct State {
     files: HashMap<RepoPath, FileState>,
     context: edges::Context,
+    /// Each system's crate root file.
+    roots: HashMap<SystemKey, RepoPath>,
+    /// For each direct edge, the files that give it, with their confidence.
+    producers: HashMap<EdgeKey, BTreeMap<RepoPath, Confidence>>,
+    /// The confidence each L1 edge was declared with, before roll-up.
+    l1: HashMap<EdgeKey, Confidence>,
+    /// The files whose references or calls mention each name.
+    mentions: HashMap<String, BTreeSet<RepoPath>>,
+    /// For each crate-root L2 node, how many direct edges name it: it
+    /// exists while any does, or while it has children.
+    root_refs: HashMap<NodeId, usize>,
 }
 
 impl State {
@@ -135,6 +150,17 @@ pub(crate) fn run(
     plain.sort_by(|a, b| a.0.cmp(b.0));
     let parsed = all;
 
+    // The confidence the manifests declared each L1 edge with, before
+    // roll-up adds evidence.
+    let l1: HashMap<EdgeKey, Confidence> = if keep {
+        model
+            .edges()
+            .filter(|e| e.key.from.level() == Level::System)
+            .map(|e| (e.key.clone(), e.confidence))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let roots = placed
         .iter()
         .filter(|(_, p)| p.module.as_ref().is_some_and(Vec::is_empty))
@@ -188,25 +214,126 @@ pub(crate) fn run(
     }
     let kept = edges::add(&mut b, &parsed, &functions, read, keep);
     b.diags.sort();
-    let Some((context, calls)) = kept else {
+    let Some((context, contributions)) = kept else {
         return (b.diags, None);
     };
-    let files = parsed
-        .into_iter()
-        .zip(nodes)
-        .zip(calls)
-        .map(|(((path, place, module, facts), nodes), calls)| {
-            let state = FileState {
-                system: place.system.clone(),
-                module: module.clone(),
-                facts,
-                nodes,
-                calls,
-            };
-            (path.clone(), state)
-        })
-        .collect();
-    (b.diags, Some(State { files, context }))
+    let mut state = State {
+        files: HashMap::new(),
+        context,
+        roots: b.roots.clone(),
+        producers: HashMap::new(),
+        l1,
+        mentions: HashMap::new(),
+        root_refs: HashMap::new(),
+    };
+    for (((path, place, module, facts), nodes), edges) in
+        parsed.into_iter().zip(nodes).zip(contributions)
+    {
+        let owned = owned(b.model, &nodes);
+        state.produce(path, &edges);
+        state.mention(path, &facts, true);
+        let file = FileState {
+            system: place.system.clone(),
+            module: module.clone(),
+            facts,
+            nodes,
+            owned,
+            edges,
+        };
+        state.files.insert(path.clone(), file);
+    }
+    (b.diags, Some(state))
+}
+
+/// The nodes a file's items made, and the groups they sit in.
+fn owned(model: &Model, nodes: &[Option<NodeId>]) -> Vec<NodeId> {
+    let mut out: BTreeSet<NodeId> = BTreeSet::new();
+    for id in nodes.iter().flatten() {
+        out.insert(id.clone());
+        if let Some(parent) = model.node(id).and_then(|n| n.parent.as_ref())
+            && parent.level() == Level::Component
+            && model.node(parent).is_some_and(|p| p.code.is_none())
+        {
+            out.insert(parent.clone());
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Every name a file's references and calls mention, path segments
+/// included: a change to an item of that name elsewhere can change how
+/// they resolve.
+fn mentioned(facts: &FileFacts) -> BTreeSet<&str> {
+    let mut out = BTreeSet::new();
+    for r in &facts.references {
+        match r {
+            Reference::Use { path, alias, .. } => {
+                out.extend(path.iter().map(String::as_str));
+                out.extend(alias.as_deref());
+            }
+            Reference::Impl {
+                self_type, r#trait, ..
+            } => {
+                out.extend(self_type.iter().map(String::as_str));
+                out.extend(r#trait.iter().map(String::as_str));
+            }
+        }
+    }
+    for item in &facts.items {
+        for call in &item.calls {
+            out.extend(call.iter().map(String::as_str));
+        }
+    }
+    out
+}
+
+/// The names a file's items give the resolution index: each L3 node's last
+/// segment in its module, and each free function's name in its module.
+fn indexed_names(owned: &[NodeId]) -> BTreeSet<(Vec<String>, String)> {
+    let mut out = BTreeSet::new();
+    for id in owned {
+        match (id.level(), id.path()) {
+            (Level::Component, [module @ .., name]) => {
+                out.insert((module.to_vec(), name.clone()));
+            }
+            (Level::Code, [module @ .., group, name]) if group == FUNCTIONS => {
+                out.insert((module.to_vec(), name.clone()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+impl State {
+    /// Records `path` as a source of each edge in `edges`.
+    fn produce(&mut self, path: &RepoPath, edges: &edges::Contributions) {
+        for (k, c) in edges {
+            let by = self.producers.entry(k.clone()).or_default();
+            if by.is_empty() {
+                for end in [&k.from, &k.to] {
+                    if end.level() == Level::Module && end.path().is_empty() {
+                        *self.root_refs.entry(end.clone()).or_default() += 1;
+                    }
+                }
+            }
+            by.insert(path.clone(), *c);
+        }
+    }
+
+    /// Records (`add`) or forgets the names `facts` mention for `path`.
+    fn mention(&mut self, path: &RepoPath, facts: &FileFacts, add: bool) {
+        for name in mentioned(facts) {
+            if add {
+                self.mentions
+                    .entry(name.to_owned())
+                    .or_default()
+                    .insert(path.clone());
+            } else if let Some(files) = self.mentions.get_mut(name) {
+                files.remove(path);
+            }
+        }
+    }
 }
 
 /// Why [`update_body`] could not update a file alone.
@@ -258,15 +385,250 @@ pub(crate) fn update_body(
         &facts,
         |i| file.nodes.get(i).and_then(Option::as_ref),
     );
-    for gone in file.calls.difference(&calls) {
-        edges::remove_rolled(model, gone);
+    let old: BTreeSet<EdgeKey> = file
+        .edges
+        .keys()
+        .filter(|k| k.kind == EdgeKind::Calls)
+        .cloned()
+        .collect();
+    // A call is only ever given by its caller's file.
+    for gone in old.difference(&calls) {
+        file.edges.remove(gone);
+        state.producers.remove(gone);
+        edges::remove_rolled(model, gone, &state.l1);
     }
-    for new in calls.difference(&file.calls) {
+    for new in calls.difference(&old) {
+        file.edges.insert(new.clone(), Confidence::Inferred);
+        state
+            .producers
+            .entry(new.clone())
+            .or_default()
+            .insert(path.clone(), Confidence::Inferred);
         edges::add_rolled(model, new.clone(), Confidence::Inferred);
     }
-    file.calls = calls;
     file.facts = facts;
     Ok(())
+}
+
+/// Updates one analysed file whose items or references changed, as DR
+/// 0008 decision 5 describes: its nodes are made again, the resolution
+/// index and its imports updated, and its own references re-resolved,
+/// with those of every other file that mentions a name it added or
+/// removed. Edges change by difference, rolled up. A crate's root file,
+/// or a file whose module has no L2 node, is not updated here: nodes and
+/// groups there can be shared with other files.
+pub(crate) fn update_items(
+    model: &mut Model,
+    state: &mut State,
+    path: &RepoPath,
+    facts: FileFacts,
+) -> Result<(), NotBody> {
+    let file = state.files.get(path).ok_or(NotBody::NotAnalysed)?;
+    let (system, module) = (file.system.clone(), file.module.clone());
+    let module_id = NodeId::within(Level::Module, system.clone(), module.clone());
+    if module.is_empty() || model.node(&module_id).is_none() {
+        return Err(NotBody::Structure);
+    }
+    // Inline modules must have their own L2 nodes too, or items would sit
+    // in a module another file shares.
+    for item in &facts.items {
+        let m = [module.as_slice(), item.module.as_slice()].concat();
+        if model
+            .node(&NodeId::within(Level::Module, system.clone(), m))
+            .is_none()
+        {
+            return Err(NotBody::Structure);
+        }
+    }
+    let item_names = |f: &FileFacts| -> BTreeSet<(Vec<String>, String)> {
+        f.items
+            .iter()
+            .map(|i| (i.module.clone(), i.name.clone()))
+            .collect()
+    };
+    let (old_names, new_names) = (item_names(&file.facts), item_names(&facts));
+    let changed: BTreeSet<&str> = old_names
+        .symmetric_difference(&new_names)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    // Another file's reference can only resolve into this file's module by
+    // a path that names every segment of the module below the deepest
+    // module the two files share: from the crate root, another crate,
+    // `super`, a child module or a `use` binding alike. Of the files that
+    // mention a changed name, only those that also mention all of those
+    // segments can change.
+    let mentions = &state.mentions;
+    let mentions_all = |g: &RepoPath, segs: &[String]| {
+        segs.iter().all(|s| {
+            mentions
+                .get(s.as_str())
+                .is_some_and(|files| files.contains(g))
+        })
+    };
+    let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
+    for name in &changed {
+        for g in mentions.get(*name).into_iter().flatten() {
+            let shared = match state.files.get(g) {
+                Some(f) if f.system == system => module
+                    .iter()
+                    .zip(&f.module)
+                    .take_while(|(a, b)| a == b)
+                    .count(),
+                _ => 0,
+            };
+            if mentions_all(g, &module[shared..]) {
+                touched.insert(g.clone());
+            }
+        }
+    }
+
+    // 1. The touched files' edges go, rolled up.
+    let mut roots_to_check: BTreeSet<NodeId> = BTreeSet::new();
+    for p in &touched {
+        let Some(f) = state.files.get_mut(p) else {
+            continue;
+        };
+        let edges = std::mem::take(&mut f.edges);
+        for k in edges.keys() {
+            state.unproduce(model, p, k, &mut roots_to_check);
+        }
+    }
+
+    // 2. The file's nodes are made again.
+    let Some(file) = state.files.get_mut(path) else {
+        return Err(NotBody::NotAnalysed);
+    };
+    let old_owned = std::mem::take(&mut file.owned);
+    for id in old_owned.iter().rev() {
+        model.detach_node(id);
+    }
+    let mut b = Builder {
+        model,
+        roots: state.roots.clone(),
+        diags: Vec::new(),
+        types: HashMap::new(),
+    };
+    let mut nodes = vec![None; facts.items.len()];
+    for (i, item) in facts.items.iter().enumerate() {
+        if matches!(item.kind, ItemKind::Type { .. }) {
+            nodes[i] = b.add_type(path, &system, &module, item, &facts);
+        }
+    }
+    for (i, item) in facts.items.iter().enumerate() {
+        if !matches!(item.kind, ItemKind::Type { .. }) {
+            nodes[i] = b.add_function(path, &system, &module, item, &facts);
+        }
+    }
+    let model = b.model;
+    let new_owned = owned(model, &nodes);
+    state.context.rename(
+        &system,
+        &indexed_names(&old_owned),
+        &indexed_names(&new_owned),
+    );
+    state.context.rebind(&system, &module, &file.facts, &facts);
+    let old_facts = std::mem::replace(&mut file.facts, facts);
+    file.nodes = nodes;
+    file.owned = new_owned;
+    state.mention(path, &old_facts, false);
+    let new_facts = state.files[path].facts.clone();
+    state.mention(path, &new_facts, true);
+
+    // 3. The touched files' edges are found again.
+    for p in &touched {
+        let Some(f) = state.files.get(p) else {
+            continue;
+        };
+        let found = edges::edges_of(model, &state.context, &f.system, &f.module, &f.facts, |i| {
+            f.nodes.get(i).and_then(Option::as_ref)
+        });
+        for (k, c) in &found {
+            // A crate root's L2 node exists only once something needs it.
+            for end in [&k.from, &k.to] {
+                if end.level() == Level::Module
+                    && end.path().is_empty()
+                    && model.node(end).is_none()
+                {
+                    let mut b = Builder {
+                        model,
+                        roots: state.roots.clone(),
+                        diags: Vec::new(),
+                        types: HashMap::new(),
+                    };
+                    b.module(end.system_key(), &[], p);
+                }
+            }
+            state.produce_one(model, p, k, *c);
+        }
+        if let Some(f) = state.files.get_mut(p) {
+            f.edges = found;
+        }
+    }
+
+    // 4. A crate root's L2 node that nothing needs any more goes.
+    for root in roots_to_check {
+        let needed = state.root_refs.get(&root).copied().unwrap_or(0) > 0
+            || model.children(&root).next().is_some();
+        if !needed {
+            model.detach_node(&root);
+        }
+    }
+    Ok(())
+}
+
+impl State {
+    /// `path` no longer gives the edge `k`. If no file gives it any more it
+    /// goes, rolled up; otherwise it keeps the surest of what is left.
+    fn unproduce(
+        &mut self,
+        model: &mut Model,
+        path: &RepoPath,
+        k: &EdgeKey,
+        roots: &mut BTreeSet<NodeId>,
+    ) {
+        let Some(by) = self.producers.get_mut(k) else {
+            return;
+        };
+        let before = by.values().copied().max();
+        by.remove(path);
+        let after = by.values().copied().max();
+        if after.is_none() {
+            self.producers.remove(k);
+            for end in [&k.from, &k.to] {
+                if end.level() == Level::Module && end.path().is_empty() {
+                    if let Some(n) = self.root_refs.get_mut(end) {
+                        *n -= 1;
+                        if *n == 0 {
+                            self.root_refs.remove(end);
+                        }
+                    }
+                    roots.insert(end.clone());
+                }
+            }
+            edges::remove_rolled(model, k, &self.l1);
+        } else if after != before {
+            edges::remove_rolled(model, k, &self.l1);
+            if let Some(c) = after {
+                edges::add_rolled(model, k.clone(), c);
+            }
+        }
+    }
+
+    /// `path` gives the edge `k` with confidence `c`: it is added, rolled
+    /// up, or made surer.
+    fn produce_one(&mut self, model: &mut Model, path: &RepoPath, k: &EdgeKey, c: Confidence) {
+        let before = self
+            .producers
+            .get(k)
+            .and_then(|by| by.values().copied().max());
+        self.produce(path, &BTreeMap::from([(k.clone(), c)]));
+        if before.is_none() {
+            edges::add_rolled(model, k.clone(), c);
+        } else if before.is_some_and(|b| c > b) {
+            edges::remove_rolled(model, k, &self.l1);
+            edges::add_rolled(model, k.clone(), c);
+        }
+    }
 }
 
 struct Builder<'a> {

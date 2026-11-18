@@ -2,11 +2,15 @@
 //! tree, and what built it, so that a change to one file can be applied in
 //! place instead of analysing everything again.
 //!
-//! The fast path covers the edit that happens most: a change inside items.
-//! The file's `mod` declarations, items (kind, name and module, in order)
-//! and references must be unchanged; then only the file's own nodes and
-//! `calls` edges can change, and only those are updated. Any other change
-//! rebuilds the whole model.
+//! Two paths apply a change in place; anything else rebuilds the model.
+//!
+//! - **Inside items** (the edit that happens most): the file's `mod`
+//!   declarations, items (kind, name and module, in order) and references
+//!   are unchanged, so only its own nodes and `calls` edges change.
+//! - **Items or references** (#81): the file's `mod` declarations are
+//!   unchanged, and it is not a crate's root file. Its nodes are made again,
+//!   and its references re-resolved with those of every file that mentions
+//!   a name it added or removed.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -24,6 +28,9 @@ use crate::l34;
 pub enum Update {
     /// Only the file's own nodes and calls were updated.
     InPlace,
+    /// The file's items or references changed: its nodes, and the edges of
+    /// the files that mention what changed, were updated.
+    Items,
     /// The whole model was built again.
     Rebuilt,
 }
@@ -82,8 +89,8 @@ impl Resident {
     /// `None` for a deleted file. The model is then what
     /// [`Resident::build`] would give for the new tree.
     pub fn update(&mut self, path: &RepoPath, read: Read<'_>) -> Update {
-        if self.update_in_place(path, read) {
-            return Update::InPlace;
+        if let Some(how) = self.update_in_place(path, read) {
+            return how;
         }
         let mut paths = std::mem::take(&mut self.paths);
         match (paths.binary_search(path), read(path).is_some()) {
@@ -97,19 +104,22 @@ impl Resident {
         Update::Rebuilt
     }
 
-    fn update_in_place(&mut self, path: &RepoPath, read: Read<'_>) -> bool {
-        let Some(old) = self.shapes.get(path) else {
-            return false;
-        };
-        let Some(bytes) = read(path) else {
-            return false;
-        };
-        let shape = l2::shape(&bytes);
-        if shape != *old {
-            return false;
+    fn update_in_place(&mut self, path: &RepoPath, read: Read<'_>) -> Option<Update> {
+        let old = self.shapes.get(path)?;
+        let bytes = read(path)?;
+        if l2::shape(&bytes) != *old {
+            return None;
         }
         let facts = Rust.analyse(path, &bytes);
-        l34::update_body(&mut self.model, &mut self.state, path, facts).is_ok()
+        match l34::update_body(&mut self.model, &mut self.state, path, facts.clone()) {
+            Ok(()) => Some(Update::InPlace),
+            Err(l34::NotBody::NotAnalysed) => None,
+            Err(l34::NotBody::Structure) => {
+                l34::update_items(&mut self.model, &mut self.state, path, facts)
+                    .ok()
+                    .map(|()| Update::Items)
+            }
+        }
     }
 }
 
