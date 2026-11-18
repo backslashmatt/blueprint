@@ -11,8 +11,8 @@
 //!   the §4 cold-start budget as bp-bench measures it (#88).
 //! - `--script <keys>` presses the comma-separated keys (GPUI key names) in
 //!   the review list once it has loaded, and `--review-report <file>` writes
-//!   the review reached as JSON and quits once its diff is complete: the
-//!   app test of #90.
+//!   the review reached as JSON and quits once its diff is complete and
+//!   its map laid out: the app test of #90 and #92.
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -162,18 +162,26 @@ fn pump(
     .detach();
 }
 
-/// Once the review's diff is complete, writes it to `path` as JSON and quits.
+/// Once the review's diff is complete and its map laid out, writes it to
+/// `path` as JSON and quits.
 fn report_review(ws: &gpui::Entity<Workspace>, path: String, cx: &mut App) {
     cx.observe(ws, move |ws, cx| {
         let Screen::Review(r) = &ws.read(cx).screen else {
+            return;
+        };
+        let (Some(map), Some(_)) = (&r.map, &r.layout) else {
             return;
         };
         if r.detail != Some(Detail::Full) {
             return;
         }
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}}}\n",
-            r.base, r.head, r.findings, r.changed
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}}}\n",
+            r.base,
+            r.head,
+            r.findings,
+            r.changed,
+            map.view.nodes.len()
         );
         if let Err(e) = std::fs::write(&path, json) {
             eprintln!("blueprint: cannot write {path}: {e}");

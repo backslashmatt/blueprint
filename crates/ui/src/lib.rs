@@ -7,6 +7,7 @@ use gpui::{
 };
 
 pub mod layout;
+pub mod map;
 pub mod review_list;
 pub mod workspace;
 

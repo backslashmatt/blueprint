@@ -56,7 +56,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox \
+            imagemagick
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -90,6 +91,19 @@ jobs:
           if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
             echo "the keys chose the same commit as base and head"; exit 1
           fi
+      # Screenshots of the map from the virtual display, for review (§9.4).
+      - name: map screenshots
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p screenshots
+          .github/scripts/screenshot.sh screenshots/map-systems.png 15 target/debug/blueprint . --script end,b,home,h,enter
+          .github/scripts/screenshot.sh screenshots/map-drilled.png 15 target/debug/blueprint . --script end,b,home,h,enter,enter
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora

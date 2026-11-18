@@ -15,10 +15,10 @@
 //! 4. Within a layer, nodes start in id order and are reordered by
 //!    barycentre over [`SWEEPS`] passes, ties kept in their earlier order.
 //! 5. Each layer is centred; edges leave the bottom of their source, run
-//!    horizontally in the channel below that layer, and enter the top of
-//!    the next node on their way.
+//!    horizontally in the channel below that layer, in a lane of their
+//!    source's own, and enter the top of the next node on their way.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Barycentre passes (down and up count as one each).
 pub const SWEEPS: usize = 8;
@@ -431,7 +431,30 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
         grid = Some((left, cols));
     }
 
-    // Edges: down from the bottom centre, across in the channel, into the
+    // Each node with edges leaving it gets its own lane in the channel
+    // below its layer, in left-to-right order, so that every horizontal
+    // run belongs to one source and can be followed.
+    let mut sources: BTreeMap<u32, BTreeSet<(u32, usize)>> = BTreeMap::new();
+    for path in chain.values() {
+        for w in path.windows(2) {
+            let p = pos[w[0]];
+            let x = (p.x + m.width / 2.0).max(0.0);
+            sources
+                .entry(p.y.max(0.0).to_bits())
+                .or_default()
+                .insert((x.to_bits(), w[0]));
+        }
+    }
+    let mut lane: HashMap<usize, f32> = HashMap::new();
+    for (y, members) in &sources {
+        let k = members.len() as f32;
+        for (i, (_, u)) in members.iter().enumerate() {
+            let top = f32::from_bits(*y) + m.height;
+            lane.insert(*u, top + m.channel * (i as f32 + 1.0) / (k + 1.0));
+        }
+    }
+
+    // Edges: down from the bottom centre, along the source's lane, into the
     // top centre of the next node on the chain.
     let route = |path: &[usize]| -> Vec<Point> {
         let mut pts = Vec::new();
@@ -440,7 +463,10 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
             let (from_x, to_x) = (p.x + m.width / 2.0, q.x + m.width / 2.0);
             // A virtual node is a point: its edge passes straight through.
             let from_y = if w[0] < n { p.y + m.height } else { p.y };
-            let mid = p.y + m.height + m.channel / 2.0;
+            let mid = lane
+                .get(&w[0])
+                .copied()
+                .unwrap_or(p.y + m.height + m.channel / 2.0);
             if pts.is_empty() {
                 pts.push(Point {
                     x: from_x,
