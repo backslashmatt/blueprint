@@ -20,3 +20,7 @@ Exit codes:
 | 2 | An error, such as a bad option, a missing or modified reference checkout, or a failed command. |
 
 CI (`.github/workflows/bench.yml`) runs this on every pull request and every push to `main`, against the base commit built on the same runner. The table goes to the job summary and the JSON to the `bench-results` artifact. The agent copies the numbers into the agent log each session.
+
+## Re-index after a one-file change
+
+`reindex_one_file` is measured in process, with the engine resident, as the app will run it (DR 0008 decision 5). bp-bench builds the L1–L4 model of the pinned commit once with `engine::resident::Resident`. It then times applying an edit to one analysed Rust file: two blank lines added at the top and taken away again, so every item in the file moves. The budget row uses the file at the 90th percentile of size, a large but ordinary file. `reindex_one_file_p99` reports the 99th percentile, which on these repositories is generated code. An edit inside items (bodies, signatures, attributes) is applied in place. A change to a file's items, references or `mod` declarations, or to any other file, rebuilds the model.

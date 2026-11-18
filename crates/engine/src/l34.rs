@@ -14,12 +14,13 @@
 //! an L4 id its component's path plus the function's name, with `<Trait>::`
 //! for trait methods and `~2`, `~3`… for any clash left.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use blueprint_lang_rust::Rust;
 use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser};
 use blueprint_model::{
-    Code, Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey, Visibility,
+    Code, Confidence, EdgeKey, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey,
+    Visibility,
 };
 use rayon::prelude::*;
 
@@ -58,6 +59,46 @@ pub fn analyse_cached(
     parsed: &mut dyn FnMut(&RepoPath, &FileFacts),
     model: &mut Model,
 ) -> Vec<Diagnostic> {
+    run(placed, read, cached, parsed, model, false).0
+}
+
+/// What the L3–L4 pass knows about one analysed file, kept by a resident
+/// engine so that the file can be updated alone ([`update_body`]).
+pub(crate) struct FileState {
+    system: SystemKey,
+    /// The module the file is.
+    module: Vec<String>,
+    facts: FileFacts,
+    /// The node each item became, by its index in the facts.
+    nodes: Vec<Option<NodeId>>,
+    /// The file's `calls` edges.
+    calls: BTreeSet<EdgeKey>,
+}
+
+/// Everything [`update_body`] needs: each analysed file's state, and the
+/// context references were resolved in.
+pub(crate) struct State {
+    files: HashMap<RepoPath, FileState>,
+    context: edges::Context,
+}
+
+impl State {
+    /// The facts of an analysed file.
+    pub(crate) fn facts(&self, path: &RepoPath) -> Option<&FileFacts> {
+        self.files.get(path).map(|f| &f.facts)
+    }
+}
+
+/// [`analyse_cached`]; with `keep`, also returns the state a resident engine
+/// keeps. Without it, nothing extra is built.
+pub(crate) fn run(
+    placed: &BTreeMap<RepoPath, Placement>,
+    read: Read<'_>,
+    cached: Cached<'_>,
+    parsed: &mut dyn FnMut(&RepoPath, &FileFacts),
+    model: &mut Model,
+    keep: bool,
+) -> (Vec<Diagnostic>, Option<State>) {
     let rust = Rust;
     let mut wanted = Vec::new();
     let mut plain = Vec::new();
@@ -106,11 +147,25 @@ pub fn analyse_cached(
         diags: Vec::new(),
         types: HashMap::new(),
     };
+    // The node each item became, by file and item index.
+    let mut nodes: Vec<Vec<Option<NodeId>>> = if keep {
+        parsed
+            .iter()
+            .map(|(_, _, _, facts)| vec![None; facts.items.len()])
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut record = |f: usize, i: usize, id: Option<NodeId>| {
+        if let Some(slot) = nodes.get_mut(f).and_then(|n| n.get_mut(i)) {
+            *slot = id;
+        }
+    };
     // Types first, so that a method finds its type wherever the type is.
-    for (path, place, module, facts) in &parsed {
-        for item in &facts.items {
+    for (f, (path, place, module, facts)) in parsed.iter().enumerate() {
+        for (i, item) in facts.items.iter().enumerate() {
             if matches!(item.kind, ItemKind::Type { .. }) {
-                b.add_type(path, &place.system, module, item, facts);
+                record(f, i, b.add_type(path, &place.system, module, item, facts));
             }
         }
     }
@@ -121,6 +176,9 @@ pub fn analyse_cached(
             if !matches!(item.kind, ItemKind::Type { .. })
                 && let Some(id) = b.add_function(path, &place.system, module, item, facts)
             {
+                if keep {
+                    record(f, i, Some(id.clone()));
+                }
                 functions.insert((f, i), id);
             }
         }
@@ -128,9 +186,87 @@ pub fn analyse_cached(
     for (path, place) in plain {
         b.add_file(path, place);
     }
-    edges::add(&mut b, &parsed, &functions, read);
+    let kept = edges::add(&mut b, &parsed, &functions, read, keep);
     b.diags.sort();
-    b.diags
+    let Some((context, calls)) = kept else {
+        return (b.diags, None);
+    };
+    let files = parsed
+        .into_iter()
+        .zip(nodes)
+        .zip(calls)
+        .map(|(((path, place, module, facts), nodes), calls)| {
+            let state = FileState {
+                system: place.system.clone(),
+                module: module.clone(),
+                facts,
+                nodes,
+                calls,
+            };
+            (path.clone(), state)
+        })
+        .collect();
+    (b.diags, Some(State { files, context }))
+}
+
+/// Why [`update_body`] could not update a file alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotBody {
+    /// The file was not analysed: not Rust, or no module tree reached it.
+    NotAnalysed,
+    /// Its items, references or parse state changed, so other files' nodes
+    /// or edges can change too.
+    Structure,
+}
+
+/// Updates one analysed file whose new `facts` differ from its old ones only
+/// within items: the same items (kind, name and module, in order), the same
+/// references, and the same parse state. Its nodes get the new spans,
+/// hashes and visibility, and its `calls` edges are resolved again, rolled
+/// up. Nothing else in the model can change, because what other files
+/// resolve against is unchanged (DR 0008 decision 5).
+pub(crate) fn update_body(
+    model: &mut Model,
+    state: &mut State,
+    path: &RepoPath,
+    facts: FileFacts,
+) -> Result<(), NotBody> {
+    let file = state.files.get_mut(path).ok_or(NotBody::NotAnalysed)?;
+    let same_items = file.facts.items.len() == facts.items.len()
+        && file
+            .facts
+            .items
+            .iter()
+            .zip(&facts.items)
+            .all(|(a, b)| a.kind == b.kind && a.name == b.name && a.module == b.module);
+    if !same_items || file.facts.references != facts.references || file.facts.clean != facts.clean {
+        return Err(NotBody::Structure);
+    }
+    for (item, id) in facts.items.iter().zip(&file.nodes) {
+        let Some(mut node) = id.as_ref().and_then(|id| model.node(id)).cloned() else {
+            continue;
+        };
+        node.code = Some(code(item));
+        node.visibility = item.visibility;
+        let _ = model.replace_node(node);
+    }
+    let calls = edges::calls_of(
+        model,
+        &state.context,
+        &file.system,
+        &file.module,
+        &facts,
+        |i| file.nodes.get(i).and_then(Option::as_ref),
+    );
+    for gone in file.calls.difference(&calls) {
+        edges::remove_rolled(model, gone);
+    }
+    for new in calls.difference(&file.calls) {
+        edges::add_rolled(model, new.clone(), Confidence::Inferred);
+    }
+    file.calls = calls;
+    file.facts = facts;
+    Ok(())
 }
 
 struct Builder<'a> {
@@ -232,7 +368,7 @@ impl Builder<'_> {
         file_module: &[String],
         item: &Item,
         facts: &FileFacts,
-    ) {
+    ) -> Option<NodeId> {
         let module = [file_module, item.module.as_slice()].concat();
         let (parent, conf) = self.module(system, &module, path);
         let id = self.free_id(Level::Component, &parent, &item.name);
@@ -246,12 +382,13 @@ impl Builder<'_> {
             visibility: item.visibility,
             code: Some(code(item)),
         });
-        if let Some(id) = added {
+        if let Some(id) = &added {
             self.types
                 .entry((system.clone(), item.name.clone()))
                 .or_default()
-                .push(id);
+                .push(id.clone());
         }
+        added
     }
 
     fn add_function(
