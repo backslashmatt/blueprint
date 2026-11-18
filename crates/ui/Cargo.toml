@@ -11,5 +11,10 @@ publish.workspace = true
 blueprint-protocol.workspace = true
 gpui.workspace = true
 
+[dev-dependencies]
+# For examples/layout_measure only; `ui` itself never depends on the engine.
+blueprint-engine.workspace = true
+blueprint-model.workspace = true
+
 [lints]
 workspace = true

@@ -6,6 +6,7 @@ use gpui::{
     Context, IntoElement, ParentElement, Render, Styled, Window, WindowAppearance, div, rgb,
 };
 
+pub mod layout;
 pub mod review_list;
 pub mod workspace;
 
