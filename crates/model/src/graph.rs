@@ -654,6 +654,29 @@ impl Model {
         }
     }
 
+    /// Removes a node and its descendants without looking at edges: any
+    /// edge or evidence that names them is left as it is. For callers that
+    /// have already removed those edges, or will add the same ids back, and
+    /// cannot afford [`Model::remove_node`]'s scan of every edge. Returns
+    /// false if there was no such node.
+    pub fn detach_node(&mut self, id: &NodeId) -> bool {
+        let Some(node) = self.nodes.remove(id) else {
+            return false;
+        };
+        if let Some(parent) = &node.parent
+            && let Some(siblings) = self.children.get_mut(parent)
+        {
+            siblings.remove(id);
+            if siblings.is_empty() {
+                self.children.remove(parent);
+            }
+        }
+        for child in self.children.remove(id).unwrap_or_default() {
+            self.detach_node(&child);
+        }
+        true
+    }
+
     /// Removes an edge. Returns false if it was not present.
     pub fn remove_edge(&mut self, key: &EdgeKey) -> bool {
         self.edges.remove(key).is_some()

@@ -133,22 +133,21 @@ fn edits_inside_items_are_applied_in_place_and_match_a_fresh_build() {
 }
 
 #[test]
-fn structural_edits_rebuild_and_match_a_fresh_build() {
+fn structural_edits_match_a_fresh_build() {
     let mut tree = files(FIXTURE);
     let paths: Vec<RepoPath> = tree.keys().cloned().collect();
     let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
 
-    // A new item.
+    // A new item, then a new reference: in place (#81).
     let util = "pub fn util() {}\npub fn more() {}\n";
     assert_eq!(
         change(&mut r, &mut tree, "core/src/util.rs", util),
-        Update::Rebuilt
+        Update::Items
     );
-    // A new reference.
     let util = "use crate::graph::Graph;\npub fn util() {}\npub fn more() {}\n";
     assert_eq!(
         change(&mut r, &mut tree, "core/src/util.rs", util),
-        Update::Rebuilt
+        Update::Items
     );
     // A new module declaration (to a file that is not there).
     let lib = "pub mod graph;\nmod util;\nmod gone;\n\npub fn top() {}\n\nfn helper() {}\n";
@@ -156,11 +155,12 @@ fn structural_edits_rebuild_and_match_a_fresh_build() {
         change(&mut r, &mut tree, "core/src/lib.rs", lib),
         Update::Rebuilt
     );
-    // Syntax errors change the file's parse state.
+    // Syntax errors change the file's parse state, and its items'
+    // confidence with it.
     let util = "use crate::graph::Graph;\npub fn util() { let x = ; }\npub fn more() {}\n";
     assert_eq!(
         change(&mut r, &mut tree, "core/src/util.rs", util),
-        Update::Rebuilt
+        Update::Items
     );
     // A manifest, and a Rust file no module tree reaches.
     let manifest = "[package]\nname = \"app\"\n";
@@ -230,15 +230,195 @@ fn this_repository_edits_match_a_fresh_build() {
     for file in [
         "crates/engine/src/l34.rs",
         "crates/model/src/graph.rs",
-        "crates/cli/src/main.rs",
+        "crates/engine/src/diff.rs",
     ] {
         let path = RepoPath::parse(file).unwrap();
-        let mut text = String::from_utf8(tree[&path].clone()).unwrap();
+        let original = String::from_utf8(tree[&path].clone()).unwrap();
+        let mut text = original.clone();
         text.insert_str(0, "\n\n");
         assert_eq!(
             change(&mut r, &mut tree, file, &text),
             Update::InPlace,
             "{file}"
+        );
+        // A new function, then the file as it was: both in place (#81).
+        let added = format!("{original}\npub fn added_by_the_test() {{ main(); }}\n");
+        assert_eq!(
+            change(&mut r, &mut tree, file, &added),
+            Update::Items,
+            "{file}"
+        );
+        assert_eq!(
+            change(&mut r, &mut tree, file, &original),
+            Update::Items,
+            "{file}"
+        );
+    }
+    // A crate's root file rebuilds: its nodes can be shared.
+    let main = "crates/cli/src/main.rs";
+    let original = String::from_utf8(tree[&RepoPath::parse(main).unwrap()].clone()).unwrap();
+    let added = format!("{original}\npub fn added_by_the_test() {{}}\n");
+    assert_eq!(change(&mut r, &mut tree, main, &added), Update::Rebuilt);
+}
+
+/// Structural edits whose effects reach other files: calls into a removed
+/// function, an impl of a renamed type, and a `use` whose confidence
+/// depends on whether its item exists.
+#[test]
+fn structural_edits_reach_the_files_that_mention_them() {
+    const TREE: &[(&str, &str)] = &[
+        ("Cargo.toml", "[package]\nname = \"app\"\n"),
+        ("src/lib.rs", "mod a;\nmod b;\nmod c;\n"),
+        (
+            "src/a.rs",
+            "pub fn f() {}\npub fn g() {}\npub struct S;\npub trait T {}\n",
+        ),
+        (
+            "src/b.rs",
+            "use crate::a::f;\npub fn h() { crate::a::f(); crate::a::g(); }\n",
+        ),
+        (
+            "src/c.rs",
+            "use crate::a::{S, T};\nimpl T for S {}\npub fn k() { crate::a::S::new(); }\n",
+        ),
+    ];
+    let mut tree = files(TREE);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let edits = [
+        // `f` goes: b's call and its exact `use` change.
+        ("src/a.rs", "pub fn g() {}\npub struct S;\npub trait T {}\n"),
+        // It comes back, with `S::new` that c calls.
+        (
+            "src/a.rs",
+            "pub fn f() {}\npub fn g() {}\npub struct S;\nimpl S { pub fn new() -> Self { S } }\npub trait T {}\n",
+        ),
+        // `S` is renamed: c's impl and call no longer resolve.
+        (
+            "src/a.rs",
+            "pub fn f() {}\npub fn g() {}\npub struct R;\nimpl R { pub fn new() -> Self { R } }\npub trait T {}\n",
+        ),
+        // b stops calling g and starts calling f twice.
+        (
+            "src/b.rs",
+            "use crate::a::f;\npub fn h() { f(); crate::a::f(); }\npub fn i() {}\n",
+        ),
+        // c's own use changes.
+        (
+            "src/c.rs",
+            "use crate::a::{R, T};\nimpl T for R {}\npub fn k() { crate::a::R::new(); }\n",
+        ),
+        // Everything goes from a.
+        ("src/a.rs", ""),
+    ];
+    for (path, text) in edits {
+        let how = change(&mut r, &mut tree, path, text);
+        assert!(
+            matches!(how, Update::Items | Update::InPlace),
+            "{path}: {how:?}"
+        );
+    }
+}
+
+/// The paths that reach a file without naming every module from the crate
+/// root: `super::`, a child path from an ancestor, a `use … as` alias, a
+/// glob, and another crate.
+#[test]
+fn structural_edits_reach_relative_aliased_and_glob_paths() {
+    const TREE: &[(&str, &str)] = &[
+        ("Cargo.toml", "[workspace]\nmembers = [\"core\", \"app\"]\n"),
+        ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
+        ("core/src/lib.rs", "pub mod p;\n"),
+        (
+            "core/src/p.rs",
+            "pub mod q;\npub mod sib;\npub fn up() { q::target(); }\n",
+        ),
+        ("core/src/p/q.rs", "pub mod child;\npub fn other() {}\n"),
+        ("core/src/p/q/child.rs", "pub fn c() { super::target(); }\n"),
+        (
+            "core/src/p/sib.rs",
+            "use super::q as alias;\nuse super::q::*;\npub fn s() { alias::target(); target(); super::q::target(); }\n",
+        ),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\ncore = { path = \"../core\" }\n",
+        ),
+        ("app/src/main.rs", "mod m;\nfn main() {}\n"),
+        ("app/src/m.rs", "pub fn x() { core::p::q::target(); }\n"),
+    ];
+    let mut tree = files(TREE);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let target = "core/src/p/q.rs";
+    // `target` appears, every caller's edge with it; then it goes again.
+    for text in [
+        "pub mod child;\npub fn other() {}\npub fn target() {}\n",
+        "pub mod child;\npub fn other() {}\n",
+        "pub mod child;\npub fn target() {}\npub struct target;\n",
+    ] {
+        let how = change(&mut r, &mut tree, target, text);
+        assert_eq!(how, Update::Items, "{text}");
+    }
+    let calls: Vec<String> = r
+        .model()
+        .edges()
+        .filter(|e| {
+            e.key.kind == blueprint_model::EdgeKind::Calls
+                && e.key.from.level() == blueprint_model::Level::Code
+        })
+        .map(|e| format!("{} -> {}", e.key.from, e.key.to))
+        .collect();
+    assert!(calls.len() >= 4, "every path reached `target`: {calls:#?}");
+}
+
+/// Edits that keep every name but change what it is (from review of #87).
+#[test]
+fn a_name_that_changes_kind_or_owner_reaches_its_callers() {
+    let cases: &[(&str, &str, &str)] = &[
+        // A function becomes a type.
+        (
+            "pub fn S() {}\n",
+            "pub fn h() { crate::a::S(); }\n",
+            "pub struct S {}\n",
+        ),
+        // A free function becomes a method.
+        (
+            "pub struct S;\npub fn new() {}\n",
+            "pub fn h() { crate::a::new(); crate::a::S::new(); }\n",
+            "pub struct S;\nimpl S { pub fn new() {} }\n",
+        ),
+        // An inherent method moves into a trait impl.
+        (
+            "pub struct S;\npub trait T {}\nimpl S { pub fn m() {} }\n",
+            "pub fn h() { crate::a::S::m(); }\n",
+            "pub struct S;\npub trait T {}\nimpl T for S { fn m() {} }\n",
+        ),
+        // A method moves to another type.
+        (
+            "pub struct S;\npub struct R;\nimpl S { pub fn m() {} }\n",
+            "pub fn h() { crate::a::S::m(); crate::a::R::m(); }\n",
+            "pub struct S;\npub struct R;\nimpl R { pub fn m() {} }\n",
+        ),
+    ];
+    for (a, b, edit) in cases {
+        let entries = [
+            ("Cargo.toml", "[package]\nname = \"app\"\n"),
+            ("src/lib.rs", "mod a;\nmod b;\n"),
+            ("src/a.rs", *a),
+            ("src/b.rs", *b),
+        ];
+        let mut tree = files(&entries);
+        let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+        let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+        assert_eq!(
+            change(&mut r, &mut tree, "src/a.rs", edit),
+            Update::Items,
+            "{edit}"
+        );
+        assert_eq!(
+            change(&mut r, &mut tree, "src/a.rs", a),
+            Update::Items,
+            "{a}"
         );
     }
 }

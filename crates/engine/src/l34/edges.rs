@@ -142,7 +142,7 @@ pub(crate) struct Context {
 }
 
 /// Adds every edge the facts give, rolled up. With `keep`, also returns the
-/// resolution context and each file's `calls` edges (by its index in
+/// resolution context and each file's direct edges (by its index in
 /// `parsed`), for a resident engine.
 pub(super) fn add(
     b: &mut Builder<'_>,
@@ -150,7 +150,7 @@ pub(super) fn add(
     functions: &HashMap<(usize, usize), NodeId>,
     read: Read<'_>,
     keep: bool,
-) -> Option<(Context, Vec<BTreeSet<EdgeKey>>)> {
+) -> Option<(Context, Vec<Contributions>)> {
     let crates = crate_names(b, read);
     // Names bound by `use` in each module: name -> path. `impl` resolution
     // needs every one in its module; use resolution needs only renames and
@@ -158,34 +158,7 @@ pub(super) fn add(
     // start a later path. Recording only those keeps this cheap.
     let mut imports: Imports = HashMap::new();
     for (_, place, file_module, facts) in parsed {
-        let impl_modules: HashSet<&Vec<String>> = facts
-            .references
-            .iter()
-            .filter_map(|r| match r {
-                Reference::Impl { module, .. } => Some(module),
-                Reference::Use { .. } => None,
-            })
-            .collect();
-        for r in &facts.references {
-            if let Reference::Use {
-                path,
-                alias,
-                module,
-            } = r
-            {
-                if alias.is_none() && path.len() > 1 && !impl_modules.contains(module) {
-                    continue;
-                }
-                let bound = alias.clone().or_else(|| path.last().cloned());
-                if let Some(bound) = bound.filter(|n| n != "*" && n != "self") {
-                    let m = [file_module.as_slice(), module.as_slice()].concat();
-                    imports
-                        .entry((place.system.clone(), m))
-                        .or_default()
-                        .insert(bound, path.clone());
-                }
-            }
-        }
+        add_imports(&mut imports, &place.system, file_module, facts);
     }
     let index = Index::build(b.model);
     let r = Resolver {
@@ -195,63 +168,15 @@ pub(super) fn add(
         index: &index,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
-    let mut calls = Vec::with_capacity(parsed.len());
+    let mut kept = Vec::with_capacity(if keep { parsed.len() } else { 0 });
     for (f, (path, place, file_module, facts)) in parsed.iter().enumerate() {
-        let system = &place.system;
-        let mine = r.file_calls(system, file_module, facts, |i| functions.get(&(f, i)));
+        let mine = r.file_edges(&place.system, file_module, facts, |i| {
+            functions.get(&(f, i))
+        });
         if keep {
-            calls.push(mine.iter().cloned().collect());
+            kept.push(contributions(&mine));
         }
-        found.extend(
-            mine.into_iter()
-                .map(|k| (k, Confidence::Inferred, (*path).clone())),
-        );
-        for reference in &facts.references {
-            match reference {
-                Reference::Use {
-                    path: p, module, ..
-                } => {
-                    let m = [file_module.as_slice(), module.as_slice()].concat();
-                    let Some(to) = r.resolve(system, &m, p, true) else {
-                        continue;
-                    };
-                    let conf = if to.found {
-                        Confidence::Exact
-                    } else {
-                        Confidence::Inferred
-                    };
-                    let from = NodeId::within(Level::Module, system.clone(), m);
-                    let to_id = NodeId::within(Level::Module, to.system, to.module);
-                    let key = EdgeKey {
-                        from,
-                        to: to_id,
-                        kind: EdgeKind::DependsOn,
-                    };
-                    found.push((key, conf, (*path).clone()));
-                }
-                Reference::Impl {
-                    self_type,
-                    r#trait,
-                    module,
-                } => {
-                    let m = [file_module.as_slice(), module.as_slice()].concat();
-                    let ty = r.item(system, &m, self_type);
-                    let tr = r.item(system, &m, r#trait);
-                    // Only an impl in the type's own crate: then the edge
-                    // runs the way the dependency does.
-                    if let (Some(from), Some(to)) = (ty, tr)
-                        && from.system_key() == system
-                    {
-                        let key = EdgeKey {
-                            from,
-                            to,
-                            kind: EdgeKind::Implements,
-                        };
-                        found.push((key, Confidence::Exact, (*path).clone()));
-                    }
-                }
-            }
-        }
+        found.extend(mine.into_iter().map(|(k, c)| (k, c, (*path).clone())));
     }
     // Many uses name the same module: keep each edge once, surest first.
     let mut unique: BTreeMap<EdgeKey, (Confidence, RepoPath)> = BTreeMap::new();
@@ -297,8 +222,143 @@ pub(super) fn add(
             imports,
             index,
         },
-        calls,
+        kept,
     ))
+}
+
+/// One file's direct edges, each with the surest confidence the file gives
+/// it. Edges from a node to itself are left out, as [`add`] leaves them out.
+pub(crate) type Contributions = BTreeMap<EdgeKey, Confidence>;
+
+fn contributions(found: &[(EdgeKey, Confidence)]) -> Contributions {
+    let mut out = Contributions::new();
+    for (k, c) in found {
+        if k.from == k.to {
+            continue;
+        }
+        let e = out.entry(k.clone()).or_insert(*c);
+        *e = (*e).max(*c);
+    }
+    out
+}
+
+/// Records the names `facts`' `use`s bind in each of the file's modules.
+/// `impl` resolution needs every one in its module; use resolution needs
+/// only renames and single-segment imports (`use a as b`, `use some_crate`),
+/// which can start a later path. Recording only those keeps this cheap.
+fn add_imports(
+    imports: &mut Imports,
+    system: &SystemKey,
+    file_module: &[String],
+    facts: &FileFacts,
+) {
+    let impl_modules: HashSet<&Vec<String>> = facts
+        .references
+        .iter()
+        .filter_map(|r| match r {
+            Reference::Impl { module, .. } => Some(module),
+            Reference::Use { .. } => None,
+        })
+        .collect();
+    for r in &facts.references {
+        if let Reference::Use {
+            path,
+            alias,
+            module,
+        } = r
+        {
+            if alias.is_none() && path.len() > 1 && !impl_modules.contains(module) {
+                continue;
+            }
+            let bound = alias.clone().or_else(|| path.last().cloned());
+            if let Some(bound) = bound.filter(|n| n != "*" && n != "self") {
+                let m = [file_module, module.as_slice()].concat();
+                imports
+                    .entry((system.clone(), m))
+                    .or_default()
+                    .insert(bound, path.clone());
+            }
+        }
+    }
+}
+
+/// The modules a file's facts can bind names in: the file's own and its
+/// inline modules.
+fn file_modules(
+    system: &SystemKey,
+    file_module: &[String],
+    facts: &FileFacts,
+) -> BTreeSet<(SystemKey, Vec<String>)> {
+    let mut out = BTreeSet::from([(system.clone(), file_module.to_vec())]);
+    for r in &facts.references {
+        let module = match r {
+            Reference::Use { module, .. } | Reference::Impl { module, .. } => module,
+        };
+        out.insert((system.clone(), [file_module, module.as_slice()].concat()));
+    }
+    out
+}
+
+impl Context {
+    /// Replaces the names a file's `use`s bind: `old` facts out, `new` in.
+    pub(crate) fn rebind(
+        &mut self,
+        system: &SystemKey,
+        file_module: &[String],
+        old: &FileFacts,
+        new: &FileFacts,
+    ) {
+        for m in file_modules(system, file_module, old) {
+            self.imports.remove(&m);
+        }
+        add_imports(&mut self.imports, system, file_module, new);
+    }
+
+    /// Replaces the names a file's items give its modules in the index.
+    /// `old` and `new` are each module's type and free-function names.
+    pub(crate) fn rename(
+        &mut self,
+        system: &SystemKey,
+        old: &BTreeSet<(Vec<String>, String)>,
+        new: &BTreeSet<(Vec<String>, String)>,
+    ) {
+        let Some(by_module) = self.index.items.get_mut(system) else {
+            if new.is_empty() {
+                return;
+            }
+            for (m, n) in new {
+                self.index.add_item(system, m, n);
+            }
+            return;
+        };
+        for (m, n) in old.difference(new) {
+            if let Some(names) = by_module.get_mut(m) {
+                names.remove(n);
+            }
+        }
+        for (m, n) in new.difference(old) {
+            self.index.add_item(system, m, n);
+        }
+    }
+}
+
+/// One file's direct edges, resolved against `model` and `ctx`. `node`
+/// gives the L4 node of each item, by its index in the facts.
+pub(crate) fn edges_of<'n>(
+    model: &Model,
+    ctx: &Context,
+    system: &SystemKey,
+    file_module: &[String],
+    facts: &FileFacts,
+    node: impl Fn(usize) -> Option<&'n NodeId>,
+) -> Contributions {
+    let r = Resolver {
+        model,
+        crates: &ctx.crates,
+        imports: &ctx.imports,
+        index: &ctx.index,
+    };
+    contributions(&r.file_edges(system, file_module, facts, node))
 }
 
 /// The `calls` edges of one file's functions, resolved against `model` and
@@ -352,8 +412,10 @@ pub(crate) fn add_rolled(model: &mut Model, key: EdgeKey, confidence: Confidence
 
 /// Removes the direct edge `key` and its roll-up: it leaves the evidence
 /// of the edge above, which goes too once it has no evidence left and was
-/// not found directly. A rolled-up edge keeps the surest of its evidence.
-pub(crate) fn remove_rolled(model: &mut Model, key: &EdgeKey) {
+/// not found directly. A rolled-up edge keeps the surest of its evidence;
+/// an L1 edge, which the manifests declared, keeps at least the confidence
+/// `l1` records it was declared with.
+pub(crate) fn remove_rolled(model: &mut Model, key: &EdgeKey, l1: &HashMap<EdgeKey, Confidence>) {
     let up = parents(model, key);
     if !model.remove_edge(key) {
         return;
@@ -365,18 +427,27 @@ pub(crate) fn remove_rolled(model: &mut Model, key: &EdgeKey) {
         return;
     };
     above.evidence.remove(key);
-    if above.evidence.is_empty() && up.from.level() != Level::System {
-        remove_rolled(model, &up);
+    let declared = up.from.level() == Level::System;
+    if above.evidence.is_empty() && !declared {
+        remove_rolled(model, &up, l1);
         return;
     }
-    if !above.evidence.is_empty() {
-        above.confidence = above
-            .evidence
-            .iter()
-            .filter_map(|k| model.edge(k).map(|e| e.confidence))
+    let surest = above
+        .evidence
+        .iter()
+        .filter_map(|k| model.edge(k).map(|e| e.confidence))
+        .max();
+    above.confidence = match (declared, surest) {
+        (true, s) => l1
+            .get(&up)
+            .copied()
+            .into_iter()
+            .chain(s)
             .max()
-            .unwrap_or(above.confidence);
-    }
+            .unwrap_or(above.confidence),
+        (false, Some(s)) => s,
+        (false, None) => above.confidence,
+    };
     model.remove_edge(&up);
     let _ = model.add_edge(above);
 }
@@ -460,6 +531,69 @@ impl Index {
 }
 
 impl Resolver<'_> {
+    /// One file's direct edges: its functions' calls, its modules' uses and
+    /// its impls, each with its confidence.
+    fn file_edges<'n>(
+        &self,
+        system: &SystemKey,
+        file_module: &[String],
+        facts: &FileFacts,
+        node: impl Fn(usize) -> Option<&'n NodeId>,
+    ) -> Vec<(EdgeKey, Confidence)> {
+        let mut found: Vec<(EdgeKey, Confidence)> = self
+            .file_calls(system, file_module, facts, node)
+            .into_iter()
+            .map(|k| (k, Confidence::Inferred))
+            .collect();
+        for reference in &facts.references {
+            match reference {
+                Reference::Use {
+                    path: p, module, ..
+                } => {
+                    let m = [file_module, module.as_slice()].concat();
+                    let Some(to) = self.resolve(system, &m, p, true) else {
+                        continue;
+                    };
+                    let conf = if to.found {
+                        Confidence::Exact
+                    } else {
+                        Confidence::Inferred
+                    };
+                    let from = NodeId::within(Level::Module, system.clone(), m);
+                    let to_id = NodeId::within(Level::Module, to.system, to.module);
+                    let key = EdgeKey {
+                        from,
+                        to: to_id,
+                        kind: EdgeKind::DependsOn,
+                    };
+                    found.push((key, conf));
+                }
+                Reference::Impl {
+                    self_type,
+                    r#trait,
+                    module,
+                } => {
+                    let m = [file_module, module.as_slice()].concat();
+                    let ty = self.item(system, &m, self_type);
+                    let tr = self.item(system, &m, r#trait);
+                    // Only an impl in the type's own crate: then the edge
+                    // runs the way the dependency does.
+                    if let (Some(from), Some(to)) = (ty, tr)
+                        && from.system_key() == system
+                    {
+                        let key = EdgeKey {
+                            from,
+                            to,
+                            kind: EdgeKind::Implements,
+                        };
+                        found.push((key, Confidence::Exact));
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// The `calls` edges of one file's functions. `node` gives the L4 node
     /// of each item, by its index in the facts.
     fn file_calls<'n>(
