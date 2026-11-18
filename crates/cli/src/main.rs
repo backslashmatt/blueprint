@@ -524,6 +524,8 @@ fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
                     "{} indexed to level 4 ({nodes} nodes at L1–L2; {} files parsed, {} reused)",
                     r.commit, done.parsed, done.reused
                 );
+                // Large, and the process ends here (DR 0009).
+                std::mem::forget(done);
                 ExitCode::SUCCESS
             }
             Err(e) => {

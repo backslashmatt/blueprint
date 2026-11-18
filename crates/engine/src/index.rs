@@ -32,6 +32,17 @@ pub const ANALYSER_VERSION: u32 = 2;
 /// elsewhere.
 pub const CACHE_DIR_ENV: &str = "BLUEPRINT_CACHE_DIR";
 
+static CACHE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Sets the cache directory for the rest of the process, over
+/// `$BLUEPRINT_CACHE_DIR` (see [`Index::location`]): for a front end with
+/// its own setting, and for tests, which cannot set the environment safely
+/// while other threads run. Returns `false`, changing nothing, if it was
+/// already set to another directory.
+pub fn set_cache_root(dir: PathBuf) -> bool {
+    CACHE_ROOT.get_or_init(|| dir.clone()) == &dir
+}
+
 /// The store is compacted once it holds more segments than this.
 const MAX_SEGMENTS: usize = 16;
 
@@ -95,7 +106,8 @@ pub struct Index {
 
 impl Index {
     /// Where the index of the repository at `repo` lives:
-    /// `<cache>/index/<hash of the canonical path>`. `<cache>` is
+    /// `<cache>/index/<hash of the canonical path>`. `<cache>` is the
+    /// directory given to [`set_cache_root`] if any, else
     /// `$BLUEPRINT_CACHE_DIR` if set, otherwise the platform cache directory
     /// (`~/.cache/blueprint` on Linux).
     ///
@@ -105,8 +117,9 @@ impl Index {
         let canonical = repo
             .canonicalize()
             .map_err(|e| format!("{}: {e}", repo.display()))?;
-        let root = match std::env::var_os(CACHE_DIR_ENV) {
-            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        let root = match (CACHE_ROOT.get(), std::env::var_os(CACHE_DIR_ENV)) {
+            (Some(dir), _) => dir.clone(),
+            (None, Some(dir)) if !dir.is_empty() => PathBuf::from(dir),
             _ => directories::ProjectDirs::from("", "", "blueprint")
                 .map(|d| d.cache_dir().to_path_buf())
                 .ok_or("no cache directory: set BLUEPRINT_CACHE_DIR")?,

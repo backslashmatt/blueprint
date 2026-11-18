@@ -203,8 +203,12 @@ pub struct IndexedL4 {
     pub parsed: usize,
     /// Files whose facts came from the index.
     pub reused: usize,
-    /// The diagnostics of every level.
+    /// The L3–L4 analysis diagnostics, which `bp index` reports.
     pub diags: Vec<Diagnostic>,
+    /// The L1–L4 model that was stored.
+    pub model: Model,
+    /// All of its diagnostics, sorted, as stored with it.
+    pub model_diags: Vec<Diagnostic>,
 }
 
 /// Builds the L1–L4 model of `rev`, reusing the facts the index holds, and
@@ -246,6 +250,8 @@ pub fn index_l4(path: &Path, rev: &str) -> Result<IndexedL4, String> {
         parsed: deep.parsed.len(),
         reused: deep.reused,
         diags: level_diags,
+        model: deep.model,
+        model_diags: diags,
     })
 }
 
