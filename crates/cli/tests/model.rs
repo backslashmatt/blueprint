@@ -423,15 +423,31 @@ fn index_level_4_parses_each_blob_once_and_model_reuses_the_facts() {
     let again = stdout(&bp_with_cache(&["index", d, "--level", "4"], &cache));
     assert!(again.ends_with("; 0 files parsed, 5 reused)\n"), "{again}");
 
-    // Facts from the index build the same model as parsing.
+    // The stored model (DR 0009) is the one parsing builds.
     let reused = stdout(&bp_with_cache(
         &["model", d, "--rev", "HEAD", "--level", "4"],
         &cache,
     ));
     snapshot("model_fixture_l4.txt", &reused);
+    let diff = stdout(&bp_with_cache(&["diff", d, "HEAD~1", "HEAD"], &cache));
     // Level 2 indexing still stores nothing deeper.
     let shallow = stdout(&bp_with_cache(&["index", d], &cache.join("l2")));
     assert!(shallow.ends_with(" indexed (8 nodes)\n"), "{shallow}");
+
+    // With a source file gone, only stored models can still give the same
+    // answers: building would warn and lose the file's items.
+    delete_object(&dir, "HEAD:crates/core/src/graph.rs");
+    let stored = bp_with_cache(&["model", d, "--rev", "HEAD", "--level", "4"], &cache);
+    assert!(
+        stored.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+    snapshot("model_fixture_l4.txt", &stdout(&stored));
+    assert_eq!(
+        stdout(&bp_with_cache(&["diff", d, "HEAD~1", "HEAD"], &cache)),
+        diff
+    );
 }
 
 #[test]

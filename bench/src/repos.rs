@@ -92,7 +92,8 @@ const SAFE_CONFIG: &[&str] = &[
 ];
 
 /// Makes `dest/<name>` a clean checkout of exactly `repo.commit`, fetching
-/// only that commit. Does nothing if it is already there and clean.
+/// only that commit and its parents (depth 2, so `diff_medium` has two
+/// commits to compare). Does nothing if it is already there and clean.
 pub fn fetch(dest: &Path, repo: &RefRepo) -> Result<(), RepoError> {
     fetch_with(dest, repo, &Git::default())
 }
@@ -124,7 +125,7 @@ fn fetch_with(dest: &Path, repo: &RefRepo, extra: &Git<'_>) -> Result<(), RepoEr
             "fetch",
             "--quiet",
             "--depth",
-            "1",
+            "2",
             "--no-recurse-submodules",
             &repo.url,
             &repo.commit,
@@ -138,7 +139,8 @@ fn fetch_with(dest: &Path, repo: &RefRepo, extra: &Git<'_>) -> Result<(), RepoEr
     verify_with(dest, repo, extra)
 }
 
-/// Checks that `dest/<name>` is a clean checkout of exactly `repo.commit`.
+/// Checks that `dest/<name>` is a clean checkout of exactly `repo.commit`,
+/// with its first parent present.
 pub fn verify(dest: &Path, repo: &RefRepo) -> Result<(), RepoError> {
     verify_with(dest, repo, &Git::default())
 }
@@ -150,6 +152,18 @@ fn verify_with(dest: &Path, repo: &RefRepo, extra: &Git<'_>) -> Result<(), RepoE
         return Err(RepoError::Git(format!(
             "{} is at {head}, expected {}",
             repo.name, repo.commit
+        )));
+    }
+    if output(
+        &dir,
+        extra,
+        &["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"],
+    )
+    .is_err()
+    {
+        return Err(RepoError::Git(format!(
+            "{} lacks the pinned commit's parent",
+            repo.name
         )));
     }
     let status = output(
@@ -260,21 +274,24 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         run(&src, &["init", "--quiet"]);
         std::fs::write(src.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
-        std::fs::write(src.join("a.txt"), "hello\n").unwrap();
-        run(&src, &["add", "."]);
-        run(
-            &src,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "--quiet",
-                "-m",
-                "c",
-            ],
-        );
+        // Two commits: the pinned one and the parent `diff_medium` needs.
+        for text in ["hello\n", "hello again\n"] {
+            std::fs::write(src.join("a.txt"), text).unwrap();
+            run(&src, &["add", "."]);
+            run(
+                &src,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "c",
+                ],
+            );
+        }
         let commit = run(&src, &["rev-parse", "HEAD"]);
         let repo = RefRepo {
             name: "r".into(),
@@ -298,7 +315,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dest.join("r/a.txt")).unwrap(),
-            "hello\n"
+            "hello again\n"
         );
         verify_with(&dest, &repo, &extra).unwrap();
 

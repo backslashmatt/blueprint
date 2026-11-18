@@ -348,28 +348,8 @@ fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
         },
         // The index holds no L3–L4 model, so deeper levels are built, from
         // the facts it holds where it has them.
-        Some(rev) if deep => match Commit::open(path, rev) {
-            Ok((source, mut diags)) => {
-                let index = match Index::open_existing(path) {
-                    Ok(index) => {
-                        for d in index.iter().flat_map(Index::dropped) {
-                            eprintln!("warning: index segment dropped and will be rebuilt: {d}");
-                        }
-                        index
-                    }
-                    Err(e) => {
-                        eprintln!("warning: cannot open the index, analysing instead: {e}");
-                        None
-                    }
-                };
-                let Deep {
-                    model, diags: more, ..
-                } = deep_at(&source, index.as_ref());
-                diags.extend(more);
-                diags.extend(unreadable(&source));
-                diags.sort();
-                (model, diags)
-            }
+        Some(rev) if deep => match deep_model(path, rev, existing_index(path).as_ref()) {
+            Ok(built) => built,
             Err(e) => {
                 eprintln!("bp: {}: {e}", path.display());
                 return ExitCode::from(EXIT_FAILURE);
@@ -496,23 +476,24 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
 /// `bp diff`: builds the L1–L4 model of both commits, with stored facts
 /// where the index has them, and prints the architectural diff.
 fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
-    let index = match Index::open_existing(path) {
-        Ok(index) => index,
-        Err(e) => {
-            eprintln!("warning: cannot open the index, analysing instead: {e}");
-            None
-        }
-    };
+    let index = existing_index(path);
+    // Both models at once: decoding stored ones is most of the time.
+    let built: Vec<Result<(Model, Vec<Diagnostic>), String>> = std::thread::scope(|s| {
+        let index = index.as_ref();
+        let jobs: Vec<_> = [base, head]
+            .into_iter()
+            .map(|rev| s.spawn(move || deep_model(path, rev, index)))
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().unwrap_or_else(|_| Err("analysis failed".into())))
+            .collect()
+    });
     let mut models = Vec::new();
-    for rev in [base, head] {
-        match Commit::open(path, rev) {
-            Ok((source, mut diags)) => {
-                let deep = deep_at(&source, index.as_ref());
-                diags.extend(deep.diags);
-                diags.extend(unreadable(&source));
-                diags.sort();
+    for b in built {
+        match b {
+            Ok((model, diags)) => {
                 warn(&diags);
-                models.push(deep.model);
+                models.push(model);
             }
             Err(e) => {
                 eprintln!("bp: {}: {e}", path.display());
@@ -534,6 +515,10 @@ fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
         eprintln!("bp: cannot write the diff: {e}");
         return ExitCode::from(EXIT_FAILURE);
     }
+    // The models are large, and the process ends here: freeing them would
+    // take longer than the diff (DR 0009).
+    std::mem::forget(models);
+    std::mem::forget(index);
     ExitCode::SUCCESS
 }
 
@@ -587,6 +572,45 @@ fn diff_text(d: &blueprint_engine::diff::Diff) -> String {
         let _ = writeln!(s, "-edge\t{}", edge(k));
     }
     s
+}
+
+/// The index of the repository at `path`, if there is one, for reading.
+/// Problems are warnings: the caller analyses instead.
+fn existing_index(path: &Path) -> Option<Index> {
+    match Index::open_existing(path) {
+        Ok(index) => {
+            for d in index.iter().flat_map(Index::dropped) {
+                eprintln!("warning: index segment dropped and will be rebuilt: {d}");
+            }
+            index
+        }
+        Err(e) => {
+            eprintln!("warning: cannot open the index, analysing instead: {e}");
+            None
+        }
+    }
+}
+
+/// The L1–L4 model of `rev` and its diagnostics: the one stored in `index`
+/// for the commit's tree if there is one (DR 0009), otherwise built, with
+/// each Rust file's facts from the index where it has them.
+fn deep_model(
+    path: &Path,
+    rev: &str,
+    index: Option<&Index>,
+) -> Result<(Model, Vec<Diagnostic>), String> {
+    let repo = Repo::open(path).map_err(|e| e.to_string())?;
+    let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
+    let tree = repo.tree_id(commit).map_err(|e| e.to_string())?;
+    if let Some(stored) = index.and_then(|i| i.get_l4(tree)) {
+        return Ok(stored);
+    }
+    let (source, mut diags) = Commit::open(path, &commit.to_string()).map_err(|e| e.to_string())?;
+    let deep = deep_at(&source, index);
+    diags.extend(deep.diags);
+    diags.extend(unreadable(&source));
+    diags.sort();
+    Ok((deep.model, diags))
 }
 
 /// What [`deep_at`] built.
@@ -699,11 +723,13 @@ fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
 /// If the commit or the index cannot be opened, a file cannot be read, or
 /// nothing that was parsed could be stored (object ids that are not SHA-1).
 fn index_facts(path: &Path, rev: &str) -> Result<(usize, usize), String> {
-    let (source, _) = Commit::open(path, rev).map_err(|e| e.to_string())?;
+    let (source, mut diags) = Commit::open(path, rev).map_err(|e| e.to_string())?;
     let mut index = Index::open(path)?;
     let deep = deep_at(&source, Some(&index));
     // Every level's diagnostics: the L1–L2 ones were not printed on the way.
     warn(&deep.diags);
+    diags.extend(deep.diags.iter().cloned());
+    diags.sort();
     if !source.unreadable().is_empty() {
         return Err(format!(
             "{rev}: some files could not be read, so not every file's facts are stored"
@@ -713,6 +739,18 @@ fn index_facts(path: &Path, rev: &str) -> Result<(usize, usize), String> {
     if stored == 0 && !deep.parsed.is_empty() {
         return Err(format!(
             "{rev}: facts not stored: its object ids are not SHA-1"
+        ));
+    }
+    // The whole model too, so that it can be reopened without building it
+    // (DR 0009).
+    let repo = Repo::open(path).map_err(|e| e.to_string())?;
+    let tree = repo
+        .resolve(rev)
+        .and_then(|c| repo.tree_id(c))
+        .map_err(|e| e.to_string())?;
+    if index.get_l4(tree).is_none() && !index.put_l4(tree, &deep.model, &diags)? {
+        return Err(format!(
+            "{rev}: model not stored: its object ids are not SHA-1"
         ));
     }
     Ok((deep.parsed.len(), deep.reused))

@@ -5,13 +5,16 @@
 //!
 //! - `BPM1` and [`FORMAT`];
 //! - the string table: a count, then each string's length and bytes;
+//! - the path table: a count, then each repository path (a count of string
+//!   indices), every distinct node source and system directory once;
 //! - the system table: a count, then for each its ecosystem tag (a string
-//!   index) and its directory (a count of string indices);
+//!   index) and its directory (a path index);
 //! - the id table: a count, then for each its level (1–4), system index and
 //!   path (a count of string indices). Ids are in the model's order, and
 //!   the first ids are the nodes, one each, in the same order;
 //! - the nodes: a count, then for each its kind, name, source, parent (id
-//!   index plus one, or zero), confidence, visibility and code;
+//!   index plus one, or zero), confidence, visibility and code. Name and
+//!   source are string and path indices;
 //! - the edges: a count, then for each its key (from, to, kind),
 //!   confidence, evidence keys and dependency kinds.
 //!
@@ -80,11 +83,28 @@ pub fn encode(model: &Model) -> Vec<u8> {
         }
     }
 
+    let mut paths: BTreeMap<&RepoPath, usize> = BTreeMap::new();
+    let mut path_list: Vec<&RepoPath> = Vec::new();
+    for p in system_list
+        .iter()
+        .map(|s| &s.dir)
+        .chain(model.nodes().map(|n| &n.source))
+    {
+        if !paths.contains_key(p) {
+            paths.insert(p, path_list.len());
+            path_list.push(p);
+        }
+    }
+
     let mut body = Vec::new();
+    put(&mut body, path_list.len() as u64);
+    for p in &path_list {
+        put_path(&mut body, &mut strings, &p.0);
+    }
     put(&mut body, system_list.len() as u64);
     for s in &system_list {
         put(&mut body, strings.index(s.ecosystem.tag()));
-        put_path(&mut body, &mut strings, &s.dir.0);
+        put(&mut body, paths[&s.dir] as u64);
     }
     put(&mut body, id_list.len() as u64);
     for id in &id_list {
@@ -96,7 +116,7 @@ pub fn encode(model: &Model) -> Vec<u8> {
     for n in model.nodes() {
         put(&mut body, node_kind(n.kind));
         put(&mut body, strings.index(&n.name));
-        put_path(&mut body, &mut strings, &n.source.0);
+        put(&mut body, paths[&n.source] as u64);
         put(
             &mut body,
             n.parent.as_ref().map_or(0, |p| ids[p] as u64 + 1),
@@ -189,13 +209,18 @@ pub fn decode(bytes: &[u8]) -> Result<Model, Error> {
     };
 
     let n = r.count()?;
+    let mut repo_paths = Vec::with_capacity(n);
+    for _ in 0..n {
+        repo_paths.push(RepoPath(path(&mut r)?.into()));
+    }
+    let n = r.count()?;
     let mut systems = Vec::with_capacity(n);
     for _ in 0..n {
         let tag = string(r.u64()?)?;
         let ecosystem = Ecosystem::from_tag(tag).map_or_else(|| bad("unknown ecosystem"), Ok)?;
         systems.push(SystemKey {
             ecosystem,
-            dir: RepoPath(path(&mut r)?),
+            dir: r.index(&repo_paths)?.clone(),
         });
     }
     let n = r.count()?;
@@ -219,7 +244,7 @@ pub fn decode(bytes: &[u8]) -> Result<Model, Error> {
     for id in ids.iter().take(n) {
         let kind = from_node_kind(r.u64()?)?;
         let name = string(r.u64()?)?.clone();
-        let source = RepoPath(path(&mut r)?);
+        let source = r.index(&repo_paths)?.clone();
         let parent = match r.u64()? {
             0 => None,
             i => Some(r.index_at(&ids, i - 1)?.clone()),

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use blueprint_lang_rust::Rust;
 use blueprint_model::lang::{FileFacts, LanguageAnalyser};
-use blueprint_model::{Model, RepoPath};
+use blueprint_model::{Model, RepoPath, codec};
 use blueprint_store::{KEY_LEN, Key, SegmentWriter, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,11 @@ const KIND_FACTS: u8 = 2;
 /// it holds changes shape, so stored facts that would still decode, with
 /// defaults for new fields, are not reused.
 const FACTS_FORMAT: u8 = 1;
+
+/// A tree's whole L1–L4 model (DR 0009). Bytes 25..29 of the key hold the
+/// Rust analyser's version and byte 29 [`codec::FORMAT`], since all three
+/// shape it.
+const KIND_L4_MODEL: u8 = 3;
 
 /// What the index holds for one tree: the model, and what the analysers
 /// could not fully understand when they built it.
@@ -184,6 +189,50 @@ impl Index {
 }
 
 impl Index {
+    /// The L1–L4 model stored for `tree`, with its diagnostics, if any. An
+    /// entry that does not decode is treated as absent, so it is rebuilt.
+    #[must_use]
+    pub fn get_l4(&self, tree: ObjectId) -> Option<(Model, Vec<Diagnostic>)> {
+        let bytes = self.store.get(&l4_key(tree)?)?;
+        let (len, rest) = bytes.split_first_chunk::<4>()?;
+        let len = usize::try_from(u32::from_le_bytes(*len)).ok()?;
+        let (diags, model) = (rest.get(..len)?, rest.get(len..)?);
+        let diags: Vec<(RepoPath, String)> = serde_json::from_slice(diags).ok()?;
+        let model = codec::decode(model).ok()?;
+        let diags = diags
+            .into_iter()
+            .map(|(path, message)| Diagnostic { path, message })
+            .collect();
+        Some((model, diags))
+    }
+
+    /// Stores the L1–L4 `model` of `tree` and its diagnostics, and returns
+    /// whether it was stored (not for ids that are not SHA-1).
+    ///
+    /// # Errors
+    /// If the segment cannot be written.
+    pub fn put_l4(
+        &mut self,
+        tree: ObjectId,
+        model: &Model,
+        diagnostics: &[Diagnostic],
+    ) -> Result<bool, String> {
+        let Some(key) = l4_key(tree) else {
+            return Ok(false);
+        };
+        let diags: Vec<(&RepoPath, &String)> =
+            diagnostics.iter().map(|d| (&d.path, &d.message)).collect();
+        let diags = serde_json::to_vec(&diags).map_err(|e| e.to_string())?;
+        let len = u32::try_from(diags.len()).map_err(|e| e.to_string())?;
+        let mut value = len.to_le_bytes().to_vec();
+        value.extend_from_slice(&diags);
+        value.extend_from_slice(&codec::encode(model));
+        let mut writer = SegmentWriter::new();
+        writer.insert(key, value);
+        self.add(&writer)?;
+        Ok(true)
+    }
+
     /// `analyser`'s stored facts for the file whose blob is `blob`, if any.
     /// An entry that does not decode is treated as absent, so it is re-parsed.
     #[must_use]
@@ -255,6 +304,24 @@ fn name_bytes(analyser: &dyn LanguageAnalyser) -> [u8; 6] {
     out
 }
 
+/// The key for `tree`'s L1–L4 model: the tree id, [`ANALYSER_VERSION`], the
+/// kind, the Rust analyser's version and the codec's format.
+fn l4_key(tree: ObjectId) -> Option<Key> {
+    let mut k = key(tree)?;
+    k.0[20..].copy_from_slice(&l4_tail());
+    Some(k)
+}
+
+/// Bytes 20.. of every current L1–L4 model key.
+fn l4_tail() -> [u8; KEY_LEN - 20] {
+    let mut t = [0u8; KEY_LEN - 20];
+    t[..4].copy_from_slice(&ANALYSER_VERSION.to_le_bytes());
+    t[4] = KIND_L4_MODEL;
+    t[5..9].copy_from_slice(&Rust.version().to_le_bytes());
+    t[9..].copy_from_slice(&codec::FORMAT.to_le_bytes()[..KEY_LEN - 29]);
+    t
+}
+
 /// The key for `tree`'s L1–L2 model: the 20-byte tree id, the analyser
 /// version, then the kind. `None` for ids of another length.
 fn key(tree: ObjectId) -> Option<Key> {
@@ -273,6 +340,7 @@ fn key(tree: ObjectId) -> Option<Key> {
 fn current_version(key: &Key) -> bool {
     match key.0[24] {
         KIND_L1_L2_MODEL => key.0[20..24] == ANALYSER_VERSION.to_le_bytes(),
+        KIND_L4_MODEL => key.0[20..] == l4_tail(),
         // Rust is the only language analyser so far; facts of any other
         // name are from a version that no longer exists.
         KIND_FACTS => {
