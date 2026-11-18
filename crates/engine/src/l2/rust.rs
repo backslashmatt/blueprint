@@ -58,13 +58,16 @@ struct Ctx<'a> {
     /// Every file walked (what the module tree reaches), with the module it
     /// is. A file included twice keeps the first module.
     reached: BTreeMap<RepoPath, Vec<String>>,
+    /// Whether to record each reached file's module (only L3–L4 needs it).
+    track_modules: bool,
     model: &'a mut Model,
     diags: &'a mut Vec<Diagnostic>,
 }
 
 /// Adds the module tree of the package `system` to `model`, and returns the
-/// files it reached, each with the module path it is; `None` if the package
-/// has no Rust crate root, so the caller can fall back to directories.
+/// files it reached, each with the module path it is (empty unless
+/// `track_modules`); `None` if the package has no Rust crate root, so the
+/// caller can fall back to directories.
 pub fn analyse_crate(
     system: &NodeId,
     key: &SystemKey,
@@ -72,6 +75,7 @@ pub fn analyse_crate(
     read: Read<'_>,
     model: &mut Model,
     diags: &mut Vec<Diagnostic>,
+    track_modules: bool,
 ) -> Option<BTreeMap<RepoPath, Vec<String>>> {
     let roots = crate_roots(key, files, read);
     if roots.is_empty() {
@@ -85,6 +89,7 @@ pub fn analyse_crate(
         stack: Vec::new(),
         walks: 0,
         reached: BTreeMap::new(),
+        track_modules,
         model,
         diags,
     };
@@ -328,9 +333,13 @@ impl Ctx<'_> {
         }
         self.walks += 1;
         let path = repo_path(file);
-        self.reached
-            .entry(path.clone())
-            .or_insert_with(|| module.to_vec());
+        self.reached.entry(path.clone()).or_insert_with(|| {
+            if self.track_modules {
+                module.to_vec()
+            } else {
+                Vec::new()
+            }
+        });
         let Some(bytes) = (self.read)(&path) else {
             self.diag(file, "cannot be read");
             return Confidence::Unknown;

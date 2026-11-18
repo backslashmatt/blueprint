@@ -38,16 +38,28 @@ pub struct Placement {
 /// Adds L2 nodes for every L1 system already in `model`, and the unowned
 /// system for files outside all of them. Never fails: problems degrade nodes.
 pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Diagnostic> {
-    analyse_placed(paths, read, model).0
+    run(paths, read, model, None)
 }
 
-/// [`analyse`], also returning where each file was placed.
+/// [`analyse`], also returning where each file was placed, for L3–L4.
 pub fn analyse_placed(
     paths: &[RepoPath],
     read: Read<'_>,
     model: &mut Model,
 ) -> (Vec<Diagnostic>, BTreeMap<RepoPath, Placement>) {
     let mut placed = BTreeMap::new();
+    let diags = run(paths, read, model, Some(&mut placed));
+    (diags, placed)
+}
+
+/// The L2 pass. Placements are recorded only when asked for: on large
+/// repositories building them costs more than the 5% benchmark gate.
+fn run(
+    paths: &[RepoPath],
+    read: Read<'_>,
+    model: &mut Model,
+    mut placed: Option<&mut BTreeMap<RepoPath, Placement>>,
+) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let systems: Vec<(NodeId, SystemKey)> = model
         .level(Level::System)
@@ -75,7 +87,7 @@ pub fn analyse_placed(
     for (id, key) in &systems {
         let files: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
         let reached = if key.ecosystem == Ecosystem::Cargo {
-            rust::analyse_crate(id, key, &files, read, model, &mut diags)
+            rust::analyse_crate(id, key, &files, read, model, &mut diags, placed.is_some())
         } else {
             None
         };
@@ -90,23 +102,25 @@ pub fn analyse_placed(
                 .collect(),
             None => files,
         };
-        for (path, module) in reached.into_iter().flatten() {
-            placed.insert(
-                path,
-                Placement {
-                    system: key.clone(),
-                    module: Some(module),
-                },
-            );
-        }
-        for f in &rest {
-            placed.insert(
-                (*f).clone(),
-                Placement {
-                    system: key.clone(),
-                    module: None,
-                },
-            );
+        if let Some(placed) = placed.as_deref_mut() {
+            for (path, module) in reached.into_iter().flatten() {
+                placed.insert(
+                    path,
+                    Placement {
+                        system: key.clone(),
+                        module: Some(module),
+                    },
+                );
+            }
+            for f in &rest {
+                placed.insert(
+                    (*f).clone(),
+                    Placement {
+                        system: key.clone(),
+                        module: None,
+                    },
+                );
+            }
         }
         directories(id, key, &rest, model, &mut diags);
     }
@@ -131,14 +145,16 @@ pub fn analyse_placed(
             Ok(()) => {
                 let files: BTreeSet<&RepoPath> = unowned.into_iter().collect();
                 directories(&id, &key, &files, model, &mut diags);
-                for f in files {
-                    placed.insert(
-                        f.clone(),
-                        Placement {
-                            system: key.clone(),
-                            module: None,
-                        },
-                    );
+                if let Some(placed) = placed {
+                    for f in files {
+                        placed.insert(
+                            f.clone(),
+                            Placement {
+                                system: key.clone(),
+                                module: None,
+                            },
+                        );
+                    }
                 }
             }
             Err(e) => diags.push(Diagnostic {
@@ -148,7 +164,7 @@ pub fn analyse_placed(
         }
     }
     diags.sort();
-    (diags, placed)
+    diags
 }
 
 /// One `unknown` L2 directory node per top-level directory of `system` that
