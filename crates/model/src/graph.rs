@@ -35,7 +35,24 @@ pub enum Ecosystem {
 }
 
 impl Ecosystem {
-    fn tag(self) -> &'static str {
+    /// Every ecosystem.
+    const ALL: [Ecosystem; 7] = [
+        Ecosystem::Cargo,
+        Ecosystem::Npm,
+        Ecosystem::Go,
+        Ecosystem::Dotnet,
+        Ecosystem::Nx,
+        Ecosystem::Bazel,
+        Ecosystem::Unowned,
+    ];
+
+    /// The ecosystem whose [`Ecosystem::tag`] is `tag`.
+    pub(crate) fn from_tag(tag: &str) -> Option<Ecosystem> {
+        Self::ALL.into_iter().find(|e| e.tag() == tag)
+    }
+
+    /// The short name ids use for it.
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Ecosystem::Cargo => "cargo",
             Ecosystem::Npm => "npm",
@@ -52,7 +69,7 @@ impl Ecosystem {
 /// `..` segments, no backslashes. The repository root is the empty path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RepoPath(Vec<String>);
+pub struct RepoPath(pub(crate) Vec<String>);
 
 /// Why a string is not a valid [`RepoPath`] or [`NodeId`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,9 +147,17 @@ pub struct SystemKey {
 
 /// Stable identity of a node. Text form (escaped so it is unambiguous):
 /// `L<level>:<ecosystem>:<manifest dir>#<path within system>`.
+///
+/// An id is shared, not copied: cloning it is a reference count, because a
+/// model holds each id many times (as a key, a parent, edge ends, evidence)
+/// and copying them dominated loading and building models (DR 0009).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct NodeId {
+pub struct NodeId(std::sync::Arc<IdParts>);
+
+/// What a [`NodeId`] is made of, in the order ids sort by.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct IdParts {
     level: Level,
     system: SystemKey,
     path: Vec<String>,
@@ -163,36 +188,32 @@ fn unescape(seg: &str) -> String {
 impl NodeId {
     /// The id of an L1 system.
     pub fn system(system: SystemKey) -> NodeId {
-        NodeId {
-            level: Level::System,
-            system,
-            path: Vec::new(),
-        }
+        NodeId::within(Level::System, system, Vec::new())
     }
 
     /// The id of a node below L1, at `path` inside `system`. Each element of
     /// `path` is one segment and may contain any character.
     pub fn within(level: Level, system: SystemKey, path: Vec<String>) -> NodeId {
-        NodeId {
+        NodeId(std::sync::Arc::new(IdParts {
             level,
             system,
             path,
-        }
+        }))
     }
 
     /// The node's level, as encoded in its id.
     pub fn level(&self) -> Level {
-        self.level
+        self.0.level
     }
 
     /// The system the node belongs to.
     pub fn system_key(&self) -> &SystemKey {
-        &self.system
+        &self.0.system
     }
 
     /// The node's path inside its system.
     pub fn path(&self) -> &[String] {
-        &self.path
+        &self.0.path
     }
 }
 
@@ -205,18 +226,19 @@ impl From<NodeId> for String {
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dir: Vec<String> = self
+            .0
             .system
             .dir
             .segments()
             .iter()
             .map(|s| escape(s))
             .collect();
-        let path: Vec<String> = self.path.iter().map(|s| escape(s)).collect();
+        let path: Vec<String> = self.0.path.iter().map(|s| escape(s)).collect();
         write!(
             f,
             "L{}:{}:{}#{}",
-            self.level.number(),
-            self.system.ecosystem.tag(),
+            self.0.level.number(),
+            self.0.system.ecosystem.tag(),
             dir.join("/"),
             path.join("/")
         )
@@ -237,18 +259,7 @@ impl TryFrom<String> for NodeId {
             _ => return Err(bad()),
         };
         let eco = parts.next().ok_or_else(bad)?;
-        let ecosystem = [
-            Ecosystem::Cargo,
-            Ecosystem::Npm,
-            Ecosystem::Go,
-            Ecosystem::Dotnet,
-            Ecosystem::Nx,
-            Ecosystem::Bazel,
-            Ecosystem::Unowned,
-        ]
-        .into_iter()
-        .find(|e| e.tag() == eco)
-        .ok_or_else(bad)?;
+        let ecosystem = Ecosystem::from_tag(eco).ok_or_else(bad)?;
         let dir_raw = parts.next().ok_or_else(bad)?;
         let split = |raw: &str| -> Vec<String> {
             if raw.is_empty() {
@@ -269,11 +280,7 @@ impl TryFrom<String> for NodeId {
         if path.iter().any(String::is_empty) || !path_ok {
             return Err(bad());
         }
-        let id = NodeId {
-            level,
-            system: SystemKey { ecosystem, dir },
-            path,
-        };
+        let id = NodeId::within(level, SystemKey { ecosystem, dir }, path);
         if id.to_string() == s {
             Ok(id)
         } else {
@@ -610,6 +617,24 @@ impl Model {
             e.evidence.retain(|ev| &ev.from != id && &ev.to != id);
         }
         true
+    }
+
+    /// Builds a model from nodes and edges that are already known to form a
+    /// valid model, such as one this crate wrote and a checksum protects,
+    /// without checking them one by one. The maps are built in bulk.
+    #[must_use]
+    pub fn from_trusted_parts(nodes: Vec<Node>, edges: Vec<Edge>) -> Model {
+        let mut children: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+        for n in &nodes {
+            if let Some(p) = &n.parent {
+                children.entry(p.clone()).or_default().insert(n.id.clone());
+            }
+        }
+        Model {
+            nodes: nodes.into_iter().map(|n| (n.id.clone(), n)).collect(),
+            children,
+            edges: edges.into_iter().map(|e| (e.key.clone(), e)).collect(),
+        }
     }
 
     /// Replaces a node's attributes: its name, source, confidence, visibility
