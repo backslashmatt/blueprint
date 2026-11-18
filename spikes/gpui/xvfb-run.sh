@@ -2,7 +2,12 @@
 # Runs a command under Xvfb with a window manager (GPUI's X11 backend starts its
 # frame loop only once a WM reports the window visible). Usage: xvfb-run.sh <cmd...>
 set -u
-export VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}
+# Lavapipe (software Vulkan): Ubuntu and Fedora name its manifest differently.
+if [ -z "${VK_ICD_FILENAMES:-}" ]; then
+  for f in /usr/share/vulkan/icd.d/lvp_icd.json /usr/share/vulkan/icd.d/lvp_icd.x86_64.json; do
+    [ -f "$f" ] && export VK_ICD_FILENAMES=$f && break
+  done
+fi
 pkill -f "Xvfb :99" 2>/dev/null; sleep 0.2
 Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 &
 XPID=$!
