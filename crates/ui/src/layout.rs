@@ -8,8 +8,9 @@
 //!    thousands of nodes (test directories) cost almost nothing.
 //! 2. Cycles are broken by a depth-first search in id order: an edge back
 //!    to a node on the search stack is laid out reversed.
-//! 3. Each node's layer is its longest path to a sink, so a node is drawn
-//!    above everything it depends on. Edges spanning several layers get a
+//! 3. Each node's layer is its longest path from a node nothing depends
+//!    on (layer 0, at the top), so a node is drawn above everything it
+//!    depends on. Edges spanning several layers get a
 //!    virtual node in each layer they cross.
 //! 4. Within a layer, nodes start in id order and are reordered by
 //!    barycentre over [`SWEEPS`] passes, ties kept in their earlier order.
@@ -71,6 +72,8 @@ pub struct Layout {
     cells: Vec<Option<usize>>,
     /// The grid's left edge and its number of columns, if there is a grid.
     grid: Option<(f32, usize)>,
+    /// The metrics it was laid out with.
+    metrics: Option<Metrics>,
     /// Each bend of a long edge: the edge's ends (indices into the ids,
     /// drawn top to bottom), its layer and its x.
     bends: Vec<(usize, usize, usize, f32)>,
@@ -80,6 +83,7 @@ pub struct Layout {
 /// nearly the same view keeps them there (see [`relayout`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Seed {
+    metrics: Option<Metrics>,
     at: HashMap<String, (Point, Option<usize>)>,
     grid: Option<(f32, usize)>,
     bends: HashMap<(String, String, usize), f32>,
@@ -91,6 +95,7 @@ impl Layout {
     #[must_use]
     pub fn seed(&self, ids: &[&str]) -> Seed {
         Seed {
+            metrics: self.metrics,
             at: ids
                 .iter()
                 .zip(&self.nodes)
@@ -127,7 +132,34 @@ pub fn relayout(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: &Seed)
     lay_out(ids, edges, m, Some(seed))
 }
 
+/// Most virtual nodes a layout makes, per node and edge. Beyond it, long
+/// edges are drawn straight down without bends, which can cross nodes, so
+/// that a deep graph (a chain with a common sink) stays fast.
+const VIRTUAL_PER_ITEM: usize = 8;
+
+/// `m` with every value finite and positive (gaps may be zero), the default
+/// standing in for any that is not.
+fn sane(m: Metrics) -> Metrics {
+    let d = Metrics::default();
+    let pick = |v: f32, d: f32, min: f32| {
+        if v.is_finite() && v >= min && v < 1e6 {
+            v
+        } else {
+            d
+        }
+    };
+    Metrics {
+        width: pick(m.width, d.width, 1.0),
+        height: pick(m.height, d.height, 1.0),
+        gap: pick(m.gap, d.gap, 0.0),
+        channel: pick(m.channel, d.channel, 0.0),
+    }
+}
+
 fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&Seed>) -> Layout {
+    let m = sane(m);
+    // A seed taken with other metrics places nodes on another grid.
+    let seed = seed.filter(|s| s.metrics == Some(m));
     let n = ids.len();
     // Work in id order, so the input order never matters.
     let mut order: Vec<usize> = (0..n).collect();
@@ -180,7 +212,14 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
     // deeper.
     let floor: Vec<usize> = (0..n)
         .map(|r| match seed.and_then(|s| s.at.get(ids[order[r]])) {
-            Some((p, None)) => (p.y / (m.height + m.channel)).round().max(0.0) as usize,
+            Some((p, None)) => {
+                let l = (p.y / (m.height + m.channel)).round();
+                if l.is_finite() && l > 0.0 {
+                    (l as usize).min(n)
+                } else {
+                    0
+                }
+            }
             _ => 0,
         })
         .collect();
@@ -201,16 +240,22 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
     let mut chain: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     // Each virtual node's edge (in rank space) and layer.
     let mut bend_of: Vec<(usize, usize, usize)> = Vec::new();
+    let spans: usize = (0..n)
+        .flat_map(|a| down[a].iter().map(move |&b| (a, b)))
+        .map(|(a, b)| layer[b].saturating_sub(layer[a] + 1))
+        .sum();
+    let edge_count: usize = down.iter().map(Vec::len).sum();
+    let bends = spans <= VIRTUAL_PER_ITEM * (n + edge_count) + 1024;
     for a in 0..n {
         for &b in &down[a] {
             let mut path = vec![a];
             let mut prev = a;
-            for (l, row) in rows
-                .iter_mut()
-                .enumerate()
-                .take(layer[b])
-                .skip(layer[a] + 1)
-            {
+            let (from, to) = if bends {
+                (layer[a] + 1, layer[b])
+            } else {
+                (0, 0)
+            };
+            for (l, row) in rows.iter_mut().enumerate().take(to).skip(from) {
                 let v = next_id;
                 next_id += 1;
                 bend_of.push((a, b, l));
@@ -341,20 +386,9 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
     if !loose.is_empty() {
         let fresh_cols = (loose.len() as f32).sqrt().ceil().max(1.0) as usize;
         let beside = if full > 0.0 { full + m.channel } else { 0.0 };
-        let (left, cols) = match seed.and_then(|s| s.grid) {
-            // It stays unless something in the graph now reaches into it.
-            Some((left, cols)) => {
-                let rows_needed = loose.len().div_ceil(cols) + 1;
-                let bottom = rows_needed as f32 * (m.height + m.gap);
-                let reached = pos[..next_id]
-                    .iter()
-                    .enumerate()
-                    .filter(|(v, _)| *v >= n || connected[*v])
-                    .any(|(_, p)| p.x + m.width > left && p.y < bottom);
-                (if reached { left.max(beside) } else { left }, cols)
-            }
-            None => (beside, fresh_cols),
-        };
+        let cols = seed
+            .and_then(|s| s.grid)
+            .map_or(fresh_cols, |(_, c)| c.max(1));
         let mut taken = std::collections::BTreeSet::new();
         let mut placed = Vec::new();
         let mut new = Vec::new();
@@ -370,10 +404,22 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
                 placed.push((r, c));
             }
         }
-        let mut last = 0;
+        let last = placed.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        let bottom = (last / cols + 1) as f32 * (m.height + m.gap);
+        let left = match seed.and_then(|s| s.grid) {
+            // It stays unless something in the graph now reaches into it.
+            Some((left, _)) => {
+                let reached = pos[..next_id]
+                    .iter()
+                    .enumerate()
+                    .filter(|(v, _)| *v >= n || connected[*v])
+                    .any(|(_, p)| p.x + m.width > left && p.y < bottom);
+                if reached { left.max(beside) } else { left }
+            }
+            None => beside,
+        };
         for (r, c) in placed {
             cells[r] = Some(c);
-            last = last.max(c);
             pos[r] = Point {
                 x: left + (c % cols) as f32 * step,
                 y: (c / cols) as f32 * (m.height + m.gap),
@@ -381,7 +427,7 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
         }
         let rows_used = last / cols + 1;
         height = height.max(rows_used as f32 * (m.height + m.gap) - m.gap);
-        width = left + row_width(cols.min(last + 1));
+        width = width.max(left + row_width(cols.min(last + 1)));
         grid = Some((left, cols));
     }
 
@@ -434,6 +480,7 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
         height: height.max(0.0),
         cells: (0..n).map(|i| cells[rank[i]]).collect(),
         grid,
+        metrics: Some(m),
         bends: bend_of
             .iter()
             .enumerate()
@@ -518,6 +565,12 @@ fn nearest_free(taken: &[f32], want: f32, step: f32) -> f32 {
         let right_ok = i == taken.len() || x + step <= taken[i] + 1e-3;
         left_ok && right_ok
     };
+    // Appending to the right is the common case: keep it constant time.
+    if let Some(&last) = taken.last()
+        && want >= last
+    {
+        return want.max(last + step);
+    }
     if fits(want) {
         return want;
     }
@@ -643,8 +696,125 @@ mod tests {
         assert_eq!(distinct.len(), 100, "no two nodes overlap");
     }
 
+    /// Whether any two nodes' boxes overlap, and whether every node lies
+    /// inside the reported size.
+    fn sound(l: &Layout) -> bool {
+        let m = Metrics::default();
+        let mut boxes: Vec<(f32, f32)> = l.nodes.iter().map(|p| (p.x, p.y)).collect();
+        boxes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        for (i, a) in boxes.iter().enumerate() {
+            if a.0 + m.width > l.width + 0.5 || a.1 + m.height > l.height + 0.5 {
+                return false;
+            }
+            for b in &boxes[i + 1..] {
+                if b.0 >= a.0 + m.width - 1e-3 {
+                    break;
+                }
+                if (a.1 - b.1).abs() < m.height - 1e-3 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn names(prefix: &str, k: usize) -> Vec<String> {
+        (0..k).map(|i| format!("{prefix}{i:03}")).collect()
+    }
+
+    #[test]
+    fn a_seed_from_other_metrics_is_ignored_and_bad_metrics_never_panic() {
+        let ids = ["a", "b", "c"];
+        let edges = [(0, 1), (1, 2)];
+        let base = lay(&ids, &edges);
+        let seed = base.seed(&ids);
+        for m in [
+            Metrics {
+                width: 0.0,
+                height: 0.0,
+                gap: 0.0,
+                channel: 0.0,
+            },
+            Metrics {
+                width: f32::MAX,
+                height: f32::MAX,
+                gap: f32::NAN,
+                channel: f32::INFINITY,
+            },
+            Metrics {
+                width: 400.0,
+                ..Metrics::default()
+            },
+        ] {
+            let l = relayout(&ids, &edges, m, &seed);
+            assert_eq!(l.nodes.len(), 3);
+        }
+        let wide = Metrics {
+            width: 400.0,
+            ..Metrics::default()
+        };
+        let l = relayout(&ids, &[(0, 1), (0, 2)], wide, &seed);
+        assert!(l.nodes[1].x + 400.0 <= l.nodes[2].x || l.nodes[2].x + 400.0 <= l.nodes[1].x);
+    }
+
+    #[test]
+    fn relayout_keeps_seeded_grid_cells_clear_of_the_graph() {
+        let chain = names("p", 6);
+        let loose = names("g", 100);
+        let mut ids: Vec<&str> = chain.iter().map(String::as_str).collect();
+        ids.extend(loose.iter().map(String::as_str));
+        let edges: Vec<(usize, usize)> = (0..5).map(|i| (i, i + 1)).collect();
+        let base = lay(&ids, &edges);
+        assert!(sound(&base));
+        let seed = base.seed(&ids);
+        // Keep the chain and one grid node far down the grid; add twenty
+        // children of p004.
+        let extra = names("q", 20);
+        let mut after: Vec<&str> = chain.iter().map(String::as_str).collect();
+        after.push("g075");
+        after.extend(extra.iter().map(String::as_str));
+        let mut e2 = edges.clone();
+        e2.extend((0..20).map(|i| (7 + i, 4)));
+        let l = relayout(&after, &e2, Metrics::default(), &seed);
+        assert!(sound(&l), "{l:?}");
+    }
+
+    #[test]
+    fn the_reported_size_holds_every_node_after_relayout() {
+        let ids = ["a", "b", "c", "d", "e", "z"];
+        let base = lay(&ids, &[(0, 1), (1, 2)]);
+        let l = relayout(
+            &ids,
+            &[(0, 1), (1, 2), (1, 3), (1, 4)],
+            Metrics::default(),
+            &base.seed(&ids),
+        );
+        assert!(sound(&l), "{l:?}");
+    }
+
+    #[test]
+    fn deep_graphs_and_wide_relayouts_stay_fast() {
+        // A chain with a common sink: every edge to the sink spans the
+        // chain, which would need a quadratic number of bends.
+        let k = 2000;
+        let ids = names("n", k);
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut edges: Vec<(usize, usize)> = (0..k - 2).map(|i| (i, i + 1)).collect();
+        edges.extend((0..k - 1).map(|i| (i, k - 1)));
+        let t = std::time::Instant::now();
+        let l = lay(&ids, &edges);
+        assert!(sound(&l));
+        // A star relaid from an unrelated seed puts every node in one row.
+        let star: Vec<(usize, usize)> = (1..k).map(|i| (i, 0)).collect();
+        let r = relayout(&ids, &star, Metrics::default(), &Seed::default());
+        assert!(sound(&r));
+        assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+    }
+
     #[test]
     fn an_empty_view_has_an_empty_layout() {
-        assert_eq!(lay(&[], &[]), Layout::default());
+        let l = lay(&[], &[]);
+        assert!(l.nodes.is_empty() && l.edges.is_empty());
+        assert_eq!((l.width, l.height), (0.0, 0.0));
     }
 }

@@ -31,13 +31,14 @@ The views the reference repositories give are of two kinds (`crates/ui/examples/
 
 - **`layout(ids, edges, metrics)`** produces a fresh layout:
   - Cycles are broken by a depth-first search in id order.
-  - Each node's layer is its longest path to a sink, so a dependency is always drawn below its dependents.
-  - Long edges get a virtual node per layer they cross.
+  - Each node's layer is its longest path from a node nothing depends on (at the top), so a dependency is always drawn below its dependents.
+  - Long edges get a virtual node per layer they cross, up to 8 per node and edge in the view. Beyond that budget, as in a chain with a common sink (quadratic bends), long edges are drawn straight down without bends and may cross nodes, so that the layout stays fast.
   - Rows start in id order and get 8 barycentre sweeps, with ties kept in place.
   - Rows are centred.
   - Nodes with no edge go in a grid of about √n columns, in id order, to the right of the graph.
   - The input order never matters: everything is computed in id order.
-- **`relayout(ids, edges, metrics, &seed)`**, where `seed = previous.seed(ids)`, lays out a view that has changed a little:
+- Metrics that are not finite and positive fall back to the defaults.
+- **`relayout(ids, edges, metrics, &seed)`**, where `seed = previous.seed(ids)`, lays out a view that has changed a little. A seed taken with other metrics is ignored (a fresh layout):
   - A node keeps its old layer unless a new edge needs it deeper.
   - It keeps its old x in that layer, and each bend of a long edge keeps its x as well.
   - New nodes go into the free place nearest their neighbours, so nothing already placed is pushed.
@@ -52,13 +53,13 @@ Release build, `layout_measure` on the pinned medium and large commits, fastest 
 
 | View | Nodes | Edges | `layout` | `relayout` | Moved, fresh `layout` | Moved, `relayout` |
 |---|---|---|---|---|---|---|
-| medium: systems | 52 | 202 | 1.2 ms | 0.7 ms | 56% / 96% / 33% | 0% / 4% / 0% |
-| medium: `ide-assists` (largest L2) | 285 | 520 | 1.4 ms | 1.1 ms | 34% / 88% / 99% | 0% / 1% / 0% |
-| medium: `parser/test_data` (largest, no edges) | 1,125 | 0 | 0.04 ms | 0.3 ms | 100% / 100% / 0% | 100% / 100% / 0% |
-| large: systems | 386 | 1,044 | 8.1 ms | 6.1 ms | 99% / 33% / 98% | 62% / 1% / 0% |
-| large: `std` (largest L2) | 780 | 2,393 | 54 ms | 46 ms | 12% / 98% / 96% | 10% / 0% / 0% |
-| large: `stdarch` generated functions | 3,664 | 3,987 | 11 ms | 8.1 ms | 90% / 25% / 57% | 12% / 0% / 0% |
-| large: `tests/` (largest, no edges) | 45,263 | 0 | 9.7 ms | 30 ms | 100% / 100% / 0% | 100% / 100% / 0% |
+| medium: systems | 52 | 202 | 1.1 ms | 0.7 ms | 56% / 96% / 33% | 0% / 4% / 0% |
+| medium: `ide-assists` (largest L2) | 285 | 520 | 1.4 ms | 1.0 ms | 34% / 88% / 99% | 0% / 1% / 0% |
+| medium: `parser/test_data` (largest, no edges) | 1,125 | 0 | 0.05 ms | 0.3 ms | 100% / 100% / 0% | 100% / 100% / 0% |
+| large: systems | 386 | 1,044 | 7.9 ms | 6.1 ms | 99% / 33% / 98% | 62% / 1% / 0% |
+| large: `std` (largest L2; over the bend budget) | 780 | 2,393 | 1.8 ms | 2.0 ms | 94% / 95% / 1% | 10% / 0% / 0% |
+| large: `stdarch` generated functions | 3,664 | 3,987 | 8.4 ms | 7.1 ms | 90% / 25% / 57% | 12% / 0% / 0% |
+| large: `tests/` (largest, no edges) | 45,263 | 0 | 8.8 ms | 50 ms | 100% / 100% / 0% | 100% / 100% / 0% |
 
 What this shows:
 
@@ -67,13 +68,14 @@ What this shows:
 - **An edge-free view gaining its first edge** moves every node, for the same reason. In both cases the move is one sideways shift of the whole grid, not a reshuffle.
 - **Time:**
   - medium's largest L2 view takes 1.4 ms;
-  - large's `std` takes 54 ms, over the 50 ms drill budget on its own;
-  - a 45k-node pile takes 10–30 ms.
+  - large's `std` took 54 ms with a bend on every layer each edge crosses (about 26,000 bends); over the bend budget it takes 1.8 ms, but its long edges are drawn straight and can cross nodes;
+  - a 45k-node pile takes 9–50 ms.
 
-  Caching and computing layouts off the UI thread keep this off the input path, but the first drill into `std` will be late. That is for M5's large-repository budgets.
+  Layouts are cached and computed off the UI thread, so none of this is on the input path.
 
 ## Revisit when
 
-- Drilling into a view on the large repository misses the 50 ms budget in the frame-time benchmarks (#95, #32). The likely fix is fewer virtual nodes (bundling long edges) or a cheaper ordering for wide layers.
+- Drilling into a view on the large repository misses the 50 ms budget in the frame-time benchmarks (#95, #32).
+- Edges drawn straight over nodes in views beyond the bend budget (large's `std`) make them hard to read in the owner's checks. The likely fix is bundling long edges into shared channels, which needs far fewer bends.
 - Reviewers find the grid shift on a view's first edge disruptive. The alternative is to keep a fixed-width gutter between graph and grid.
 - The owner's checks (#96) find the layered look wrong for the map.
