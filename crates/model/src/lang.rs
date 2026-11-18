@@ -31,7 +31,7 @@ pub trait LanguageAnalyser: Sync {
 /// What one file defines and refers to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
-    /// Every item, in source order.
+    /// Every item, in source order (by where it starts, attributes included).
     pub items: Vec<Item>,
     /// Every reference, unresolved, in source order.
     pub references: Vec<Reference>,
@@ -61,8 +61,10 @@ pub struct Item {
     /// parameters, return type, fields, variants. Whitespace and comments do
     /// not change it.
     pub signature_hash: u64,
-    /// Hash of the body's tokens, likewise.
-    pub body_hash: u64,
+    /// Hash of the body's tokens, likewise. `None` for an item with no body
+    /// (a struct, a required trait method), so that the diff never pairs two
+    /// bodiless items as a move or rename.
+    pub body_hash: Option<u64>,
 }
 
 /// The kind of an [`Item`].

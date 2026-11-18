@@ -223,3 +223,92 @@ fn deep_inline_modules_stop_at_the_limit() {
     assert!(!f.clean, "modules beyond the limit are reported as unread");
     assert!(f.items.is_empty());
 }
+
+#[test]
+fn bodiless_items_have_no_body_hash() {
+    assert_eq!(item("struct A;", "A").body_hash, None);
+    assert_eq!(item("struct B { x: u8 }", "B").body_hash, None);
+    assert_eq!(item("type T = u8;", "T").body_hash, None);
+    assert_eq!(item("trait M {}", "M").body_hash, None);
+    assert_eq!(item("trait M { fn f(&self); }", "f").body_hash, None);
+    assert!(item("trait M { fn f(&self); }", "M").body_hash.is_some());
+}
+
+#[test]
+fn a_traits_associated_items_are_its_surface() {
+    let base = item("pub trait Q { fn f(&self); }", "Q");
+    let assoc = item("pub trait Q { type Item; fn f(&self); }", "Q");
+    assert_ne!(base.signature_hash, assoc.signature_hash);
+    assert_eq!(base.body_hash, assoc.body_hash);
+    let method = item("pub trait Q { fn f(&self); fn g(&self); }", "Q");
+    assert_eq!(base.signature_hash, method.signature_hash);
+    assert_ne!(base.body_hash, method.body_hash);
+}
+
+#[test]
+fn an_impl_header_is_part_of_its_methods_surface() {
+    let base = item("impl<T: Clone> X<T> { pub fn m(&self) {} }", "m");
+    let bound = item("impl<T: Copy> X<T> { pub fn m(&self) {} }", "m");
+    let clause = item("impl<T> X<T> where T: Copy { pub fn m(&self) {} }", "m");
+    assert_ne!(base.signature_hash, bound.signature_hash);
+    assert_ne!(base.signature_hash, clause.signature_hash);
+    assert_eq!(base.body_hash, bound.body_hash);
+}
+
+#[test]
+fn attributes_are_surface_and_part_of_the_span() {
+    let base = item("#[derive(Clone)]\npub struct S;", "S");
+    let more = item("#[derive(Clone, Copy)]\npub struct S;", "S");
+    assert_ne!(base.signature_hash, more.signature_hash);
+    assert_eq!(base.lines, (1, 2));
+    let doc = item("/// Docs.\n#[derive(Clone)]\npub struct S;", "S");
+    assert_eq!(
+        doc.signature_hash, base.signature_hash,
+        "doc comments are not surface"
+    );
+}
+
+#[test]
+fn extern_functions_are_items() {
+    let f = analyse(b"extern \"C\" { pub fn ext(x: i32) -> i32; }");
+    assert_eq!(by_name(&f, "ext").kind, ItemKind::Function);
+    assert_eq!(by_name(&f, "ext").body_hash, None);
+}
+
+#[test]
+fn use_edge_cases() {
+    let paths = |src: &str| -> Vec<String> {
+        analyse(src.as_bytes())
+            .references
+            .iter()
+            .map(|r| match r {
+                Reference::Use { path, .. } => path.join("::"),
+            })
+            .collect()
+    };
+    assert_eq!(paths("use a::{self, b};"), ["a", "a::b"]);
+    assert_eq!(paths("use a::/*c*/b;"), ["a::b"]);
+    assert_eq!(paths("use ::std::x;"), ["std::x"]);
+    assert_eq!(
+        paths("mod m { use inner::z; }\nuse after::w;"),
+        ["inner::z", "after::w"],
+        "source order, across inline modules"
+    );
+    let deep = format!("use {}x{};", "a::{".repeat(100), "}".repeat(100));
+    assert!(
+        !analyse(deep.as_bytes()).clean,
+        "a cut-off use group is reported"
+    );
+}
+
+#[test]
+fn pub_self_is_private() {
+    assert_eq!(
+        item("pub(self) fn f() {}", "f").visibility,
+        Some(Visibility::Private)
+    );
+    assert_eq!(
+        item("pub(crate) fn f() {}", "f").visibility,
+        Some(Visibility::Restricted)
+    );
+}
