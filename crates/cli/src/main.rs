@@ -8,7 +8,7 @@ use blueprint_engine::git::{ObjectId, Repo};
 use blueprint_engine::index::{Index, Indexed};
 use blueprint_engine::l1::Diagnostic;
 use blueprint_engine::source::{Commit, Directory};
-use blueprint_model::{Level, Model, RepoPath};
+use blueprint_model::{EdgeKind, Level, Model, RepoPath};
 
 /// Exit code for a command that ran but could not do its job.
 const EXIT_FAILURE: u8 = 1;
@@ -155,6 +155,19 @@ fn up_to(model: &Model, depth: Depth) -> Model {
     out
 }
 
+/// An edge kind as the JSON form spells it (docs/model-json.md).
+fn edge_kind(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::DependsOn => "depends-on",
+        EdgeKind::Calls => "calls",
+        EdgeKind::Implements => "implements",
+        EdgeKind::Extends => "extends",
+        EdgeKind::Reads => "reads",
+        EdgeKind::Writes => "writes",
+        EdgeKind::Exposes => "exposes",
+    }
+}
+
 fn text(model: &Model) -> String {
     let mut s = String::new();
     for n in model.nodes() {
@@ -183,9 +196,10 @@ fn text(model: &Model) -> String {
             format!("\t{}", deps.join(","))
         };
         s += &format!(
-            "{} -> {}\tdepends-on\t{conf}{deps}\n",
+            "{} -> {}\t{}\t{conf}{deps}\n",
             String::from(e.key.from.clone()),
-            String::from(e.key.to.clone())
+            String::from(e.key.to.clone()),
+            edge_kind(e.key.kind)
         );
     }
     s

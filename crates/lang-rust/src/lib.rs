@@ -34,7 +34,7 @@ impl LanguageAnalyser for Rust {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -174,6 +174,18 @@ impl<'s> Out<'s> {
                 ) else {
                     return;
                 };
+                if let Some(tr) = node.child_by_field_name("trait") {
+                    let base = match tr.kind() {
+                        "generic_type" => tr.child_by_field_name("type").unwrap_or(tr),
+                        _ => tr,
+                    };
+                    let r = Reference::Impl {
+                        self_type: type_path(src, ty),
+                        r#trait: segments(src, base),
+                        module: module.to_vec(),
+                    };
+                    self.references.push((node.start_byte(), r));
+                }
                 let owner = Owner::Impl {
                     self_type: type_name(src, ty),
                     r#trait: node
@@ -206,9 +218,10 @@ impl<'s> Out<'s> {
                 if let Some(arg) = node.child_by_field_name("argument") {
                     let (paths, complete) = use_paths(src, arg);
                     self.clean &= complete;
-                    for path in paths {
+                    for (path, alias) in paths {
                         let r = Reference::Use {
                             path,
+                            alias,
                             module: module.to_vec(),
                         };
                         self.references.push((node.start_byte(), r));
@@ -363,6 +376,19 @@ fn type_name(src: &[u8], ty: Node<'_>) -> String {
     }
 }
 
+/// A type's path without generic arguments or references: `a::Foo` for
+/// `&a::Foo<T>`.
+fn type_path(src: &[u8], ty: Node<'_>) -> Vec<String> {
+    let mut node = ty;
+    while let Some(next) = match node.kind() {
+        "generic_type" | "reference_type" | "pointer_type" => node.child_by_field_name("type"),
+        _ => None,
+    } {
+        node = next;
+    }
+    segments(src, node)
+}
+
 /// A trait's name with its generic arguments, `From<u16>` for
 /// `std::convert::From<u16>`, so the impls of one trait for different
 /// arguments have different ids rather than order-dependent suffixes.
@@ -442,11 +468,14 @@ fn mix(a: u64, b: u64) -> u64 {
 /// and `a::c::d`, and `a::{self}` gives `a`. Aliases keep the original path;
 /// globs end in `*`. The flag is false if a group nested deeper than
 /// [`MAX_DEPTH`] was cut off.
-fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<Vec<String>>, bool) {
+/// A path a `use` names, and the name it is renamed to, if any.
+type UsePath = (Vec<String>, Option<String>);
+
+fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<UsePath>, bool) {
     let mut out = Vec::new();
     let mut complete = true;
-    let mut stack = vec![(arg, Vec::<String>::new(), 0usize)];
-    while let Some((node, prefix, depth)) = stack.pop() {
+    let mut stack = vec![(arg, Vec::<String>::new(), 0usize, None::<String>)];
+    while let Some((node, prefix, depth, alias)) = stack.pop() {
         if depth > MAX_DEPTH {
             complete = false;
             continue;
@@ -459,18 +488,19 @@ fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<Vec<String>>, bool) {
                 }
                 if let Some(list) = node.child_by_field_name("list") {
                     for c in named_children(list).into_iter().rev() {
-                        stack.push((c, p.clone(), depth + 1));
+                        stack.push((c, p.clone(), depth + 1, None));
                     }
                 }
             }
             "use_list" => {
                 for c in named_children(node).into_iter().rev() {
-                    stack.push((c, prefix.clone(), depth + 1));
+                    stack.push((c, prefix.clone(), depth + 1, None));
                 }
             }
             "use_as_clause" => {
                 if let Some(path) = node.child_by_field_name("path") {
-                    stack.push((path, prefix, depth + 1));
+                    let alias = field_text(src, node, "alias");
+                    stack.push((path, prefix, depth + 1, alias));
                 }
             }
             "use_wildcard" => {
@@ -479,7 +509,7 @@ fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<Vec<String>>, bool) {
                     p.extend(segments(src, *path));
                 }
                 p.push("*".into());
-                out.push(p);
+                out.push((p, None));
             }
             k if k.ends_with("comment") => {}
             _ => {
@@ -487,12 +517,12 @@ fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<Vec<String>>, bool) {
                 let own = segments(src, node);
                 // `a::{self}` names `a` itself.
                 if own.as_slice() == ["self"] && !p.is_empty() {
-                    out.push(p);
+                    out.push((p, alias));
                     continue;
                 }
                 p.extend(own);
                 if !p.is_empty() {
-                    out.push(p);
+                    out.push((p, alias));
                 }
             }
         }

@@ -48,4 +48,6 @@ nodes:
   L4:cargo:core#util/impl Foreign/odd  Function  "odd"  Inferred  core/src/util.rs  Private  lines 8-8
   L4:cargo:core#util/impl Graph/len  Function  "len"  Inferred  core/src/util.rs  Public  lines 4-4
 edges:
+  L2:cargo:core#util -> L2:cargo:core#graph  DependsOn  Exact  {}
+  L3:cargo:core#graph/Graph -> L3:cargo:core#graph/Walk  Implements  Exact  {}
 diagnostics:

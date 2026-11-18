@@ -23,7 +23,10 @@ const FILES: &[(&str, &str)] = &[
         "crates/core/src/lib.rs",
         "pub mod graph;\npub(crate) mod util;\n",
     ),
-    ("crates/core/src/graph.rs", ""),
+    (
+        "crates/core/src/graph.rs",
+        "pub trait Walk {}\npub struct Graph;\nimpl Walk for Graph {}\n",
+    ),
     ("crates/core/src/util.rs", ""),
     ("web/package.json", r#"{ "name": "web" }"#),
     ("docs/guide.md", "# guide\n"),
