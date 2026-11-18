@@ -441,3 +441,40 @@ fn calls_resolve_by_path_and_roll_up() {
             .all(|e| !(e.key.kind == EdgeKind::Calls && e.key.from.level() == Level::System))
     );
 }
+
+#[test]
+fn calls_through_globs_and_body_uses() {
+    let entries: &[(&str, &str)] = &[
+        ("Cargo.toml", "[package]\nname = \"one\"\n"),
+        (
+            "src/lib.rs",
+            "mod m;\npub fn helper() {}\npub fn shadow() {\n    use crate::m::helper;\n    helper();\n}\nmod tests {\n    use super::*;\n    fn t() { helper(); }\n}\n",
+        ),
+        ("src/m.rs", "pub fn helper() {}\n"),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let calls = |from: &str, to: &str| edge(&model, from, to, EdgeKind::Calls);
+    assert!(
+        calls(
+            "L4:cargo:#(functions)/shadow",
+            "L4:cargo:#m/(functions)/helper"
+        )
+        .is_some()
+    );
+    assert!(
+        calls(
+            "L4:cargo:#(functions)/shadow",
+            "L4:cargo:#(functions)/helper"
+        )
+        .is_none()
+    );
+    assert!(
+        calls(
+            "L4:cargo:#tests/(functions)/t",
+            "L4:cargo:#(functions)/helper"
+        )
+        .is_some()
+    );
+}

@@ -380,3 +380,30 @@ fn functions_record_the_paths_they_call() {
     );
     assert!(by_name(&f, "S").calls.is_empty());
 }
+
+#[test]
+fn local_bindings_are_not_calls_and_local_uses_bind_names() {
+    let f = analyse(
+        b"fn f(cb: impl Fn(), (a, b): (u8, u8)) {\n    cb();\n    let g = || 1;\n    g();\n    fn inner() {}\n    inner();\n    use crate::m::helper;\n    helper();\n    use crate::util as u;\n    u::run();\n    real();\n    let h = |k: u8| k;\n    k();\n}\n",
+    );
+    let calls: Vec<String> = by_name(&f, "f")
+        .calls
+        .iter()
+        .map(|c| c.join("::"))
+        .collect();
+    assert_eq!(calls, ["crate::m::helper", "crate::util::run", "real"]);
+}
+
+#[test]
+fn a_huge_body_is_read_in_linear_time() {
+    let body: String = (0..30_000).map(|i| format!("f{i}();\n")).collect();
+    let src = format!("fn big() {{\n{body}}}\n");
+    let start = std::time::Instant::now();
+    let f = analyse(src.as_bytes());
+    assert_eq!(by_name(&f, "big").calls.len(), 30_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}

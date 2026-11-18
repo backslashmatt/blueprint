@@ -16,6 +16,8 @@
 //! - a method's signature includes its `impl` header, so changing the impl's
 //!   generics or `where` clause changes every method's surface.
 
+use std::collections::{HashMap, HashSet};
+
 use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser, Reference};
 use blueprint_model::{RepoPath, Visibility};
 use tree_sitter::{Node, Parser};
@@ -34,7 +36,7 @@ impl LanguageAnalyser for Rust {
     }
 
     fn version(&self) -> u32 {
-        4
+        5
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -317,7 +319,7 @@ impl<'s> Out<'s> {
             body_hash,
             calls: if kind_is_fn {
                 node.child_by_field_name("body")
-                    .map(|b| calls(src, b))
+                    .map(|b| calls(src, node, b))
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -327,14 +329,62 @@ impl<'s> Out<'s> {
     }
 }
 
-/// The paths called in `body`, in source order, without repeats. Calls in
-/// nested closures count; nested functions and macro arguments do not.
-fn calls(src: &[u8], body: Node<'_>) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = Vec::new();
+/// The paths a function's body calls, in source order, without repeats.
+/// Calls in nested closures count; nested functions and macro arguments do
+/// not. A bare call to a name bound locally — a parameter, a `let`, a
+/// closure parameter, a nested function — is not a call to a function of
+/// that name, so it is skipped. A `use` inside the body binds names as at
+/// module level: `helper()` after `use crate::m::helper` calls `m::helper`.
+fn calls(src: &[u8], function: Node<'_>, body: Node<'_>) -> Vec<Vec<String>> {
+    let mut locals: HashSet<String> = HashSet::new();
+    let mut imports: HashMap<String, Vec<String>> = HashMap::new();
+    if let Some(params) = function.child_by_field_name("parameters") {
+        for p in named_children(params) {
+            if let Some(pattern) = p.child_by_field_name("pattern") {
+                bind(src, pattern, &mut locals);
+            }
+        }
+    }
+    // First pass: what the body binds.
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
         match n.kind() {
-            "function_item" | "macro_invocation" => continue,
+            "function_item" => {
+                if let Some(name) = field_text(src, n, "name") {
+                    locals.insert(name);
+                }
+                continue;
+            }
+            "macro_invocation" => continue,
+            "let_declaration" => {
+                if let Some(pattern) = n.child_by_field_name("pattern") {
+                    bind(src, pattern, &mut locals);
+                }
+            }
+            "closure_parameters" => bind(src, n, &mut locals),
+            "use_declaration" => {
+                if let Some(arg) = n.child_by_field_name("argument") {
+                    for (path, alias) in use_paths(src, arg).0 {
+                        let bound = alias.or_else(|| path.last().cloned());
+                        if let Some(bound) = bound.filter(|b| b != "*" && b != "self") {
+                            imports.insert(bound, path);
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    // Second pass: the calls, in source order.
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "function_item" | "macro_invocation" | "use_declaration" => continue,
             "call_expression" => {
                 let mut callee = n.child_by_field_name("function");
                 // `foo::<T>()`: the function without its arguments.
@@ -347,7 +397,17 @@ fn calls(src: &[u8], body: Node<'_>) -> Vec<Vec<String>> {
                     // Keep the names; drop generic arguments' tokens.
                     let mut path = segments(src, c);
                     path.retain(|s| s.chars().all(|ch| ch.is_alphanumeric() || ch == '_'));
-                    if !path.is_empty() && !out.contains(&path) {
+                    let path = match path.split_first() {
+                        Some((first, _)) if path.len() == 1 && locals.contains(first) => None,
+                        Some((first, rest)) => Some(match imports.get(first) {
+                            Some(target) => [target.as_slice(), rest].concat(),
+                            None => path.clone(),
+                        }),
+                        None => None,
+                    };
+                    if let Some(path) = path
+                        && seen.insert(path.clone())
+                    {
                         out.push(path);
                     }
                 }
@@ -359,6 +419,18 @@ fn calls(src: &[u8], body: Node<'_>) -> Vec<Vec<String>> {
         stack.extend(children.into_iter().rev());
     }
     out
+}
+
+/// Adds every identifier a pattern binds to `names`.
+fn bind(src: &[u8], pattern: Node<'_>, names: &mut HashSet<String>) {
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" {
+            names.insert(text(src, n));
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
 }
 
 fn is_function(kind: &str) -> bool {

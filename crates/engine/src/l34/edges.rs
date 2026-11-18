@@ -185,6 +185,7 @@ pub(super) fn add(
         let system = &place.system;
         // What each module of this file imports, for its calls.
         let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
+        let mut globs: HashMap<&[String], Vec<&[String]>> = HashMap::new();
         for reference in &facts.references {
             if let Reference::Use {
                 path,
@@ -192,6 +193,11 @@ pub(super) fn add(
                 module,
             } = reference
             {
+                if let Some((star, base)) = path.split_last()
+                    && star == "*"
+                {
+                    globs.entry(module.as_slice()).or_default().push(base);
+                }
                 let bound = alias.as_deref().or_else(|| path.last().map(String::as_str));
                 if let Some(bound) = bound.filter(|n| *n != "*" && *n != "self") {
                     local
@@ -207,8 +213,11 @@ pub(super) fn add(
             };
             let m = [file_module.as_slice(), item.module.as_slice()].concat();
             let imported = local.get(item.module.as_slice());
+            let glob = globs
+                .get(item.module.as_slice())
+                .map_or(&[][..], Vec::as_slice);
             for call in &item.calls {
-                if let Some(callee) = r.callee(system, &m, caller, call, imported)
+                if let Some(callee) = r.callee(system, &m, caller, call, imported, glob)
                     && callee != *caller
                 {
                     let key = EdgeKey {
@@ -487,6 +496,7 @@ impl Resolver<'_, '_> {
         caller: &NodeId,
         call: &[String],
         imported: Option<&HashMap<&str, &[String]>>,
+        globs: &[&[String]],
     ) -> Option<NodeId> {
         let model = &self.b.model;
         let at = |sys: &SystemKey, mut path: Vec<String>| {
@@ -508,9 +518,15 @@ impl Resolver<'_, '_> {
             if let Some(id) = free(system, m, name) {
                 return Some(id);
             }
-            let target = import(name)?;
-            let r = self.resolve(system, m, target, false)?;
-            return free(&r.system, &r.module, r.item.as_deref()?);
+            if let Some(target) = import(name) {
+                let r = self.resolve(system, m, target, false)?;
+                return free(&r.system, &r.module, r.item.as_deref()?);
+            }
+            // `use super::*` and other globs: the first module that has it.
+            return globs.iter().find_map(|base| {
+                let r = self.resolve(system, m, base, false)?;
+                r.item.is_none().then(|| free(&r.system, &r.module, name))?
+            });
         }
         if prefix == ["Self"] {
             let ty = model.node(caller)?.parent.clone()?;
