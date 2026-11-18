@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use blueprint_engine::git::{EntryKind, GitError, ObjectId, Repo};
+use blueprint_engine::git::{EntryKind, GitError, ObjectId, RefKind, Repo};
 use blueprint_model::Confidence;
 use gix::bstr::BString;
 use gix::objs::tree::{Entry, EntryKind as K};
@@ -130,6 +130,64 @@ fn resolves_branches_tags_ids_and_head() -> R<()> {
     );
     assert_eq!(repo.resolve(&f.second.to_string())?, f.second);
     assert_eq!(repo.resolve(&f.second.to_string()[..10])?, f.second);
+    Ok(())
+}
+
+#[test]
+fn lists_refs_that_lead_to_commits() -> R<()> {
+    let f = fixture()?;
+    let git = gix::open(&f.dir)?;
+    // A tag of a blob and a symbolic ref are not reviewable commits.
+    git.tag_reference("blob-tag", f.readme, PreviousValue::MustNotExist)?;
+    std::fs::create_dir_all(f.dir.join("refs/remotes/origin"))?;
+    std::fs::write(
+        f.dir.join("refs/remotes/origin/main"),
+        format!("{}\n", f.first),
+    )?;
+    std::fs::write(
+        f.dir.join("refs/remotes/origin/HEAD"),
+        "ref: refs/remotes/origin/main\n",
+    )?;
+    let refs = Repo::open(&f.dir)?.refs()?;
+    let got: Vec<(&str, RefKind, ObjectId)> = refs
+        .iter()
+        .map(|r| (r.name.as_str(), r.kind, r.commit))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("refs/heads/main", RefKind::Branch, f.second),
+            ("refs/remotes/origin/main", RefKind::RemoteBranch, f.first),
+            ("refs/tags/v1", RefKind::Tag, f.first),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn logs_commits_newest_first_with_their_details() -> R<()> {
+    let f = fixture()?;
+    let repo = Repo::open(&f.dir)?;
+    assert_eq!(repo.head(), Some(f.second));
+    let log = repo.log(f.second, 10)?;
+    let ids: Vec<ObjectId> = log.iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![f.second, f.first]);
+    assert_eq!(log[0].summary, "second");
+    assert_eq!(log[0].author, "Fixture");
+    assert_eq!(log[0].time, 1_700_000_000);
+    assert_eq!(log[0].parents, vec![f.first]);
+    assert!(log[1].parents.is_empty());
+    assert_eq!(repo.log(f.second, 1)?.len(), 1, "the limit is respected");
+    Ok(())
+}
+
+#[test]
+fn an_empty_repository_has_no_head() -> R<()> {
+    let dir = fresh_dir("empty");
+    gix::init_bare(&dir)?;
+    let repo = Repo::open(&dir)?;
+    assert_eq!(repo.head(), None);
+    assert!(repo.refs()?.is_empty());
     Ok(())
 }
 

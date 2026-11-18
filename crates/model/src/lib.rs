@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod codec;
+pub mod diff;
 pub mod graph;
 pub mod lang;
 pub use graph::{
