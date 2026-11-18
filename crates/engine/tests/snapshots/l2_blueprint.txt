@@ -64,6 +64,9 @@ nodes:
   L2:cargo:crates/store#segment  Module  "segment"  Exact  crates/store/src/segment.rs  Private
   L2:cargo:crates/store#store  Module  "store"  Exact  crates/store/src/store.rs  Private
   L2:cargo:crates/store#tests%2F  Directory  "tests/"  Unknown  crates/store/tests
+  L2:cargo:crates/ui#examples%2F  Directory  "examples/"  Unknown  crates/ui/examples
+  L2:cargo:crates/ui#layout  Module  "layout"  Exact  crates/ui/src/layout.rs  Public
+  L2:cargo:crates/ui#layout/tests  Module  "layout::tests"  Exact  crates/ui/src/layout.rs  Private
   L2:cargo:crates/ui#tests  Module  "tests"  Exact  crates/ui/src/lib.rs  Private
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs  Public
