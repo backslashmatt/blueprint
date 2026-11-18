@@ -113,16 +113,11 @@ impl Diff {
 /// The diff from `base` to `head`.
 #[must_use]
 pub fn diff(base: &Model, head: &Model) -> Diff {
-    let base_edges: BTreeSet<&EdgeKey> = base.edges().map(|e| &e.key).collect();
-    let head_edges: BTreeSet<&EdgeKey> = head.edges().map(|e| &e.key).collect();
-    let added_edges: Vec<EdgeKey> = head_edges
-        .difference(&base_edges)
-        .map(|k| (*k).clone())
-        .collect();
-    let removed_edges: Vec<EdgeKey> = base_edges
-        .difference(&head_edges)
-        .map(|k| (*k).clone())
-        .collect();
+    // Both models iterate in id order, so one merge walk pairs everything:
+    // no lookups, one comparison per step.
+    let edges = merge(base.edges(), head.edges(), |e| &e.key);
+    let added_edges: Vec<EdgeKey> = edges.only_head.iter().map(|e| e.key.clone()).collect();
+    let removed_edges: Vec<EdgeKey> = edges.only_base.iter().map(|e| e.key.clone()).collect();
     // Nodes an added or removed edge touches: their body change is not
     // contained.
     let mut touched: BTreeSet<&NodeId> = BTreeSet::new();
@@ -131,23 +126,13 @@ pub fn diff(base: &Model, head: &Model) -> Diff {
         touched.insert(&k.to);
     }
 
-    let mut nodes = Vec::new();
-    let mut removed: Vec<&Node> = Vec::new();
-    for b in base.nodes() {
-        match head.node(&b.id) {
-            None => removed.push(b),
-            Some(h) => {
-                if let Some(change) = changed(b, h, touched.contains(&b.id)) {
-                    nodes.push(change);
-                }
-            }
-        }
-    }
-    let added: Vec<&Node> = head
-        .nodes()
-        .filter(|h| base.node(&h.id).is_none())
+    let nodes_m = merge(base.nodes(), head.nodes(), |n| &n.id);
+    let mut nodes: Vec<NodeChange> = nodes_m
+        .both
+        .iter()
+        .filter_map(|(b, h)| changed(b, h, touched.contains(&b.id)))
         .collect();
-    nodes.extend(pair(&removed, &added));
+    nodes.extend(pair(&nodes_m.only_base, &nodes_m.only_head));
 
     let mut findings: Vec<Finding> = added_edges
         .iter()
@@ -166,6 +151,55 @@ pub fn diff(base: &Model, head: &Model) -> Diff {
         nodes,
         added_edges,
         removed_edges,
+    }
+}
+
+/// What a merge walk of two sorted sequences found.
+struct Merged<'a, T> {
+    only_base: Vec<&'a T>,
+    only_head: Vec<&'a T>,
+    both: Vec<(&'a T, &'a T)>,
+}
+
+/// Walks two sequences sorted by `key` together.
+fn merge<'a, T: 'a, K: Ord + 'a>(
+    base: impl Iterator<Item = &'a T>,
+    head: impl Iterator<Item = &'a T>,
+    key: impl Fn(&'a T) -> &'a K,
+) -> Merged<'a, T> {
+    let mut out = Merged {
+        only_base: Vec::new(),
+        only_head: Vec::new(),
+        both: Vec::new(),
+    };
+    let (mut b, mut h) = (base.peekable(), head.peekable());
+    loop {
+        match (b.peek(), h.peek()) {
+            (Some(&x), Some(&y)) => match key(x).cmp(key(y)) {
+                std::cmp::Ordering::Less => {
+                    out.only_base.push(x);
+                    b.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    out.only_head.push(y);
+                    h.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    out.both.push((x, y));
+                    b.next();
+                    h.next();
+                }
+            },
+            (Some(&x), None) => {
+                out.only_base.push(x);
+                b.next();
+            }
+            (None, Some(&y)) => {
+                out.only_head.push(y);
+                h.next();
+            }
+            (None, None) => return out,
+        }
     }
 }
 
