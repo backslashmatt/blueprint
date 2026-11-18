@@ -367,3 +367,44 @@ fn bad_input_fails_and_the_service_keeps_answering() {
         })
     ));
 }
+
+#[test]
+fn a_request_sent_after_open_reads_the_newly_opened_repository() {
+    let one = repo("one-commit", &[BASE]);
+    let two = repo("two-commits", &[BASE, HEAD]);
+    let (service, rx) = start();
+    let mut others = Vec::new();
+    service.send(
+        1,
+        Request::Open {
+            path: one.display().to_string(),
+        },
+    );
+    until_last(&rx, 1, &mut others);
+    // Back to back: the Model lane may pick this up before the Open of
+    // `two` has finished, and must still read `two`, where `main~1` exists.
+    service.send(
+        2,
+        Request::Open {
+            path: two.display().to_string(),
+        },
+    );
+    service.send(
+        3,
+        Request::Model {
+            rev: "main~1".into(),
+        },
+    );
+    let r = until_last(&rx, 3, &mut others);
+    assert!(
+        matches!(
+            r.last(),
+            Some(Response::Model {
+                detail: Detail::Full,
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+    until_last(&rx, 2, &mut others);
+}

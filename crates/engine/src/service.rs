@@ -6,9 +6,11 @@
 //! request in its lane, and [`Request::Open`] supersedes every earlier
 //! request in every lane, since they were about another repository. A
 //! superseded request still queued is answered [`Response::Superseded`]
-//! without running; one already running is checked between stages (after
-//! the coarse answer, before the full one) and stops there. A stage itself
-//! is not interrupted.
+//! without running; one already running stops at its next stage boundary,
+//! and a stage's answer is never sent once its request is superseded. A
+//! stage itself is not interrupted. Every request gets exactly one final
+//! reply ([`Response::is_last`]); a panic while answering one becomes
+//! [`Response::Failed`].
 //!
 //! Models and diffs go through the index: the L1–L2 model of a commit is
 //! stored the first time it is built, as by `bp index`, and the L1–L4 model
@@ -16,11 +18,10 @@
 //! reads it.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, RwLock};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use blueprint_model::{Model, RepoPath};
 use blueprint_protocol::{
@@ -28,52 +29,67 @@ use blueprint_protocol::{
 };
 
 use crate::commits;
+use crate::diff::ChangedFile;
 use crate::git::{CommitInfo, ObjectId, Repo};
 use crate::l1::Diagnostic;
 
 const LANES: [Lane; 4] = [Lane::Repository, Lane::Model, Lane::Diff, Lane::Source];
 
-/// A request on its way to a worker, with the lane generation it was sent in.
+/// Returned by a stage whose request was superseded; never shown.
+const SUPERSEDED: &str = "superseded";
+
+/// A request on its way to a worker: the lane generation it was sent in,
+/// and the repository that was open when it was sent.
 struct Job {
     id: RequestId,
     request: Request,
     generation: u64,
+    repo: Option<PathBuf>,
 }
 
 /// What every worker shares.
 struct Shared {
-    /// The open repository, if any.
-    repo: RwLock<Option<PathBuf>>,
-    /// Per lane, the generation of the newest request sent to it.
-    generations: HashMap<Lane, AtomicU64>,
+    /// Per lane, the generation of the newest request sent to it. A reply
+    /// is sent only while holding the lane's lock and only if its request
+    /// is still the newest, so a superseded request never answers after
+    /// the request that superseded it was sent.
+    generations: HashMap<Lane, Mutex<u64>>,
     replies: Sender<Reply>,
 }
 
 impl Shared {
-    fn current(&self, lane: Lane) -> u64 {
-        self.generations[&lane].load(Ordering::SeqCst)
+    fn lane(&self, lane: Lane) -> MutexGuard<'_, u64> {
+        // A poisoned lock still holds a valid counter.
+        self.generations[&lane]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn reply(&self, id: RequestId, response: Response) {
+    fn send(&self, id: RequestId, response: Response) {
         // A front end that has gone away has no use for replies.
         let _ = self.replies.send(Reply { id, response });
     }
 
-    fn repo(&self) -> Result<PathBuf, String> {
-        self.repo
-            .read()
-            .map_err(|_| "the engine failed".to_string())?
-            .clone()
-            .ok_or_else(|| "no repository is open".to_string())
+    /// Sends `response` if the request is still the newest in its lane.
+    fn emit(&self, lane: Lane, job: &Job, response: Response) -> bool {
+        let current = self.lane(lane);
+        if *current != job.generation {
+            return false;
+        }
+        self.send(job.id, response);
+        true
     }
 }
 
-/// A running engine service. Dropping it stops the workers once they finish
-/// what they are doing.
+/// A running engine service. Dropping it supersedes everything queued and
+/// returns at once; a stage already running finishes on its own thread and
+/// its answer is dropped.
 pub struct Service {
     shared: Arc<Shared>,
     lanes: HashMap<Lane, Sender<Job>>,
-    workers: Vec<JoinHandle<()>>,
+    /// The repository the last [`Request::Open`] named, as later requests
+    /// see it.
+    repo: Mutex<Option<PathBuf>>,
 }
 
 impl std::fmt::Debug for Service {
@@ -91,49 +107,58 @@ impl Service {
     pub fn start() -> std::io::Result<(Service, Receiver<Reply>)> {
         let (replies, received) = mpsc::channel();
         let shared = Arc::new(Shared {
-            repo: RwLock::new(None),
-            generations: LANES.iter().map(|l| (*l, AtomicU64::new(0))).collect(),
+            generations: LANES.iter().map(|l| (*l, Mutex::new(0))).collect(),
             replies,
         });
         let mut lanes = HashMap::new();
-        let mut workers = Vec::new();
         for lane in LANES {
             let (tx, rx) = mpsc::channel::<Job>();
             let shared = Arc::clone(&shared);
-            workers.push(
-                std::thread::Builder::new()
-                    .name(format!("engine-{lane:?}").to_lowercase())
-                    .spawn(move || work(&shared, lane, &rx))?,
-            );
+            // Detached: it ends when the service, and so the sender, is dropped.
+            std::thread::Builder::new()
+                .name(format!("engine-{lane:?}").to_lowercase())
+                .spawn(move || work(&shared, lane, &rx))?;
             lanes.insert(lane, tx);
         }
         Ok((
             Service {
                 shared,
                 lanes,
-                workers,
+                repo: Mutex::new(None),
             },
             received,
         ))
     }
 
     /// Queues `request`. Its answer, and a [`Response::Superseded`] for any
-    /// request it replaces, arrive on the reply receiver.
+    /// request it replaces, arrive on the reply receiver. A request is
+    /// answered about the repository named by the last [`Request::Open`]
+    /// sent before it, even if that Open has not finished yet.
     pub fn send(&self, id: RequestId, request: Request) {
         let lane = request.lane();
-        if matches!(request, Request::Open { .. }) {
-            for l in LANES {
-                self.shared.generations[&l].fetch_add(1, Ordering::SeqCst);
+        let repo = {
+            let mut repo = self.repo.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Request::Open { path } = &request {
+                *repo = Some(PathBuf::from(path));
+                for l in LANES {
+                    *self.shared.lane(l) += 1;
+                }
             }
-        }
-        let generation = self.shared.generations[&lane].fetch_add(1, Ordering::SeqCst) + 1;
+            repo.clone()
+        };
+        let generation = {
+            let mut g = self.shared.lane(lane);
+            *g += 1;
+            *g
+        };
         let job = Job {
             id,
             request,
             generation,
+            repo,
         };
         if self.lanes[&lane].send(job).is_err() {
-            self.shared.reply(
+            self.shared.send(
                 id,
                 Response::Failed {
                     error: "the engine failed".into(),
@@ -145,41 +170,60 @@ impl Service {
 
 impl Drop for Service {
     fn drop(&mut self) {
-        self.lanes.clear();
-        for w in self.workers.drain(..) {
-            let _ = w.join();
+        for l in LANES {
+            *self.shared.lane(l) += 1;
         }
     }
 }
 
-/// One lane's worker: runs the newest queued job, answers the rest
-/// superseded, until the service is dropped.
+/// One lane's worker: runs each job that is still the newest, answers the
+/// rest superseded, until the service is dropped. Every request gets
+/// exactly one final reply.
 fn work(shared: &Shared, lane: Lane, rx: &Receiver<Job>) {
     while let Ok(job) = rx.recv() {
-        let stale = || shared.current(lane) != job.generation;
-        if stale() {
-            shared.reply(job.id, Response::Superseded);
-            continue;
-        }
-        let reply = |r: Response| shared.reply(job.id, r);
-        if let Err(error) = run(shared, &job.request, &stale, &reply) {
-            reply(if stale() {
-                Response::Superseded
-            } else {
-                Response::Failed { error }
-            });
+        let emit = |r: Response| shared.emit(lane, &job, r);
+        let stale = || *shared.lane(lane) != job.generation;
+        let outcome = if stale() {
+            Err(SUPERSEDED.to_string())
+        } else {
+            // An analyser panic on hostile input fails this request, not
+            // the lane.
+            std::panic::catch_unwind(AssertUnwindSafe(|| run(&job, &stale, &emit)))
+                .unwrap_or_else(|_| Err("the engine failed on this input".into()))
+        };
+        if let Err(error) = outcome
+            && (error == SUPERSEDED || !emit(Response::Failed { error }))
+        {
+            shared.send(job.id, Response::Superseded);
         }
     }
 }
 
-/// Answers one request through `reply`, checking `stale` between stages.
-fn run(
-    shared: &Shared,
-    request: &Request,
-    stale: &dyn Fn() -> bool,
-    reply: &dyn Fn(Response),
-) -> Result<(), String> {
-    match request {
+/// Fails with [`SUPERSEDED`] unless `emit` sent the response.
+fn sent(delivered: bool) -> Result<(), String> {
+    if delivered {
+        Ok(())
+    } else {
+        Err(SUPERSEDED.into())
+    }
+}
+
+/// Answers one request through `emit`, stopping between stages once
+/// `stale`.
+fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> Result<(), String> {
+    let repo = || {
+        job.repo
+            .clone()
+            .ok_or_else(|| "no repository is open".to_string())
+    };
+    let check = || {
+        if stale() {
+            Err(SUPERSEDED.to_string())
+        } else {
+            Ok(())
+        }
+    };
+    match &job.request {
         Request::Open { path } => {
             let path = PathBuf::from(path);
             let repo = Repo::open(&path).map_err(|e| e.to_string())?;
@@ -188,17 +232,13 @@ fn run(
                 .map(|c| repo.commit_info(c).map(summary))
                 .transpose()
                 .map_err(|e| e.to_string())?;
-            *shared
-                .repo
-                .write()
-                .map_err(|_| "the engine failed".to_string())? = Some(path.clone());
-            reply(Response::Opened {
+            sent(emit(Response::Opened {
                 path: path.display().to_string(),
                 head,
-            });
+            }))
         }
         Request::Refs { limit } => {
-            let repo = Repo::open(&shared.repo()?).map_err(|e| e.to_string())?;
+            let repo = Repo::open(&repo()?).map_err(|e| e.to_string())?;
             let refs = repo
                 .refs()
                 .map_err(|e| e.to_string())?
@@ -223,41 +263,38 @@ fn run(
                     .collect(),
                 None => Vec::new(),
             };
-            reply(Response::Refs { refs, commits });
+            sent(emit(Response::Refs { refs, commits }))
         }
         Request::Model { rev } => {
-            let path = shared.repo()?;
-            let coarse = commits::l2_at(&path, rev, true)?;
+            let path = repo()?;
+            let coarse = coarse_model(&path, rev)?;
             let commit = coarse.commit.to_string();
             let warnings = text(&coarse.indexed.diagnostics());
-            reply(Response::Model {
+            sent(emit(Response::Model {
                 commit: commit.clone(),
                 detail: Detail::Coarse,
                 model: Arc::new(coarse.indexed.model),
                 warnings,
-            });
-            if stale() {
-                return Err("superseded".into());
-            }
+            }))?;
+            check()?;
             let (model, diags) = full_model(&path, &commit)?;
-            reply(Response::Model {
+            sent(emit(Response::Model {
                 commit,
                 detail: Detail::Full,
                 model: Arc::new(model),
                 warnings: text(&diags),
-            });
+            }))
         }
         Request::Diff { base, head } => {
-            let path = shared.repo()?;
-            let (b, h) = (
-                commits::l2_at(&path, base, true)?,
-                commits::l2_at(&path, head, true)?,
-            );
+            let path = repo()?;
+            let b = coarse_model(&path, base)?;
+            check()?;
+            let h = coarse_model(&path, head)?;
             let (base, head) = (b.commit.to_string(), h.commit.to_string());
             let mut warnings = text(&b.indexed.diagnostics());
             warnings.extend(text(&h.indexed.diagnostics()));
             let diff = crate::diff::diff(&b.indexed.model, &h.indexed.model);
-            reply(Response::Diff {
+            sent(emit(Response::Diff {
                 base: base.clone(),
                 head: head.clone(),
                 detail: Detail::Coarse,
@@ -265,39 +302,48 @@ fn run(
                 base_model: Arc::new(b.indexed.model),
                 head_model: Arc::new(h.indexed.model),
                 warnings,
-            });
-            if stale() {
-                return Err("superseded".into());
-            }
-            // Both stored at level 4 first, so the diff reads them.
-            let (bf, hf) = std::thread::scope(|s| {
+            }))?;
+            check()?;
+            // Both models at once, and the changed files for weights.
+            let (bf, hf, changed) = std::thread::scope(|s| {
                 let b = s.spawn(|| full_model(&path, &base));
+                let c = s.spawn(|| commits::changed_files(&path, &base, &head));
                 let h = full_model(&path, &head);
+                const FAILED: &str = "the engine failed on this input";
                 (
-                    b.join().unwrap_or_else(|_| Err("analysis failed".into())),
+                    b.join().unwrap_or_else(|_| Err(FAILED.into())),
                     h,
+                    c.join().unwrap_or_else(|_| Err(FAILED.into())),
                 )
             });
-            let (bf, hf) = (bf?, hf?);
-            if stale() {
-                return Err("superseded".into());
+            let ((base_model, base_diags), (head_model, head_diags)) = (bf?, hf?);
+            check()?;
+            let mut diff = crate::diff::diff(&base_model, &head_model);
+            let mut warnings = text(&base_diags);
+            warnings.extend(text(&head_diags));
+            match changed {
+                Ok(files) => {
+                    let files: Vec<ChangedFile<'_>> = files
+                        .iter()
+                        .map(|(p, b, h)| ChangedFile {
+                            path: p,
+                            base: b.as_deref(),
+                            head: h.as_deref(),
+                        })
+                        .collect();
+                    crate::diff::weigh(&mut diff, &base_model, &head_model, &files);
+                }
+                Err(e) => warnings.push(format!("change weight not computed: {e}")),
             }
-            let (index, _) = commits::existing_index(&path);
-            let d = commits::diff_commits(&path, &base, &head, index.as_ref())?;
-            let mut warnings = text(&bf.1);
-            warnings.extend(text(&hf.1));
-            if let Some(e) = d.weight_error {
-                warnings.push(format!("change weight not computed: {e}"));
-            }
-            reply(Response::Diff {
+            sent(emit(Response::Diff {
                 base,
                 head,
                 detail: Detail::Full,
-                diff: Arc::new(d.diff),
-                base_model: Arc::new(d.base.0),
-                head_model: Arc::new(d.head.0),
+                diff: Arc::new(diff),
+                base_model: Arc::new(base_model),
+                head_model: Arc::new(head_model),
                 warnings,
-            });
+            }))
         }
         Request::Source {
             rev,
@@ -305,14 +351,20 @@ fn run(
             first,
             last,
         } => {
-            let path = shared.repo()?;
+            let path = repo()?;
             let file = RepoPath::parse(file).map_err(|e| format!("{file}: {e}"))?;
-            reply(Response::Source {
+            sent(emit(Response::Source {
                 text: source_lines(&path, rev, &file, *first, *last)?,
-            });
+            }))
         }
     }
-    Ok(())
+}
+
+/// The L1–L2 model of `rev`, stored in the index as by `bp index`; if the
+/// index cannot be opened or written, analysed without it, as `bp model`
+/// does.
+fn coarse_model(path: &Path, rev: &str) -> Result<commits::AtRev, String> {
+    commits::l2_at(path, rev, true).or_else(|_| commits::l2_at(path, rev, false))
 }
 
 /// The L1–L4 model of `commit`: read from the index, or built and stored
@@ -328,10 +380,10 @@ fn full_model(path: &Path, commit: &str) -> Result<(Model, Vec<Diagnostic>), Str
     if let Some(stored) = index.as_ref().and_then(|i| i.get_l4(tree)) {
         return Ok(stored);
     }
-    drop(index);
     match commits::index_l4(path, commit) {
         Ok(done) => Ok((done.model, done.model_diags)),
-        Err(_) => commits::l4_at(path, commit, None),
+        // Built without storing, with whatever facts the index holds.
+        Err(_) => commits::l4_at(path, commit, index.as_ref()),
     }
 }
 
