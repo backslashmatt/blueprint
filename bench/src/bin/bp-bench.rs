@@ -409,6 +409,86 @@ fn deep_index(
     Ok(out)
 }
 
+/// `reindex_one_file` (#63), in process with the engine resident, as the
+/// app will run it (DR 0008 decision 5): build the L1–L4 model of the
+/// pinned commit once, then time applying a change to one analysed Rust
+/// file, two blank lines added at the top and taken away again, so every
+/// item in it moves. The budget row uses the file at the 90th percentile of
+/// size, a large but ordinary file; `reindex_one_file_p99` reports the
+/// 99th, which on these repositories is generated code. Medium and large
+/// only. The engine is linked into bp-bench, so there is no base.
+fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, Error> {
+    use blueprint_engine::resident::{Resident, Update};
+    use blueprint_engine::source::Commit;
+    use blueprint_model::RepoPath;
+
+    let mut out = Vec::new();
+    for r in repos.iter().filter(|r| r.name != "small") {
+        let dir = repos::checkout_dir(dest, r);
+        let (commit, _) = Commit::open(&dir, &r.commit).map_err(|e| e.to_string())?;
+        let paths = commit.paths();
+        let mut resident = Resident::build(&paths, &|p| commit.read(p));
+        let analysed: std::collections::BTreeSet<&RepoPath> = resident
+            .model()
+            .nodes()
+            .filter(|n| n.code.is_some())
+            .map(|n| &n.source)
+            .collect();
+        let mut by_size: Vec<(usize, RepoPath)> = analysed
+            .into_iter()
+            .filter_map(|p| Some((commit.read(p)?.len(), p.clone())))
+            .collect();
+        by_size.sort();
+        for (name, percentile) in [("reindex_one_file", 90), ("reindex_one_file_p99", 99)] {
+            let (_, target) = by_size
+                .get(by_size.len() * percentile / 100)
+                .ok_or("no analysed Rust file")?
+                .clone();
+            let original = commit.read(&target).ok_or("unreadable target")?;
+            let mut edited = b"\n\n".to_vec();
+            edited.extend_from_slice(&original);
+            let samples = 11;
+            let mut best = f64::INFINITY;
+            for i in 0..samples * 2 {
+                let now = if i % 2 == 0 { &edited } else { &original };
+                let read = |p: &RepoPath| {
+                    if *p == target {
+                        Some(now.clone())
+                    } else {
+                        commit.read(p)
+                    }
+                };
+                let start = std::time::Instant::now();
+                let how = resident.update(&target, &read);
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                if how != Update::InPlace {
+                    return Err(
+                        format!("{target}: the edit was not applied in place ({how:?})").into(),
+                    );
+                }
+                best = best.min(ms);
+            }
+            out.push(Measurement {
+                name: name.into(),
+                repo: Some(r.name.clone()),
+                value: best,
+                base: None,
+                unit: "ms".into(),
+                budget: (r.name == "large" && percentile == 90).then(|| "reindex_one_file".into()),
+                samples: samples * 2,
+                note: Some(format!(
+                    "in process, engine resident: {target} (p{percentile} of {} analysed files by size, {} KB) gains or loses two leading blank lines; fastest of {}",
+                    by_size.len(),
+                    original.len() / 1024,
+                    samples * 2
+                )),
+                gated: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Runs `bp index <dir> --rev <rev>` twice with its cache in `cache`, and
 /// checks that the second run found the first one's entry. That is the same
 /// lookup `bp model --rev` makes, so the timed reopen really reads the index.
@@ -633,6 +713,7 @@ fn measure(
     });
     let _ = std::fs::remove_dir_all(&cache);
     out.extend(reopened?);
+    out.extend(reindex_one_file(dest, repos)?);
 
     for r in repos {
         let dir = repos::checkout_dir(dest, r);

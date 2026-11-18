@@ -35,6 +35,18 @@ pub struct Placement {
     pub module: Option<Vec<String>>,
 }
 
+/// What L2 reads from one Rust file: its `mod` items, and whether it is
+/// clean UTF-8. Two versions of a file with the same shape give the same
+/// L2 model.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Shape(lexer::Scan, bool);
+
+/// The [`Shape`] of a Rust file's bytes.
+pub(crate) fn shape(bytes: &[u8]) -> Shape {
+    let text = String::from_utf8_lossy(bytes);
+    Shape(lexer::scan(&text), std::str::from_utf8(bytes).is_ok())
+}
+
 /// Adds L2 nodes for every L1 system already in `model`, and the unowned
 /// system for files outside all of them. Never fails: problems degrade nodes.
 pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Diagnostic> {

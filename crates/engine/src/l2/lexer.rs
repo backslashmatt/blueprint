@@ -46,7 +46,7 @@ pub struct ModItem {
 }
 
 /// What a file declares.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Scan {
     /// Its `mod` items, in order.
     pub items: Vec<ModItem>,

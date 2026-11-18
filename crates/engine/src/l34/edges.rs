@@ -20,9 +20,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use blueprint_model::lang::FileFacts;
 use blueprint_model::lang::Reference;
 use blueprint_model::{
-    Confidence, Ecosystem, Edge, EdgeKey, EdgeKind, Level, NodeId, NodeKind, RepoPath, SystemKey,
+    Confidence, Ecosystem, Edge, EdgeKey, EdgeKind, Level, Model, NodeId, NodeKind, RepoPath,
+    SystemKey,
 };
 
 use toml::{Table, Value};
@@ -131,12 +133,22 @@ fn crate_names(b: &Builder<'_>, read: Read<'_>) -> Crates {
     out
 }
 
+/// What resolving references needs besides the model, kept so that one
+/// file's calls can be resolved again ([`file_calls`]).
+pub(crate) struct Context {
+    crates: Crates,
+    imports: Imports,
+    index: Index,
+}
+
+/// Adds every edge the facts give, rolled up, and returns the resolution
+/// context and each file's `calls` edges (by its index in `parsed`).
 pub(super) fn add(
     b: &mut Builder<'_>,
     parsed: &[Parsed<'_>],
     functions: &HashMap<(usize, usize), NodeId>,
     read: Read<'_>,
-) {
+) -> (Context, Vec<BTreeSet<EdgeKey>>) {
     let crates = crate_names(b, read);
     // Names bound by `use` in each module: name -> path. `impl` resolution
     // needs every one in its module; use resolution needs only renames and
@@ -175,60 +187,21 @@ pub(super) fn add(
     }
     let index = Index::build(b.model);
     let r = Resolver {
-        b: &*b,
+        model: &*b.model,
         crates: &crates,
         imports: &imports,
         index: &index,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
+    let mut calls = Vec::with_capacity(parsed.len());
     for (f, (path, place, file_module, facts)) in parsed.iter().enumerate() {
         let system = &place.system;
-        // What each module of this file imports, for its calls.
-        let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
-        let mut globs: HashMap<&[String], Vec<&[String]>> = HashMap::new();
-        for reference in &facts.references {
-            if let Reference::Use {
-                path,
-                alias,
-                module,
-            } = reference
-            {
-                if let Some((star, base)) = path.split_last()
-                    && star == "*"
-                {
-                    globs.entry(module.as_slice()).or_default().push(base);
-                }
-                let bound = alias.as_deref().or_else(|| path.last().map(String::as_str));
-                if let Some(bound) = bound.filter(|n| *n != "*" && *n != "self") {
-                    local
-                        .entry(module.as_slice())
-                        .or_default()
-                        .insert(bound, path.as_slice());
-                }
-            }
-        }
-        for (i, item) in facts.items.iter().enumerate() {
-            let Some(caller) = functions.get(&(f, i)) else {
-                continue;
-            };
-            let m = [file_module.as_slice(), item.module.as_slice()].concat();
-            let imported = local.get(item.module.as_slice());
-            let glob = globs
-                .get(item.module.as_slice())
-                .map_or(&[][..], Vec::as_slice);
-            for call in &item.calls {
-                if let Some(callee) = r.callee(system, &m, caller, call, imported, glob)
-                    && callee != *caller
-                {
-                    let key = EdgeKey {
-                        from: caller.clone(),
-                        to: callee,
-                        kind: EdgeKind::Calls,
-                    };
-                    found.push((key, Confidence::Inferred, (*path).clone()));
-                }
-            }
-        }
+        let mine = r.file_calls(system, file_module, facts, |i| functions.get(&(f, i)));
+        found.extend(
+            mine.iter()
+                .map(|k| (k.clone(), Confidence::Inferred, (*path).clone())),
+        );
+        calls.push(mine);
         for reference in &facts.references {
             match reference {
                 Reference::Use {
@@ -314,10 +287,108 @@ pub(super) fn add(
         }
     }
     roll_up(b);
+    (
+        Context {
+            crates,
+            imports,
+            index,
+        },
+        calls,
+    )
 }
 
-struct Resolver<'a, 'b> {
-    b: &'a Builder<'b>,
+/// The `calls` edges of one file's functions, resolved against `model` and
+/// `ctx`. `node` gives the L4 node of each item, by its index in the facts.
+pub(crate) fn calls_of<'n>(
+    model: &Model,
+    ctx: &Context,
+    system: &SystemKey,
+    file_module: &[String],
+    facts: &FileFacts,
+    node: impl Fn(usize) -> Option<&'n NodeId>,
+) -> BTreeSet<EdgeKey> {
+    let r = Resolver {
+        model,
+        crates: &ctx.crates,
+        imports: &ctx.imports,
+        index: &ctx.index,
+    };
+    r.file_calls(system, file_module, facts, node)
+}
+
+/// Adds the direct edge `key` and rolls it up, as [`roll_up`] would: the
+/// same edge between the parents, with `key` as evidence, up to L2, and at
+/// L1 only into an edge that already exists.
+pub(crate) fn add_rolled(model: &mut Model, key: EdgeKey, confidence: Confidence) {
+    let mut evidence = BTreeSet::new();
+    let mut key = key;
+    loop {
+        let parents = parents(model, &key);
+        let edge = Edge {
+            key: key.clone(),
+            confidence,
+            evidence: std::mem::take(&mut evidence),
+            dependency: BTreeSet::new(),
+        };
+        if model.add_edge(edge).is_err() {
+            return;
+        }
+        let Some(up) = parents else {
+            return;
+        };
+        if up.from.level() == Level::System && model.edge(&up).is_none() {
+            return;
+        }
+        evidence.insert(key);
+        key = up;
+    }
+}
+
+/// Removes the direct edge `key` and its roll-up: it leaves the evidence
+/// of the edge above, which goes too once it has no evidence left and was
+/// not found directly. A rolled-up edge keeps the surest of its evidence.
+pub(crate) fn remove_rolled(model: &mut Model, key: &EdgeKey) {
+    let up = parents(model, key);
+    if !model.remove_edge(key) {
+        return;
+    }
+    let Some(up) = up else {
+        return;
+    };
+    let Some(mut above) = model.edge(&up).cloned() else {
+        return;
+    };
+    above.evidence.remove(key);
+    if above.evidence.is_empty() && up.from.level() != Level::System {
+        remove_rolled(model, &up);
+        return;
+    }
+    if !above.evidence.is_empty() {
+        above.confidence = above
+            .evidence
+            .iter()
+            .filter_map(|k| model.edge(k).map(|e| e.confidence))
+            .max()
+            .unwrap_or(above.confidence);
+    }
+    model.remove_edge(&up);
+    let _ = model.add_edge(above);
+}
+
+/// The edge `key` stands for one level up, if its ends have different
+/// parents.
+fn parents(model: &Model, key: &EdgeKey) -> Option<EdgeKey> {
+    let parent = |id: &NodeId| model.node(id).and_then(|n| n.parent.clone());
+    let (from, to) = (parent(&key.from)?, parent(&key.to)?);
+    (from != to).then_some(EdgeKey {
+        from,
+        to,
+        kind: key.kind,
+    })
+}
+
+struct Resolver<'a> {
+    model: &'a Model,
     crates: &'a Crates,
     imports: &'a Imports,
     index: &'a Index,
@@ -382,7 +453,65 @@ impl Index {
     }
 }
 
-impl Resolver<'_, '_> {
+impl Resolver<'_> {
+    /// The `calls` edges of one file's functions. `node` gives the L4 node
+    /// of each item, by its index in the facts.
+    fn file_calls<'n>(
+        &self,
+        system: &SystemKey,
+        file_module: &[String],
+        facts: &FileFacts,
+        node: impl Fn(usize) -> Option<&'n NodeId>,
+    ) -> BTreeSet<EdgeKey> {
+        // What each module of this file imports, for its calls.
+        let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
+        let mut globs: HashMap<&[String], Vec<&[String]>> = HashMap::new();
+        for reference in &facts.references {
+            if let Reference::Use {
+                path,
+                alias,
+                module,
+            } = reference
+            {
+                if let Some((star, base)) = path.split_last()
+                    && star == "*"
+                {
+                    globs.entry(module.as_slice()).or_default().push(base);
+                }
+                let bound = alias.as_deref().or_else(|| path.last().map(String::as_str));
+                if let Some(bound) = bound.filter(|n| *n != "*" && *n != "self") {
+                    local
+                        .entry(module.as_slice())
+                        .or_default()
+                        .insert(bound, path.as_slice());
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for (i, item) in facts.items.iter().enumerate() {
+            let Some(caller) = node(i) else {
+                continue;
+            };
+            let m = [file_module, item.module.as_slice()].concat();
+            let imported = local.get(item.module.as_slice());
+            let glob = globs
+                .get(item.module.as_slice())
+                .map_or(&[][..], Vec::as_slice);
+            for call in &item.calls {
+                if let Some(callee) = self.callee(system, &m, caller, call, imported, glob)
+                    && callee != *caller
+                {
+                    out.insert(EdgeKey {
+                        from: caller.clone(),
+                        to: callee,
+                        kind: EdgeKind::Calls,
+                    });
+                }
+            }
+        }
+        out
+    }
+
     fn is_module(&self, system: &SystemKey, path: &[String]) -> bool {
         path.is_empty()
             || self
@@ -498,7 +627,7 @@ impl Resolver<'_, '_> {
         imported: Option<&HashMap<&str, &[String]>>,
         globs: &[&[String]],
     ) -> Option<NodeId> {
-        let model = &self.b.model;
+        let model = &self.model;
         let at = |sys: &SystemKey, mut path: Vec<String>| {
             let id = NodeId::within(Level::Code, sys.clone(), {
                 path.shrink_to_fit();
@@ -566,7 +695,7 @@ impl Resolver<'_, '_> {
             let mut p = m.to_vec();
             p.push(name.clone());
             let id = NodeId::within(Level::Component, system.clone(), p);
-            self.b.model.node(&id).map(|_| id)
+            self.model.node(&id).map(|_| id)
         };
         local().or_else(|| {
             let r = self.resolve(system, m, path, true)?;
@@ -574,7 +703,7 @@ impl Resolver<'_, '_> {
             let mut p = r.module;
             p.push(name);
             let id = NodeId::within(Level::Component, r.system, p);
-            self.b.model.node(&id).map(|_| id)
+            self.model.node(&id).map(|_| id)
         })
     }
 }

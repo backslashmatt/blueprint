@@ -64,6 +64,7 @@ name = "blueprint-bench"
 version = "0.1.0"
 dependencies = [
  "blueprint-engine",
+ "blueprint-model",
  "blueprint-store",
  "serde",
  "serde_json",

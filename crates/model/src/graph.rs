@@ -612,6 +612,23 @@ impl Model {
         true
     }
 
+    /// Replaces a node's attributes: its name, source, confidence, visibility
+    /// and code. Its id, kind and parent must stay the same, so nothing that
+    /// refers to it changes.
+    ///
+    /// # Errors
+    /// [`ModelError::Inconsistent`] if there is no such node, or its kind or
+    /// parent would change. The model is then unchanged.
+    pub fn replace_node(&mut self, node: Node) -> Result<(), ModelError> {
+        match self.nodes.get_mut(&node.id) {
+            Some(old) if old.kind == node.kind && old.parent == node.parent => {
+                *old = node;
+                Ok(())
+            }
+            _ => Err(ModelError::Inconsistent(node.id)),
+        }
+    }
+
     /// Removes an edge. Returns false if it was not present.
     pub fn remove_edge(&mut self, key: &EdgeKey) -> bool {
         self.edges.remove(key).is_some()
@@ -696,6 +713,28 @@ mod tests {
             visibility: Some(Visibility::Public),
             code: None,
         }
+    }
+
+    #[test]
+    fn replace_node_keeps_identity_and_place() {
+        let mut m = Model::default();
+        m.add_node(system("a")).unwrap();
+        m.add_node(module("a", &["x"])).unwrap();
+        let mut changed = module("a", &["x"]);
+        changed.name = "renamed".into();
+        changed.visibility = Some(Visibility::Private);
+        assert_eq!(m.replace_node(changed.clone()), Ok(()));
+        assert_eq!(m.node(&changed.id), Some(&changed));
+        assert_eq!(m.children(&NodeId::system(key("a"))).count(), 1);
+
+        let mut moved = changed.clone();
+        moved.parent = None;
+        assert!(m.replace_node(moved).is_err(), "parent must stay");
+        let mut kind = changed.clone();
+        kind.kind = NodeKind::Directory;
+        assert!(m.replace_node(kind).is_err(), "kind must stay");
+        assert!(m.replace_node(module("a", &["y"])).is_err(), "must exist");
+        assert_eq!(m.node(&changed.id), Some(&changed), "unchanged on error");
     }
 
     fn edge(from: &Node, to: &Node, evidence: &[EdgeKey]) -> Edge {
