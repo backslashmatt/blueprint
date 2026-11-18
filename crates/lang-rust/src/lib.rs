@@ -346,45 +346,43 @@ fn calls(src: &[u8], function: Node<'_>, body: Node<'_>) -> Vec<Vec<String>> {
         }
     }
     // First pass: what the body binds.
-    let mut stack = vec![body];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "function_item" => {
-                if let Some(name) = field_text(src, n, "name") {
-                    locals.insert(name);
-                }
-                continue;
+    preorder(body, |n| match n.kind() {
+        "function_item" => {
+            if let Some(name) = field_text(src, n, "name") {
+                locals.insert(name);
             }
-            "macro_invocation" => continue,
-            "let_declaration" => {
-                if let Some(pattern) = n.child_by_field_name("pattern") {
-                    bind(src, pattern, &mut locals);
-                }
+            false
+        }
+        "macro_invocation" => false,
+        "let_declaration" => {
+            if let Some(pattern) = n.child_by_field_name("pattern") {
+                bind(src, pattern, &mut locals);
             }
-            "closure_parameters" => bind(src, n, &mut locals),
-            "use_declaration" => {
-                if let Some(arg) = n.child_by_field_name("argument") {
-                    for (path, alias) in use_paths(src, arg).0 {
-                        let bound = alias.or_else(|| path.last().cloned());
-                        if let Some(bound) = bound.filter(|b| b != "*" && b != "self") {
-                            imports.insert(bound, path);
-                        }
+            true
+        }
+        "closure_parameters" => {
+            bind(src, n, &mut locals);
+            true
+        }
+        "use_declaration" => {
+            if let Some(arg) = n.child_by_field_name("argument") {
+                for (path, alias) in use_paths(src, arg).0 {
+                    let bound = alias.or_else(|| path.last().cloned());
+                    if let Some(bound) = bound.filter(|b| b != "*" && b != "self") {
+                        imports.insert(bound, path);
                     }
                 }
-                continue;
             }
-            _ => {}
+            false
         }
-        let mut cursor = n.walk();
-        stack.extend(n.named_children(&mut cursor));
-    }
+        _ => true,
+    });
     // Second pass: the calls, in source order.
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<Vec<String>> = HashSet::new();
-    let mut stack = vec![body];
-    while let Some(n) = stack.pop() {
+    preorder(body, |n| {
         match n.kind() {
-            "function_item" | "macro_invocation" | "use_declaration" => continue,
+            "function_item" | "macro_invocation" | "use_declaration" => return false,
             "call_expression" => {
                 let mut callee = n.child_by_field_name("function");
                 // `foo::<T>()`: the function without its arguments.
@@ -414,22 +412,41 @@ fn calls(src: &[u8], function: Node<'_>, body: Node<'_>) -> Vec<Vec<String>> {
             }
             _ => {}
         }
-        let mut cursor = n.walk();
-        let children: Vec<Node<'_>> = n.named_children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev());
-    }
+        true
+    });
     out
 }
 
 /// Adds every identifier a pattern binds to `names`.
 fn bind(src: &[u8], pattern: Node<'_>, names: &mut HashSet<String>) {
-    let mut stack = vec![pattern];
-    while let Some(n) = stack.pop() {
+    preorder(pattern, |n| {
         if n.kind() == "identifier" {
             names.insert(text(src, n));
         }
-        let mut cursor = n.walk();
-        stack.extend(n.named_children(&mut cursor));
+        true
+    });
+}
+
+/// Visits `root` and its descendants in source order (preorder) through a
+/// tree cursor, so no node's children are collected into a vector. `visit`
+/// returns whether to descend into the node it was given.
+fn preorder<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>) -> bool) {
+    let mut cursor = root.walk();
+    loop {
+        if visit(cursor.node()) && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.node().id() == root.id() {
+                return;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
     }
 }
 
@@ -524,10 +541,9 @@ fn trait_name(src: &[u8], tr: Node<'_>) -> String {
 /// `(&u8,Vec<T>)`.
 fn spelt(src: &[u8], node: Node<'_>) -> String {
     let mut out = String::new();
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
+    preorder(node, |n| {
         if n.kind().ends_with("comment") || n.kind() == "lifetime" {
-            continue;
+            return false;
         }
         if n.child_count() == 0 {
             let t = text(src, n);
@@ -536,12 +552,9 @@ fn spelt(src: &[u8], node: Node<'_>) -> String {
                 out.push(' ');
             }
             out.push_str(&t);
-        } else {
-            let mut cursor = n.walk();
-            let children: Vec<Node<'_>> = n.children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev());
         }
-    }
+        true
+    });
     out
 }
 
@@ -553,20 +566,18 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 /// `a bc` differ.
 fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
     let mut h = FNV_OFFSET;
-    let mut stack: Vec<Node<'_>> = roots.iter().rev().copied().collect();
-    while let Some(n) = stack.pop() {
-        if n.kind().ends_with("comment") || skip.iter().any(|s| s.id() == n.id()) {
-            continue;
-        }
-        if n.child_count() == 0 {
-            for b in src[n.byte_range()].iter().chain(std::iter::once(&0x1f)) {
-                h = (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME);
+    for root in roots {
+        preorder(*root, |n| {
+            if n.kind().ends_with("comment") || skip.iter().any(|s| s.id() == n.id()) {
+                return false;
             }
-        } else {
-            let mut cursor = n.walk();
-            let children: Vec<Node<'_>> = n.children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev());
-        }
+            if n.child_count() == 0 {
+                for b in src[n.byte_range()].iter().chain(std::iter::once(&0x1f)) {
+                    h = (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME);
+                }
+            }
+            true
+        });
     }
     h
 }
@@ -648,21 +659,17 @@ fn use_paths(src: &[u8], arg: Node<'_>) -> (Vec<UsePath>, bool) {
 /// tokens so comments inside it are ignored.
 fn segments(src: &[u8], node: Node<'_>) -> Vec<String> {
     let mut out = Vec::new();
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
+    preorder(node, |n| {
         if n.kind().ends_with("comment") || n.kind() == "type_arguments" {
-            continue;
+            return false;
         }
         if n.child_count() == 0 {
             let t = text(src, n);
             if t != "::" && !t.trim().is_empty() {
                 out.push(t);
             }
-        } else {
-            let mut cursor = n.walk();
-            let children: Vec<Node<'_>> = n.children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev());
         }
-    }
+        true
+    });
     out
 }
