@@ -46,10 +46,17 @@
 - **`parent`**: the node one level up, in the same system; `null` only at L1.
 - **`confidence`**: `exact`, `inferred` or `unknown` (§3.2).
 - **`visibility`** (optional): `public`, `restricted` or `private`, where the language defines it. For a Rust module, these are `pub`, `pub(crate)`/`pub(super)`/`pub(in ..)`, and no `pub`. It is omitted when unknown or not applicable, as for systems and directories.
+- **`code`** (optional, L3 and L4 only): where the node's code is, and fingerprints of it for the diff (DR 0008):
+  - `lines`: the first and last line in `source`, 1-based and inclusive, starting at the first outer attribute;
+  - `body_line` (optional): the line the body starts on, so lines before it are signature;
+  - `signature_hash`: a hash of the tokens outside the body, including attributes and, for a method, its `impl` header;
+  - `body_hash` (optional): a hash of the body's tokens. It is absent for items with no body, such as structs and required trait methods.
+
+  Both hashes ignore whitespace, comments and the item's own name, so a rename keeps them. `code` is absent for synthetic components (`(functions)`, `impl <Type>`) and for files no analyser reads.
 - **Edge `kind`**: `depends-on`, `calls`, `implements`, `extends`, `reads`, `writes` or `exposes`. There is at most one edge per `(from, to, kind)`.
 - **Edge `evidence`**: for a rolled-up edge, the `{from, to, kind}` keys of the edges exactly one level down that it stands for.
 - **Edge `dependency`** (optional): for `depends-on`, why the dependency exists: `normal`, `build`, or both. It is omitted when the analyser does not distinguish.
 
-Both optional fields can be absent in older documents, which still load.
+The optional fields can be absent in older documents, which still load.
 
 Loading JSON re-applies every rule that `Model::add_node` and `Model::add_edge` enforce, so a malformed or tampered model is rejected rather than loaded.

@@ -1,10 +1,13 @@
 nodes:
   L1:cargo:#  System  "k"  Exact  Cargo.toml
+  L2:cargo:#(bin main)  Module  "(bin main)"  Exact  src/main.rs  Public
+  L2:cargo:#(bin main)/a  Module  "(bin main)::a"  Exact  src/a.rs  Private
+  L2:cargo:#(bin main)/a/nested  Module  "(bin main)::a::nested"  Exact  src/a/nested.rs  Private
+  L2:cargo:#(bin main)/cli  Module  "(bin main)::cli"  Exact  src/cli.rs  Private
   L2:cargo:#a  Module  "a"  Exact  src/a.rs  Public
   L2:cargo:#a/nested  Module  "a::nested"  Exact  src/a/nested.rs  Private
   L2:cargo:#b  Module  "b"  Exact  src/b/mod.rs  Private
   L2:cargo:#b/c  Module  "b::c"  Exact  src/b/c.rs  Public
-  L2:cargo:#cli  Module  "cli"  Exact  src/cli.rs  Private
   L2:cargo:#generated  Module  "generated"  Exact  src/gen/out.rs  Restricted
   L2:cargo:#generated/sibling  Module  "generated::sibling"  Exact  src/gen/sibling.rs  Private
   L2:cargo:#gone  Module  "gone"  Inferred  src/lib.rs  Private

@@ -30,7 +30,7 @@
 //! Recursion is bounded by [`MAX_DEPTH`] and the work per crate by
 //! [`MAX_FILE_WALKS`], so hostile input cannot exhaust the stack or time.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use blueprint_model::{
     Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey, Visibility,
@@ -55,14 +55,18 @@ struct Ctx<'a> {
     /// Files on the current inclusion chain, to stop `#[path]` cycles.
     stack: Vec<Vec<String>>,
     walks: usize,
-    /// Every file walked: what the module tree reaches.
-    reached: BTreeSet<RepoPath>,
+    /// Every file walked (what the module tree reaches), with the module it
+    /// is. A file included twice keeps the first module.
+    reached: BTreeMap<RepoPath, Vec<String>>,
+    /// Whether to record each reached file's module (only L3–L4 needs it).
+    track_modules: bool,
     model: &'a mut Model,
     diags: &'a mut Vec<Diagnostic>,
 }
 
 /// Adds the module tree of the package `system` to `model`, and returns the
-/// files it reached; `None` if the package has no Rust crate root, so the
+/// files it reached, each with the module path it is (empty unless
+/// `track_modules`); `None` if the package has no Rust crate root, so the
 /// caller can fall back to directories.
 pub fn analyse_crate(
     system: &NodeId,
@@ -71,7 +75,8 @@ pub fn analyse_crate(
     read: Read<'_>,
     model: &mut Model,
     diags: &mut Vec<Diagnostic>,
-) -> Option<BTreeSet<RepoPath>> {
+    track_modules: bool,
+) -> Option<BTreeMap<RepoPath, Vec<String>>> {
     let roots = crate_roots(key, files, read);
     if roots.is_empty() {
         return None;
@@ -83,19 +88,41 @@ pub fn analyse_crate(
         read,
         stack: Vec::new(),
         walks: 0,
-        reached: BTreeSet::new(),
+        reached: BTreeMap::new(),
+        track_modules,
         model,
         diags,
     };
-    for root in roots {
+    for (root, module) in roots {
         let dir = root[..root.len() - 1].to_vec();
-        ctx.walk_file(&root, &dir, &[], 0);
+        let conf = ctx.walk_file(&root, &dir, &module, 0);
+        // A binary's namespace is an L2 module, holding its modules. The
+        // primary crate's own root is the system itself at L2; L3 adds a
+        // node for it when items need a parent.
+        if let Some(bin) = module.first() {
+            let bin = bin.clone();
+            ctx.add_root(&module, &bin, &root, conf);
+        }
     }
     Some(ctx.reached)
 }
 
-/// The package's crate root files that exist, lib first, without duplicates.
-fn crate_roots(key: &SystemKey, files: &BTreeSet<&RepoPath>, read: Read<'_>) -> Vec<Vec<String>> {
+/// The prefix of a binary's modules when the package has a primary crate
+/// (see [`crate_roots`]): `(bin name)`.
+pub fn bin_segment(name: &str) -> String {
+    format!("(bin {name})")
+}
+
+/// The package's crate root files that exist, without duplicates, each with
+/// the module path its modules sit under. The primary crate — the library,
+/// else `src/main.rs`, else the only root — is at the top (`[]`); every
+/// other binary gets its own `(bin <name>)` namespace, so binaries never
+/// share ids and adding one never renames another's items.
+fn crate_roots(
+    key: &SystemKey,
+    files: &BTreeSet<&RepoPath>,
+    read: Read<'_>,
+) -> Vec<(Vec<String>, Vec<String>)> {
     let dir = key.dir.segments();
     let mut manifest_path = dir.to_vec();
     manifest_path.push("Cargo.toml".into());
@@ -103,12 +130,13 @@ fn crate_roots(key: &SystemKey, files: &BTreeSet<&RepoPath>, read: Read<'_>) -> 
         .and_then(|b| String::from_utf8(b).ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or_default();
-    let mut rels: Vec<String> = Vec::new();
+    // (relative path, binary name; `None` for the library)
+    let mut rels: Vec<(String, Option<String>)> = Vec::new();
     let lib = manifest
         .get("lib")
         .and_then(|l| l.get("path"))
         .and_then(Value::as_str);
-    rels.push(lib.unwrap_or("src/lib.rs").to_owned());
+    rels.push((lib.unwrap_or("src/lib.rs").to_owned(), None));
     for bin in manifest
         .get("bin")
         .and_then(Value::as_array)
@@ -116,7 +144,12 @@ fn crate_roots(key: &SystemKey, files: &BTreeSet<&RepoPath>, read: Read<'_>) -> 
         .flatten()
     {
         if let Some(p) = bin.get("path").and_then(Value::as_str) {
-            rels.push(p.to_owned());
+            let name = bin
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| stem(p));
+            rels.push((p.to_owned(), Some(name)));
         }
     }
     let autobins = manifest
@@ -125,27 +158,57 @@ fn crate_roots(key: &SystemKey, files: &BTreeSet<&RepoPath>, read: Read<'_>) -> 
         .and_then(Value::as_bool)
         != Some(false);
     if autobins {
-        rels.push("src/main.rs".into());
+        rels.push(("src/main.rs".into(), Some("main".into())));
         let mut bin_dir = dir.to_vec();
         bin_dir.extend(["src".to_owned(), "bin".to_owned()]);
         for f in files.iter().filter(|f| f.segments().starts_with(&bin_dir)) {
             match &f.segments()[bin_dir.len()..] {
-                [file] if file.ends_with(".rs") => rels.push(format!("src/bin/{file}")),
-                [sub, main] if main == "main.rs" => rels.push(format!("src/bin/{sub}/main.rs")),
+                [file] if file.ends_with(".rs") => {
+                    rels.push((format!("src/bin/{file}"), Some(stem(file))));
+                }
+                [sub, main] if main == "main.rs" => {
+                    rels.push((format!("src/bin/{sub}/main.rs"), Some(sub.clone())));
+                }
                 _ => {}
             }
         }
     }
-    let mut out: Vec<Vec<String>> = Vec::new();
-    for rel in rels {
+    let mut found: Vec<(Vec<String>, Option<String>)> = Vec::new();
+    for (rel, name) in rels {
         if let Some(p) = normalise(dir, &rel)
             && files.contains(&repo_path(&p))
-            && !out.contains(&p)
+            && !found.iter().any(|(f, _)| *f == p)
         {
-            out.push(p);
+            found.push((p, name));
         }
     }
-    out
+    let primary = found
+        .iter()
+        .position(|(_, n)| n.is_none())
+        .or_else(|| {
+            found
+                .iter()
+                .position(|(f, _)| f.ends_with(&["src".into(), "main.rs".into()]))
+        })
+        .or_else(|| (found.len() == 1).then_some(0));
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(i, (file, name))| {
+            let module = if Some(i) == primary {
+                Vec::new()
+            } else {
+                vec![bin_segment(name.as_deref().unwrap_or("main"))]
+            };
+            (file, module)
+        })
+        .collect()
+}
+
+/// `src/bin/tool.rs` gives `tool`.
+fn stem(path: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.strip_suffix(".rs").unwrap_or(file).to_owned()
 }
 
 fn repo_path(segs: &[String]) -> RepoPath {
@@ -196,6 +259,7 @@ impl Ctx<'_> {
             parent: Some(self.system.clone()),
             confidence,
             visibility: Some(visibility),
+            code: None,
         };
         match self.model.add_node(node) {
             Ok(()) => true,
@@ -206,6 +270,36 @@ impl Ctx<'_> {
                 });
                 false
             }
+        }
+    }
+
+    /// Adds the L2 node of a crate root, unless another root added it.
+    fn add_root(
+        &mut self,
+        module: &[String],
+        name: &str,
+        source: &[String],
+        confidence: Confidence,
+    ) {
+        let id = self.id(module);
+        if self.model.node(&id).is_some() {
+            return;
+        }
+        let node = Node {
+            id,
+            kind: NodeKind::Module,
+            name: name.to_owned(),
+            source: repo_path(source),
+            parent: Some(self.system.clone()),
+            confidence,
+            visibility: Some(Visibility::Public),
+            code: None,
+        };
+        if let Err(e) = self.model.add_node(node) {
+            self.diags.push(Diagnostic {
+                path: repo_path(source),
+                message: e.to_string(),
+            });
         }
     }
 
@@ -239,7 +333,13 @@ impl Ctx<'_> {
         }
         self.walks += 1;
         let path = repo_path(file);
-        self.reached.insert(path.clone());
+        self.reached.entry(path.clone()).or_insert_with(|| {
+            if self.track_modules {
+                module.to_vec()
+            } else {
+                Vec::new()
+            }
+        });
         let Some(bytes) = (self.read)(&path) else {
             self.diag(file, "cannot be read");
             return Confidence::Unknown;
