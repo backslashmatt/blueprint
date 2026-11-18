@@ -36,7 +36,7 @@
 | `contained` | Only the body changed, and no edge from or to the node was added or removed. |
 | `changed` | Any other change: a private signature, a body change that added or removed an edge, or a change in confidence or source. |
 
-A node whose lines moved but whose signature and body did not change is not reported. Moves and renames are paired greedily in id order. A body edited as it moved is reported as `removed` plus `added`.
+A node whose lines moved but whose signature and body did not change is not reported. Moves and renames are paired greedily in id order. A body edited as it moved is reported as `removed` plus `added`. A node with no body, such as a struct or an enum, is paired by its whole definition instead: the same kind, name and signature in another parent is `moved`. Such a node cannot be told apart from a new one when renamed, so a renamed struct is `removed` plus `added`.
 
 ## Not yet
 
