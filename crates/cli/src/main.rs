@@ -5,12 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use blueprint_engine::git::{ObjectId, Repo};
-use blueprint_engine::index::{Index, Indexed};
+use blueprint_engine::commits;
 use blueprint_engine::l1::Diagnostic;
-use blueprint_engine::source::{Commit, Directory};
-use blueprint_lang_rust::Rust;
-use blueprint_model::lang::FileFacts;
+use blueprint_engine::source::Directory;
 use blueprint_model::{EdgeKind, Level, Model, RepoPath};
 
 /// Exit code for a command that ran but could not do its job.
@@ -346,17 +343,22 @@ fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
                 return ExitCode::from(EXIT_FAILURE);
             }
         },
-        // The index holds no L3–L4 model, so deeper levels are built, from
-        // the facts it holds where it has them.
-        Some(rev) if deep => match deep_model(path, rev, existing_index(path).as_ref()) {
-            Ok(built) => built,
-            Err(e) => {
-                eprintln!("bp: {}: {e}", path.display());
-                return ExitCode::from(EXIT_FAILURE);
+        // Deeper levels come from the stored L1–L4 model, or are built from
+        // the facts the index holds where it has them.
+        Some(rev) if deep => {
+            let (index, warnings) = commits::existing_index(path);
+            warn_index(&warnings);
+            match commits::l4_at(path, rev, index.as_ref()) {
+                Ok(built) => built,
+                Err(e) => {
+                    eprintln!("bp: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_FAILURE);
+                }
             }
-        },
-        Some(rev) => match at_rev(path, rev, false) {
+        }
+        Some(rev) => match commits::l2_at(path, rev, false) {
             Ok(r) => {
+                warn_index(&r.warnings);
                 let diags = r.indexed.diagnostics();
                 (r.indexed.model, diags)
             }
@@ -401,136 +403,31 @@ fn warn(diags: &[Diagnostic]) {
     }
 }
 
-/// The model of a commit, and where it came from.
-struct AtRev {
-    commit: ObjectId,
-    indexed: Indexed,
-    /// Whether it was read from the index rather than analysed.
-    from_index: bool,
-    /// Whether it was analysed and then written to the index.
-    stored: bool,
-}
-
-/// The model of `rev` in the repository at `path`: from the index if it holds
-/// the commit's tree, otherwise analysed, and then stored if `store` is set.
-/// An index that cannot be opened is a warning, not a failure, unless it has
-/// to be written.
-fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
-    let repo = Repo::open(path).map_err(|e| e.to_string())?;
-    let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
-    let tree = repo.tree_id(commit).map_err(|e| e.to_string())?;
-    let opened = if store {
-        Index::open(path).map(Some)
-    } else {
-        Index::open_existing(path)
-    };
-    let index = match opened {
-        Ok(index) => {
-            for d in index.iter().flat_map(Index::dropped) {
-                eprintln!("warning: index segment dropped and will be rebuilt: {d}");
-            }
-            index
-        }
-        Err(e) if store => return Err(format!("cannot open the index: {e}")),
-        Err(e) => {
-            eprintln!("warning: cannot open the index, analysing instead: {e}");
-            None
-        }
-    };
-    if let Some(indexed) = index.as_ref().and_then(|i| i.get(tree)) {
-        return Ok(AtRev {
-            commit,
-            indexed,
-            from_index: true,
-            stored: false,
-        });
-    }
-    let commit_id = commit.to_string();
-    let (source, mut diags) = Commit::open(path, &commit_id).map_err(|e| e.to_string())?;
-    let (model, more) = blueprint_engine::analyse(&source.paths(), &|p| source.read(p));
-    diags.extend(more);
-    // A model built without some of its files describes less than the commit,
-    // so it is reported and never stored under the commit's tree.
-    let missing = unreadable(&source);
-    let complete = missing.is_empty();
-    diags.extend(missing);
-    diags.sort();
-    let indexed = Indexed::new(model, &diags);
-    let mut stored = false;
-    if store
-        && complete
-        && let Some(mut index) = index
-    {
-        stored = index
-            .put(tree, &indexed)
-            .map_err(|e| format!("cannot write the index: {e}"))?;
-    }
-    Ok(AtRev {
-        commit,
-        indexed,
-        from_index: false,
-        stored,
-    })
-}
-
 /// `bp diff`: builds the L1–L4 model of both commits, with stored facts
 /// where the index has them, and prints the architectural diff.
 fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
-    let index = existing_index(path);
-    // Both models at once: decoding stored ones is most of the time.
-    // The files that differ are listed on a third thread, for weights.
-    let (built, changed): (Vec<Built>, _) = std::thread::scope(|s| {
-        let index = index.as_ref();
-        let changed = s.spawn(move || changed_files(path, base, head));
-        let jobs: Vec<_> = [base, head]
-            .into_iter()
-            .map(|rev| s.spawn(move || deep_model(path, rev, index)))
-            .collect();
-        let built = jobs
-            .into_iter()
-            .map(|j| j.join().unwrap_or_else(|_| Err("analysis failed".into())))
-            .collect();
-        let changed = changed
-            .join()
-            .unwrap_or_else(|_| Err("listing changed files failed".into()));
-        (built, changed)
-    });
-    let mut models = Vec::new();
-    for b in built {
-        match b {
-            Ok((model, diags)) => {
-                warn(&diags);
-                models.push(model);
-            }
-            Err(e) => {
-                eprintln!("bp: {}: {e}", path.display());
-                return ExitCode::from(EXIT_FAILURE);
-            }
+    let (index, warnings) = commits::existing_index(path);
+    warn_index(&warnings);
+    let d = match commits::diff_commits(path, base, head, index.as_ref()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("bp: {}: {e}", path.display());
+            return ExitCode::from(EXIT_FAILURE);
         }
-    }
-    let mut d = blueprint_engine::diff::diff(&models[0], &models[1]);
-    match changed {
-        Ok(files) => {
-            let files: Vec<blueprint_engine::diff::ChangedFile<'_>> = files
-                .iter()
-                .map(|(p, b, h)| blueprint_engine::diff::ChangedFile {
-                    path: p,
-                    base: b.as_deref(),
-                    head: h.as_deref(),
-                })
-                .collect();
-            blueprint_engine::diff::weigh(&mut d, &models[0], &models[1], &files);
-        }
-        Err(e) => eprintln!("warning: change weight not computed: {e}"),
+    };
+    warn(&d.base.1);
+    warn(&d.head.1);
+    if let Some(e) = &d.weight_error {
+        eprintln!("warning: change weight not computed: {e}");
     }
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let written = if json {
-        serde_json::to_writer_pretty(&mut out, &d)
+        serde_json::to_writer_pretty(&mut out, &d.diff)
             .map_err(std::io::Error::from)
             .and_then(|()| out.write_all(b"\n"))
     } else {
-        out.write_all(diff_text(&d).as_bytes())
+        out.write_all(diff_text(&d.diff).as_bytes())
     };
     if let Err(e) = written.and_then(|()| out.flush()) {
         eprintln!("bp: cannot write the diff: {e}");
@@ -538,37 +435,15 @@ fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
     }
     // The models are large, and the process ends here: freeing them would
     // take longer than the diff (DR 0009).
-    std::mem::forget(models);
+    std::mem::forget(d);
     std::mem::forget(index);
     ExitCode::SUCCESS
 }
 
-/// A model and its diagnostics, or why it could not be had.
-type Built = Result<(Model, Vec<Diagnostic>), String>;
-
-/// Each file whose blob differs between `base` and `head`, with its bytes
-/// in each (`None` where it does not exist).
-type Changed = Vec<(RepoPath, Option<Vec<u8>>, Option<Vec<u8>>)>;
-
-fn changed_files(path: &Path, base: &str, head: &str) -> Result<Changed, String> {
-    let repo = Repo::open(path).map_err(|e| e.to_string())?;
-    let (b, h) = (
-        repo.resolve(base).map_err(|e| e.to_string())?,
-        repo.resolve(head).map_err(|e| e.to_string())?,
-    );
-    let read = |id: Option<ObjectId>| id.and_then(|id| repo.blob(id).ok());
-    let mut out = Vec::new();
-    for (p, bid, hid) in repo.changed_blobs(b, h).map_err(|e| e.to_string())? {
-        // Paths that are not valid repository paths are not in either model.
-        let Some(p) = std::str::from_utf8(&p)
-            .ok()
-            .and_then(|p| RepoPath::parse(p).ok())
-        else {
-            continue;
-        };
-        out.push((p, read(bid), read(hid)));
+fn warn_index(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("warning: {w}");
     }
-    Ok(out)
 }
 
 /// The text form of a diff: one tab-separated line per finding, node change
@@ -630,186 +505,49 @@ fn diff_text(d: &blueprint_engine::diff::Diff) -> String {
     s
 }
 
-/// The index of the repository at `path`, if there is one, for reading.
-/// Problems are warnings: the caller analyses instead.
-fn existing_index(path: &Path) -> Option<Index> {
-    match Index::open_existing(path) {
-        Ok(index) => {
-            for d in index.iter().flat_map(Index::dropped) {
-                eprintln!("warning: index segment dropped and will be rebuilt: {d}");
-            }
-            index
-        }
-        Err(e) => {
-            eprintln!("warning: cannot open the index, analysing instead: {e}");
-            None
-        }
-    }
-}
-
-/// The L1–L4 model of `rev` and its diagnostics: the one stored in `index`
-/// for the commit's tree if there is one (DR 0009), otherwise built, with
-/// each Rust file's facts from the index where it has them.
-fn deep_model(
-    path: &Path,
-    rev: &str,
-    index: Option<&Index>,
-) -> Result<(Model, Vec<Diagnostic>), String> {
-    let repo = Repo::open(path).map_err(|e| e.to_string())?;
-    let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
-    let tree = repo.tree_id(commit).map_err(|e| e.to_string())?;
-    if let Some(stored) = index.and_then(|i| i.get_l4(tree)) {
-        return Ok(stored);
-    }
-    let (source, mut diags) = Commit::open(path, &commit.to_string()).map_err(|e| e.to_string())?;
-    let deep = deep_at(&source, index);
-    diags.extend(deep.diags);
-    diags.extend(unreadable(&source));
-    diags.sort();
-    Ok((deep.model, diags))
-}
-
-/// What [`deep_at`] built.
-struct Deep {
-    model: Model,
-    diags: Vec<Diagnostic>,
-    /// The facts of every file that had to be parsed, by blob.
-    parsed: Vec<(ObjectId, FileFacts)>,
-    /// How many files' facts came from the index.
-    reused: usize,
-}
-
-/// The L1–L4 model of `source`, with each Rust file's facts taken from
-/// `index` when it has them for the file's blob.
-fn deep_at(source: &Commit, index: Option<&Index>) -> Deep {
-    let blobs = source.blob_ids();
-    let blob = |p: &RepoPath| {
-        blobs
-            .binary_search_by(|(q, _)| q.cmp(p))
-            .ok()
-            .map(|i| blobs[i].1)
-    };
-    let reused = std::sync::atomic::AtomicUsize::new(0);
-    let cached = |p: &RepoPath| {
-        let facts = index?.get_facts(&Rust, blob(p)?)?;
-        reused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(facts)
-    };
-    let mut parsed = Vec::new();
-    let (model, diags) = blueprint_engine::analyse_deep_cached(
-        &source.paths(),
-        &|p| source.read(p),
-        &cached,
-        &mut |p, facts| {
-            if let Some(b) = blob(p) {
-                parsed.push((b, facts.clone()));
-            }
-        },
-    );
-    Deep {
-        model,
-        diags,
-        parsed,
-        reused: reused.into_inner(),
-    }
-}
-
-/// A warning for each file of `source` whose object could not be read.
-fn unreadable(source: &Commit) -> Vec<Diagnostic> {
-    source
-        .unreadable()
-        .into_iter()
-        .map(|path| Diagnostic {
-            path,
-            message: "the file's object could not be read (a partial clone?)".into(),
-        })
-        .collect()
-}
-
 fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
-    match at_rev(path, rev, true) {
-        // Facts are stored only for a commit whose L1–L2 model could be.
-        Ok(r) if deep && (r.from_index || r.stored) => {
-            match index_facts(path, &r.commit.to_string()) {
-                Ok((parsed, reused)) => {
-                    println!(
-                        "{} indexed to level 4 ({} nodes at L1–L2; {parsed} files parsed, {reused} reused)",
-                        r.commit,
-                        r.indexed.model.nodes().count()
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("bp: {}: {e}", path.display());
-                    ExitCode::from(EXIT_FAILURE)
-                }
-            }
-        }
-        Ok(r) => {
-            let nodes = r.indexed.model.nodes().count();
-            if r.from_index {
-                println!("{} already indexed ({nodes} nodes)", r.commit);
-                return ExitCode::SUCCESS;
-            }
-            warn(&r.indexed.diagnostics());
-            if r.stored {
-                println!("{} indexed ({nodes} nodes)", r.commit);
-                ExitCode::SUCCESS
-            } else {
-                eprintln!(
-                    "bp: {}: {} analysed but not indexed: some files could not be read, or its object ids are not SHA-1",
-                    path.display(),
-                    r.commit
-                );
-                ExitCode::from(EXIT_FAILURE)
-            }
-        }
+    let r = match commits::l2_at(path, rev, true) {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("bp: {}: {e}", path.display());
-            ExitCode::from(EXIT_FAILURE)
+            return ExitCode::from(EXIT_FAILURE);
         }
+    };
+    warn_index(&r.warnings);
+    let nodes = r.indexed.model.nodes().count();
+    // Facts are stored only for a commit whose L1–L2 model could be.
+    if deep && (r.from_index || r.stored) {
+        return match commits::index_l4(path, &r.commit.to_string()) {
+            Ok(done) => {
+                warn(&done.diags);
+                println!(
+                    "{} indexed to level 4 ({nodes} nodes at L1–L2; {} files parsed, {} reused)",
+                    r.commit, done.parsed, done.reused
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("bp: {}: {e}", path.display());
+                ExitCode::from(EXIT_FAILURE)
+            }
+        };
     }
-}
-
-/// Builds the L1–L4 model of `rev`, reusing the facts the index holds, and
-/// stores the facts of every file it had to parse. Returns how many files
-/// were parsed and how many reused.
-///
-/// # Errors
-/// If the commit or the index cannot be opened, a file cannot be read, or
-/// nothing that was parsed could be stored (object ids that are not SHA-1).
-fn index_facts(path: &Path, rev: &str) -> Result<(usize, usize), String> {
-    let (source, mut diags) = Commit::open(path, rev).map_err(|e| e.to_string())?;
-    let mut index = Index::open(path)?;
-    let deep = deep_at(&source, Some(&index));
-    // Every level's diagnostics: the L1–L2 ones were not printed on the way.
-    warn(&deep.diags);
-    diags.extend(deep.diags.iter().cloned());
-    diags.sort();
-    if !source.unreadable().is_empty() {
-        return Err(format!(
-            "{rev}: some files could not be read, so not every file's facts are stored"
-        ));
+    if r.from_index {
+        println!("{} already indexed ({nodes} nodes)", r.commit);
+        return ExitCode::SUCCESS;
     }
-    let stored = index.put_facts(&Rust, deep.parsed.iter().map(|(b, f)| (*b, f)))?;
-    if stored == 0 && !deep.parsed.is_empty() {
-        return Err(format!(
-            "{rev}: facts not stored: its object ids are not SHA-1"
-        ));
+    warn(&r.indexed.diagnostics());
+    if r.stored {
+        println!("{} indexed ({nodes} nodes)", r.commit);
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "bp: {}: {} analysed but not indexed: some files could not be read, or its object ids are not SHA-1",
+            path.display(),
+            r.commit
+        );
+        ExitCode::from(EXIT_FAILURE)
     }
-    // The whole model too, so that it can be reopened without building it
-    // (DR 0009).
-    let repo = Repo::open(path).map_err(|e| e.to_string())?;
-    let tree = repo
-        .resolve(rev)
-        .and_then(|c| repo.tree_id(c))
-        .map_err(|e| e.to_string())?;
-    if index.get_l4(tree).is_none() && !index.put_l4(tree, &deep.model, &diags)? {
-        return Err(format!(
-            "{rev}: model not stored: its object ids are not SHA-1"
-        ));
-    }
-    Ok((deep.parsed.len(), deep.reused))
 }
 
 #[cfg(test)]

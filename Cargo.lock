@@ -76,7 +76,6 @@ name = "blueprint-cli"
 version = "0.1.0"
 dependencies = [
  "blueprint-engine",
- "blueprint-lang-rust",
  "blueprint-model",
  "blueprint-protocol",
  "gix",
