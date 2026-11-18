@@ -109,7 +109,7 @@ pub enum Detail {
 pub struct Ref {
     /// The full name, such as `refs/heads/main`.
     pub name: String,
-    /// `branch`, `remote-branch` or `tag`.
+    /// `branch`, `remote-branch`, `tag` or `pull-request`.
     pub kind: RefKind,
     /// The commit it leads to, as hex.
     pub commit: String,
@@ -125,6 +125,8 @@ pub enum RefKind {
     RemoteBranch,
     /// A tag.
     Tag,
+    /// A pull request's ref, `refs/pull/…`.
+    PullRequest,
 }
 
 /// A commit, as a review list shows it.

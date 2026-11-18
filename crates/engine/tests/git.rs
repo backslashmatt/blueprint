@@ -144,6 +144,8 @@ fn lists_refs_that_lead_to_commits() -> R<()> {
         f.dir.join("refs/remotes/origin/main"),
         format!("{}\n", f.first),
     )?;
+    std::fs::create_dir_all(f.dir.join("refs/pull/7"))?;
+    std::fs::write(f.dir.join("refs/pull/7/head"), format!("{}\n", f.second))?;
     std::fs::write(
         f.dir.join("refs/remotes/origin/HEAD"),
         "ref: refs/remotes/origin/main\n",
@@ -157,6 +159,7 @@ fn lists_refs_that_lead_to_commits() -> R<()> {
         got,
         vec![
             ("refs/heads/main", RefKind::Branch, f.second),
+            ("refs/pull/7/head", RefKind::PullRequest, f.second),
             ("refs/remotes/origin/main", RefKind::RemoteBranch, f.first),
             ("refs/tags/v1", RefKind::Tag, f.first),
         ]

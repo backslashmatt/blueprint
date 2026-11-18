@@ -354,8 +354,9 @@ impl Repo {
         self.resolve("HEAD").ok()
     }
 
-    /// Every branch (local and remote) and tag that leads to a commit, sorted
-    /// by name. Symbolic refs such as `refs/remotes/origin/HEAD`, and tags of
+    /// Every branch (local and remote), tag and pull request ref
+    /// (`refs/pull/…`, where a forge's refs were fetched) that leads to a
+    /// commit, sorted by name. Symbolic refs such as `refs/remotes/origin/HEAD`, and tags of
     /// trees or blobs, are left out.
     pub fn refs(&self) -> Result<Vec<RefInfo>, GitError> {
         let platform = self.inner.references().map_err(read_err)?;
@@ -372,6 +373,8 @@ impl Repo {
                 RefKind::RemoteBranch
             } else if name.starts_with("refs/tags/") {
                 RefKind::Tag
+            } else if name.starts_with("refs/pull/") {
+                RefKind::PullRequest
             } else {
                 continue;
             };
@@ -438,6 +441,8 @@ pub enum RefKind {
     RemoteBranch,
     /// A tag, `refs/tags/…`.
     Tag,
+    /// A pull request's ref, `refs/pull/…`, as GitHub names them.
+    PullRequest,
 }
 
 /// A branch or tag and the commit it leads to.
