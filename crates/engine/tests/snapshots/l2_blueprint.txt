@@ -9,6 +9,7 @@ nodes:
   L1:cargo:crates/store#  System  "blueprint-store"  Exact  crates/store/Cargo.toml
   L1:cargo:crates/store/fuzz#  System  "blueprint-store-fuzz"  Exact  crates/store/fuzz/Cargo.toml
   L1:cargo:crates/ui#  System  "blueprint-ui"  Exact  crates/ui/Cargo.toml
+  L1:cargo:spikes/gpui#  System  "gpui-spike"  Exact  spikes/gpui/Cargo.toml
   L1:cargo:xtask#  System  "xtask"  Exact  xtask/Cargo.toml
   L1:unowned:#  Unowned  "(unowned)"  Unknown  
   L2:cargo:bench#(bin bp-bench)  Module  "(bin bp-bench)"  Exact  bench/src/bin/bp-bench.rs  Public
