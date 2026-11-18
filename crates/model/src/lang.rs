@@ -65,6 +65,11 @@ pub struct Item {
     /// (a struct, a required trait method), so that the diff never pairs two
     /// bodiless items as a move or rename.
     pub body_hash: Option<u64>,
+    /// The paths a function's body calls, in source order, without
+    /// repeats: `foo()`, `a::b::foo()`, `Type::new()`. Method calls
+    /// (`x.foo()`) are not included: they need types to resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<Vec<String>>,
 }
 
 /// The kind of an [`Item`].

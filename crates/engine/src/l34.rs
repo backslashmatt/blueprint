@@ -80,17 +80,21 @@ pub fn analyse(
             }
         }
     }
-    for (path, place, module, facts) in &parsed {
-        for item in &facts.items {
-            if !matches!(item.kind, ItemKind::Type { .. }) {
-                b.add_function(path, &place.system, module, item, facts);
+    // The L4 id each function got, by (file, item) index, for calls.
+    let mut functions: HashMap<(usize, usize), NodeId> = HashMap::new();
+    for (f, (path, place, module, facts)) in parsed.iter().enumerate() {
+        for (i, item) in facts.items.iter().enumerate() {
+            if !matches!(item.kind, ItemKind::Type { .. })
+                && let Some(id) = b.add_function(path, &place.system, module, item, facts)
+            {
+                functions.insert((f, i), id);
             }
         }
     }
     for (path, place) in plain {
         b.add_file(path, place);
     }
-    edges::add(&mut b, &parsed, read);
+    edges::add(&mut b, &parsed, &functions, read);
     b.diags.sort();
     b.diags
 }
@@ -223,7 +227,7 @@ impl Builder<'_> {
         file_module: &[String],
         item: &Item,
         facts: &FileFacts,
-    ) {
+    ) -> Option<NodeId> {
         let module = [file_module, item.module.as_slice()].concat();
         let (module_id, conf) = self.module(system, &module, path);
         let (parent, segment, conf) = match &item.kind {
@@ -262,7 +266,7 @@ impl Builder<'_> {
             confidence: item_confidence(conf, facts),
             visibility: item.visibility,
             code: Some(code(item)),
-        });
+        })
     }
 
     /// The L3 node of the type `name` declared directly in `module`.

@@ -50,4 +50,5 @@ nodes:
 edges:
   L2:cargo:core#util -> L2:cargo:core#graph  DependsOn  Exact  {}
   L3:cargo:core#graph/Graph -> L3:cargo:core#graph/Walk  Implements  Exact  {}
+  L4:cargo:core#graph/Graph/<Default>%3A%3Adefault -> L4:cargo:core#graph/Graph/new  Calls  Inferred  {}
 diagnostics:
