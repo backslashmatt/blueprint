@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod graph;
+pub mod lang;
 pub use graph::{
     DepKind, Ecosystem, Edge, EdgeKey, EdgeKind, InvalidPath, Model, ModelError, Node, NodeId,
     NodeKind, RepoPath, SystemKey, Visibility,

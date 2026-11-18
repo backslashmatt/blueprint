@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/model",
     "crates/engine",
+    "crates/lang-rust",
     "crates/store",
     "crates/protocol",
     "crates/cli",
@@ -24,6 +25,7 @@ publish = false
 [workspace.dependencies]
 blueprint-model = { path = "crates/model" }
 blueprint-engine = { path = "crates/engine" }
+blueprint-lang-rust = { path = "crates/lang-rust" }
 blueprint-store = { path = "crates/store" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
