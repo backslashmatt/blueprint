@@ -42,9 +42,16 @@ impl Row {
                 };
                 format!("{short}  ({kind})")
             }
-            Row::Commit(c) => format!("{}  {}", &c.id[..c.id.len().min(10)], c.summary),
+            Row::Commit(c) => format!("{}  {}", short(&c.id), c.summary),
         }
     }
+}
+
+/// The first ten characters of `id`: enough of a commit id to tell it
+/// apart. Safe on any string.
+#[must_use]
+pub fn short(id: &str) -> &str {
+    id.char_indices().nth(10).map_or(id, |(i, _)| &id[..i])
 }
 
 /// Something the reviewer does in the list. Each has a key (see
@@ -55,6 +62,10 @@ pub enum Action {
     Up,
     /// Move the cursor down one row.
     Down,
+    /// Move the cursor to the first row.
+    First,
+    /// Move the cursor to the last row.
+    Last,
     /// Make the row under the cursor the base.
     PickBase,
     /// Make the row under the cursor the head.
@@ -69,6 +80,8 @@ pub enum Action {
 pub const ACTIONS: &[(Action, &str, &str)] = &[
     (Action::Up, "Review list: previous row", "up"),
     (Action::Down, "Review list: next row", "down"),
+    (Action::First, "Review list: first row", "home"),
+    (Action::Last, "Review list: last row", "end"),
     (Action::PickBase, "Review list: use as base", "b"),
     (Action::PickHead, "Review list: use as head", "h"),
     (Action::Swap, "Review list: swap base and head", "s"),
@@ -166,6 +179,8 @@ impl ReviewList {
                     self.cursor += 1;
                 }
             }
+            Action::First => self.cursor = 0,
+            Action::Last => self.cursor = self.rows.len().saturating_sub(1),
             Action::PickBase => {
                 if selected.is_some() {
                     self.base = selected;
@@ -257,6 +272,21 @@ mod tests {
         assert_eq!(l.base, None);
         assert_eq!(l.apply(Action::Open), Effect::None);
         assert!(ReviewList::from_response(&Response::Superseded).is_none());
+    }
+
+    #[test]
+    fn home_and_end_reach_both_ends_and_ids_of_any_text_are_shortened() {
+        let mut l = ReviewList::from_response(&refs()).unwrap_or_default();
+        l.apply(Action::Last);
+        assert_eq!(l.cursor, 3);
+        l.apply(Action::PickBase);
+        l.apply(Action::First);
+        l.apply(Action::PickHead);
+        assert_eq!(l.base.as_deref(), Some("c1"));
+        assert_eq!(l.head.as_deref(), Some("c3"));
+        assert_eq!(short("aaaaaaaaaé"), "aaaaaaaaaé");
+        assert_eq!(short("ééééééééééé"), "éééééééééé");
+        assert_eq!(short("ab"), "ab");
     }
 
     #[test]

@@ -79,13 +79,17 @@ jobs:
       - name: app review by keyboard
         shell: bash
         run: |
-          keys=down,b,up,h,enter
+          # Base: the last row (the oldest commit listed); head: the first (a ref at HEAD).
+          keys=end,b,home,h,enter
           if [ "$RUNNER_OS" = Linux ]; then
             timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script $keys --review-report review.json
           else
             timeout 300 target/debug/blueprint . --script $keys --review-report review.json
           fi
           cat review.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
+            echo "the keys chose the same commit as base and head"; exit 1
+          fi
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
@@ -123,5 +127,8 @@ jobs:
           cat cold-start.json
       - name: app review by keyboard
         run: |
-          timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script down,b,up,h,enter --review-report review.json
+          timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script end,b,home,h,enter --review-report review.json
           cat review.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
+            echo "the keys chose the same commit as base and head"; exit 1
+          fi

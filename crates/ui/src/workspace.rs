@@ -8,11 +8,11 @@ use std::rc::Rc;
 use blueprint_protocol::{Detail, Reply, Request, RequestId, Response};
 use gpui::{
     Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
-    Styled, Window, div, rgb,
+    ScrollStrategy, Styled, UniformListScrollHandle, Window, div, px, rgb, uniform_list,
 };
 
 use crate::Theme;
-use crate::review_list::{Effect, ReviewList, action_for_key};
+use crate::review_list::{Effect, ReviewList, action_for_key, short};
 
 /// Sends one request to the engine.
 pub type Send = Rc<dyn Fn(RequestId, Request)>;
@@ -57,6 +57,7 @@ pub struct Workspace {
     /// Keys to apply once the list arrives (`--script`), for app tests.
     script: Vec<String>,
     focus: FocusHandle,
+    scroll: UniformListScrollHandle,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -78,6 +79,7 @@ impl Workspace {
             waiting: None,
             script,
             focus: cx.focus_handle(),
+            scroll: UniformListScrollHandle::new(),
         };
         w.request(Request::Open { path: path.into() });
         let refs = w.request(Request::Refs { limit: 200 });
@@ -137,7 +139,13 @@ impl Workspace {
                 let Some(action) = action_for_key(key) else {
                     return;
                 };
-                if let Effect::Review { base, head } = list.apply(action) {
+                let before = list.cursor;
+                let effect = list.apply(action);
+                if list.cursor != before {
+                    self.scroll
+                        .scroll_to_item(list.cursor, ScrollStrategy::Nearest);
+                }
+                if let Effect::Review { base, head } = effect {
                     self.list = Some(list.clone());
                     let id = self.request(Request::Diff {
                         base: base.clone(),
@@ -153,7 +161,7 @@ impl Workspace {
                     });
                 }
             }
-            Screen::Review(_) if key == "escape" => {
+            Screen::Review(_) | Screen::Failed(_) if key == "escape" => {
                 if let Some(list) = self.list.take() {
                     self.waiting = None;
                     self.screen = Screen::List(list);
@@ -162,10 +170,6 @@ impl Workspace {
             _ => {}
         }
     }
-}
-
-fn short(id: &str) -> &str {
-    &id[..id.len().min(10)]
 }
 
 impl Render for Workspace {
@@ -187,27 +191,52 @@ impl Render for Workspace {
             .text_color(rgb(theme.text));
         match &self.screen {
             Screen::Opening => root.child("Opening the repository…"),
-            Screen::Failed(e) => root.child(format!("Cannot open: {e}")),
+            Screen::Failed(e) => root
+                .child(format!("The engine could not answer: {e}"))
+                .child(
+                    div()
+                        .text_color(rgb(theme.muted))
+                        .child(if self.list.is_some() {
+                            "Esc: back to the list"
+                        } else {
+                            ""
+                        }),
+                ),
             Screen::List(list) => {
                 let header = format!(
-                    "On {}. ↑↓ move, b base, h head, s swap, Enter review.",
+                    "On {}. ↑↓ Home End move, b base, h head, s swap, Enter review.",
                     list.current.as_deref().unwrap_or("a detached HEAD")
                 );
-                let mut root = root.child(div().text_color(rgb(theme.muted)).child(header));
-                for (i, row) in list.rows.iter().enumerate() {
-                    let mark = match (
-                        list.base.as_deref() == Some(row.commit()),
-                        list.head.as_deref() == Some(row.commit()),
-                    ) {
-                        (true, true) => "base+head",
-                        (true, false) => "base",
-                        (false, true) => "head",
-                        (false, false) => "",
-                    };
-                    let cursor = if i == list.cursor { "›" } else { " " };
-                    root = root.child(format!("{cursor} {:<9} {}", mark, row.label()));
-                }
-                root
+                let lines: Vec<String> = list
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        let mark = match (
+                            list.base.as_deref() == Some(row.commit()),
+                            list.head.as_deref() == Some(row.commit()),
+                        ) {
+                            (true, true) => "base+head",
+                            (true, false) => "base",
+                            (false, true) => "head",
+                            (false, false) => "",
+                        };
+                        let cursor = if i == list.cursor { "›" } else { " " };
+                        format!("{cursor} {mark:<9} {}", row.label())
+                    })
+                    .collect();
+                // Only the rows in view are built; the cursor's row is
+                // scrolled into view as it moves.
+                root.child(div().text_color(rgb(theme.muted)).child(header))
+                    .child(
+                        uniform_list("review-list", lines.len(), move |range, _, _| {
+                            range
+                                .map(|i| div().h(px(22.0)).child(lines[i].clone()))
+                                .collect()
+                        })
+                        .track_scroll(&self.scroll)
+                        .flex_1(),
+                    )
             }
             Screen::Review(r) => {
                 let state = match r.detail {

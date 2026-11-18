@@ -163,9 +163,9 @@ pub enum Response {
         commits: Vec<CommitSummary>,
         /// The branch `HEAD` is on (`refs/heads/…`); `None` when detached.
         current: Option<String>,
-        /// The review to start from, `(base, head)` commit ids:
-        /// `HEAD` against its merge base with the default branch, or
-        /// against its parent when it is on the default branch.
+        /// The review to start from, `(base, head)` commit ids: `HEAD`
+        /// against its merge base with the default branch, or against its
+        /// first parent when that merge base is `HEAD` itself.
         suggested: Option<(String, String)>,
     },
     /// A commit's model, at `detail`.

@@ -10,19 +10,20 @@ The list shows the repository's branches, remote branches, tags and pull request
 
 The base and head start at the suggested review:
 
-- `HEAD` against its merge base with the default branch, which is where `origin/HEAD` points, else `main` or `master`;
-- or, when `HEAD` is on the default branch, `HEAD` against its parent.
+- `HEAD` against its merge base with the default branch, which is where `origin/HEAD` points, else `main`, `master`, `origin/main` or `origin/master`, the first that exists. On a local `main` that is ahead of `origin/main`, that is what `main` adds;
+- or, when that merge base is `HEAD` itself (or there is no default branch), `HEAD` against its first parent.
 
 Everything is done from the keyboard:
 
 | Key | Action |
 |---|---|
 | ↑ ↓ | Move between rows |
+| Home End | First or last row |
 | `b` | Use the row as the base |
 | `h` | Use the row as the head |
 | `s` | Swap base and head |
 | Enter | Review base against head |
-| Esc | Back to the list, from a review |
+| Esc | Back to the list, from a review or a failed one |
 
 A review first shows the systems and modules (L1–L2), then the full diff once the code levels are ready. For now it shows the number of findings and changed nodes; the map view (#92) replaces this.
 
@@ -34,4 +35,4 @@ A review first shows the systems and modules (L1–L2), then the full diff once 
 | `--script <keys>` | Presses comma-separated keys (GPUI key names such as `down`, `b`, `enter`) in the review list once it has loaded. |
 | `--review-report <file>` | Once the review's full diff has arrived, writes `{"base", "head", "findings", "changed"}` and quits. |
 
-CI runs `blueprint . --script down,b,up,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses two commits by keyboard and waits for the full review.
+CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the full review, and fails if base and head are the same commit.

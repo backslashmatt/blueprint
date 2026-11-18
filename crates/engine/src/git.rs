@@ -439,8 +439,9 @@ impl Repo {
     }
 
     /// The pair a review starts from: `HEAD` against its merge base with
-    /// the default branch, or, when `HEAD` is on the default branch (or
-    /// there is none), `HEAD` against its first parent. `(base, head)`.
+    /// the [default branch](Self::default_branch), or, when that merge base
+    /// is `HEAD` itself (or there is no default branch), `HEAD` against its
+    /// first parent. `(base, head)`.
     pub fn suggested_review(&self) -> Option<(ObjectId, ObjectId)> {
         let head = self.head()?;
         let base = self
