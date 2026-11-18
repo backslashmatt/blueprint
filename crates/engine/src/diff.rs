@@ -5,6 +5,8 @@
 //! - Nodes are compared by id. A removed and an added node left unmatched
 //!   are paired when they have the same kind and the same body hash: a
 //!   **move** if their parents differ, a **rename** if only the name does.
+//!   A node with no body (a struct, an enum) pairs by its whole definition
+//!   instead, kind, name and signature, which can only be a move.
 //! - A node in both models is **surface**-changed when it is visible outside
 //!   its parent (`pub` or restricted) and its signature or visibility
 //!   changed; **contained** when only its body changed and no edge from or
@@ -210,23 +212,38 @@ fn changed(b: &Node, h: &Node, touched: bool) -> Option<NodeChange> {
     Some(NodeChange::Changed { id })
 }
 
-/// Pairs removed and added nodes with the same kind and body hash as moves
-/// and renames; the rest stay removed and added. Pairing is greedy in id
-/// order, so it is deterministic.
+/// Pairs removed and added nodes as moves and renames; the rest stay
+/// removed and added. Pairing is greedy in id order, so it is deterministic.
+///
+/// - A node with a body pairs with one of the same kind and body hash.
+/// - A node without one (a struct, an enum, a unit type) pairs with one of
+///   the same kind, name and signature hash: its whole definition. That can
+///   only be a move, since a different name is a different signature.
 fn pair(removed: &[&Node], added: &[&Node]) -> Vec<NodeChange> {
-    type Key = (blueprint_model::NodeKind, u64);
-    let body = |n: &Node| -> Option<Key> { Some((n.kind, n.code.as_ref()?.body_hash?)) };
-    let mut by_body: BTreeMap<Key, Vec<&Node>> = BTreeMap::new();
+    use blueprint_model::NodeKind;
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Key<'a> {
+        Body(NodeKind, u64),
+        Whole(NodeKind, &'a str, u64),
+    }
+    fn key_of(n: &Node) -> Option<Key<'_>> {
+        let code = n.code.as_ref()?;
+        Some(match code.body_hash {
+            Some(b) => Key::Body(n.kind, b),
+            None => Key::Whole(n.kind, n.name.as_str(), code.signature_hash),
+        })
+    }
+    let mut by_key: BTreeMap<Key<'_>, Vec<&Node>> = BTreeMap::new();
     for a in added {
-        if let Some(k) = body(a) {
-            by_body.entry(k).or_default().push(a);
+        if let Some(k) = key_of(a) {
+            by_key.entry(k).or_default().push(a);
         }
     }
     let mut out = Vec::new();
     let mut paired: BTreeSet<&NodeId> = BTreeSet::new();
     for r in removed {
-        let candidate = body(r)
-            .and_then(|k| by_body.get(&k))
+        let candidate = key_of(r)
+            .and_then(|k| by_key.get(&k))
             .and_then(|list| list.iter().find(|a| !paired.contains(&a.id)));
         match candidate {
             Some(a) => {
