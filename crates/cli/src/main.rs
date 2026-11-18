@@ -551,34 +551,22 @@ type Built = Result<(Model, Vec<Diagnostic>), String>;
 type Changed = Vec<(RepoPath, Option<Vec<u8>>, Option<Vec<u8>>)>;
 
 fn changed_files(path: &Path, base: &str, head: &str) -> Result<Changed, String> {
-    let (b, _) = Commit::open(path, base).map_err(|e| e.to_string())?;
-    let (h, _) = Commit::open(path, head).map_err(|e| e.to_string())?;
-    let (bf, hf) = (b.blob_ids(), h.blob_ids());
+    let repo = Repo::open(path).map_err(|e| e.to_string())?;
+    let (b, h) = (
+        repo.resolve(base).map_err(|e| e.to_string())?,
+        repo.resolve(head).map_err(|e| e.to_string())?,
+    );
+    let read = |id: Option<ObjectId>| id.and_then(|id| repo.blob(id).ok());
     let mut out = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < bf.len() || j < hf.len() {
-        let order = match (bf.get(i), hf.get(j)) {
-            (Some(x), Some(y)) => x.0.cmp(&y.0),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            _ => std::cmp::Ordering::Greater,
+    for (p, bid, hid) in repo.changed_blobs(b, h).map_err(|e| e.to_string())? {
+        // Paths that are not valid repository paths are not in either model.
+        let Some(p) = std::str::from_utf8(&p)
+            .ok()
+            .and_then(|p| RepoPath::parse(p).ok())
+        else {
+            continue;
         };
-        match order {
-            std::cmp::Ordering::Less => {
-                out.push((bf[i].0.clone(), b.read(&bf[i].0), None));
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                out.push((hf[j].0.clone(), None, h.read(&hf[j].0)));
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                if bf[i].1 != hf[j].1 {
-                    out.push((bf[i].0.clone(), b.read(&bf[i].0), h.read(&hf[j].0)));
-                }
-                i += 1;
-                j += 1;
-            }
-        }
+        out.push((p, read(bid), read(hid)));
     }
     Ok(out)
 }
