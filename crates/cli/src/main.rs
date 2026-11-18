@@ -8,7 +8,7 @@ use blueprint_engine::git::{ObjectId, Repo};
 use blueprint_engine::index::{Index, Indexed};
 use blueprint_engine::l1::Diagnostic;
 use blueprint_engine::source::{Commit, Directory};
-use blueprint_model::{Level, Model, RepoPath};
+use blueprint_model::{EdgeKind, Level, Model, RepoPath};
 
 /// Exit code for a command that ran but could not do its job.
 const EXIT_FAILURE: u8 = 1;
@@ -149,10 +149,33 @@ fn up_to(model: &Model, depth: Depth) -> Model {
     for n in model.nodes().filter(|n| n.level() <= max) {
         let _ = out.add_node(n.clone());
     }
-    for e in model.edges().filter(|e| e.key.from.level() <= max) {
-        let _ = out.add_edge(e.clone());
+    // Edges go in lowest level first, because a roll-up's evidence (one
+    // level down) must already be present; evidence below `max` is dropped
+    // with the edges it names.
+    let mut edges: Vec<_> = model
+        .edges()
+        .filter(|e| e.key.from.level() <= max)
+        .collect();
+    edges.sort_by_key(|e| std::cmp::Reverse(e.key.from.level()));
+    for e in edges {
+        let mut e = e.clone();
+        e.evidence.retain(|ev| ev.from.level() <= max);
+        let _ = out.add_edge(e);
     }
     out
+}
+
+/// An edge kind as the JSON form spells it (docs/model-json.md).
+fn edge_kind(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::DependsOn => "depends-on",
+        EdgeKind::Calls => "calls",
+        EdgeKind::Implements => "implements",
+        EdgeKind::Extends => "extends",
+        EdgeKind::Reads => "reads",
+        EdgeKind::Writes => "writes",
+        EdgeKind::Exposes => "exposes",
+    }
 }
 
 fn text(model: &Model) -> String {
@@ -183,9 +206,10 @@ fn text(model: &Model) -> String {
             format!("\t{}", deps.join(","))
         };
         s += &format!(
-            "{} -> {}\tdepends-on\t{conf}{deps}\n",
+            "{} -> {}\t{}\t{conf}{deps}\n",
             String::from(e.key.from.clone()),
-            String::from(e.key.to.clone())
+            String::from(e.key.to.clone()),
+            edge_kind(e.key.kind)
         );
     }
     s

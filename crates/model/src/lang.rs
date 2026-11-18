@@ -96,7 +96,19 @@ pub enum Reference {
     Use {
         /// The path, such as `["crate", "l1", "Diagnostic"]`.
         path: Vec<String>,
+        /// The name it is bound to when renamed (`use a::B as C` gives `C`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
         /// The inline module the `use` sits in.
+        module: Vec<String>,
+    },
+    /// `impl Trait for Type`: the type implements the trait (§3.2).
+    Impl {
+        /// The type's path as written, without generic arguments or `&`.
+        self_type: Vec<String>,
+        /// The trait's path as written, without generic arguments.
+        r#trait: Vec<String>,
+        /// The inline module the `impl` sits in.
         module: Vec<String>,
     },
 }

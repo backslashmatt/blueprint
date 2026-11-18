@@ -126,8 +126,9 @@ fn use_paths_are_flattened() {
     let paths: Vec<String> = f
         .references
         .iter()
-        .map(|r| match r {
-            Reference::Use { path, .. } => path.join("::"),
+        .filter_map(|r| match r {
+            Reference::Use { path, .. } => Some(path.join("::")),
+            Reference::Impl { .. } => None,
         })
         .collect();
     assert_eq!(
@@ -281,8 +282,9 @@ fn use_edge_cases() {
         analyse(src.as_bytes())
             .references
             .iter()
-            .map(|r| match r {
-                Reference::Use { path, .. } => path.join("::"),
+            .filter_map(|r| match r {
+                Reference::Use { path, .. } => Some(path.join("::")),
+                Reference::Impl { .. } => None,
             })
             .collect()
     };
@@ -336,5 +338,28 @@ fn impl_names_are_spelt_from_tokens() {
     assert_eq!(
         kind("impl std::convert::From<u16> for X { fn from(_: u16) -> X { X } }"),
         method("X", Some("From<u16>"))
+    );
+}
+
+#[test]
+fn impls_and_aliases_are_references() {
+    let f = analyse(
+        b"use a::B as C;\nimpl<T> crate::x::Walk<T> for Graph<T> {}\nimpl Graph<u8> { fn f() {} }\n",
+    );
+    assert_eq!(
+        f.references,
+        vec![
+            Reference::Use {
+                path: vec!["a".into(), "B".into()],
+                alias: Some("C".into()),
+                module: vec![],
+            },
+            Reference::Impl {
+                self_type: vec!["Graph".into()],
+                r#trait: vec!["crate".into(), "x".into(), "Walk".into()],
+                module: vec![],
+            },
+        ],
+        "an inherent impl implements nothing"
     );
 }

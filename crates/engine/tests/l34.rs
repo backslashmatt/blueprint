@@ -6,7 +6,7 @@
 mod common;
 
 use blueprint_engine::analyse_deep;
-use blueprint_model::{Confidence, Level, Model, NodeKind, RepoPath};
+use blueprint_model::{Confidence, EdgeKind, Level, Model, NodeKind, RepoPath};
 
 use common::{files, render, snapshot};
 
@@ -140,4 +140,235 @@ fn this_repository_l3_l4_model() {
         .nodes()
         .find(|n| String::from(n.id.clone()) == "L4:cargo:crates/engine#(functions)/analyse_deep");
     assert!(analyse.is_some(), "engine::analyse_deep is an L4 node");
+    // Every crate-to-crate `use` rolls up onto a dependency Cargo declared:
+    // an L1 depends-on edge with no manifest kind would be an undeclared
+    // dependency, or a resolution bug.
+    let undeclared: Vec<String> = model
+        .edges()
+        .filter(|e| e.key.from.level() == Level::System && e.key.kind == EdgeKind::DependsOn)
+        .filter(|e| e.dependency.is_empty())
+        .map(|e| {
+            format!(
+                "{} -> {}",
+                String::from(e.key.from.clone()),
+                String::from(e.key.to.clone())
+            )
+        })
+        .collect();
+    assert!(undeclared.is_empty(), "{undeclared:?}");
+    let rolled = model
+        .edges()
+        .filter(|e| e.key.from.level() == Level::System && !e.evidence.is_empty())
+        .count();
+    assert!(rolled > 5, "crate-to-crate uses roll up onto the L1 edges");
+}
+
+fn edge(model: &Model, from: &str, to: &str, kind: EdgeKind) -> Option<Confidence> {
+    model
+        .edges()
+        .find(|e| {
+            String::from(e.key.from.clone()) == from
+                && String::from(e.key.to.clone()) == to
+                && e.key.kind == kind
+        })
+        .map(|e| e.confidence)
+}
+
+#[test]
+fn uses_and_impls_become_edges_and_roll_up() {
+    let entries: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"app\", \"core-lib\"]\n",
+        ),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\ncore-lib = { path = \"../core-lib\" }\n",
+        ),
+        (
+            "app/src/main.rs",
+            "mod cli;\nuse core_lib::graph::Graph;\nuse std::fmt;\nfn main() {}\n",
+        ),
+        (
+            "app/src/cli.rs",
+            "use super::*;\nuse crate::cli as me;\nuse core_lib::graph::Missing;\npub struct Args;\n",
+        ),
+        (
+            "app/src/bin/tool/main.rs",
+            "mod opts;\nuse crate::opts::Opts;\nfn main() {}\n",
+        ),
+        ("app/src/bin/tool/opts.rs", "pub struct Opts;\n"),
+        ("core-lib/Cargo.toml", "[package]\nname = \"core-lib\"\n"),
+        (
+            "core-lib/src/lib.rs",
+            "pub mod graph;\npub mod walk;\nmod util;\n",
+        ),
+        ("core-lib/src/graph.rs", "pub struct Graph;\n"),
+        ("core-lib/src/walk.rs", "pub trait Walk {}\n"),
+        (
+            "core-lib/src/util.rs",
+            "use crate::walk::Walk;\nuse crate::graph;\nimpl Walk for graph::Graph {}\nimpl std::fmt::Debug for Local {}\nstruct Local;\n",
+        ),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let dep = EdgeKind::DependsOn;
+    // Across crates, exact when the item exists, inferred when it does not.
+    assert_eq!(
+        edge(&model, "L2:cargo:app#", "L2:cargo:core-lib#graph", dep),
+        Some(Confidence::Exact)
+    );
+    assert_eq!(
+        edge(&model, "L2:cargo:app#cli", "L2:cargo:core-lib#graph", dep),
+        Some(Confidence::Inferred)
+    );
+    // `super::*` reaches the parent module; `crate::cli as me` is the
+    // module itself, so no edge.
+    assert_eq!(
+        edge(&model, "L2:cargo:app#cli", "L2:cargo:app#", dep),
+        Some(Confidence::Exact)
+    );
+    assert!(edge(&model, "L2:cargo:app#cli", "L2:cargo:app#cli", dep).is_none());
+    // `crate` inside a binary is that binary's root.
+    assert_eq!(
+        edge(
+            &model,
+            "L2:cargo:app#(bin tool)",
+            "L2:cargo:app#(bin tool)/opts",
+            dep
+        ),
+        Some(Confidence::Exact)
+    );
+    // std is outside the model.
+    assert!(
+        model
+            .edges()
+            .all(|e| !String::from(e.key.to.clone()).contains("std"))
+    );
+    // implements through imports, rolled up to L2.
+    assert_eq!(
+        edge(
+            &model,
+            "L3:cargo:core-lib#graph/Graph",
+            "L3:cargo:core-lib#walk/Walk",
+            EdgeKind::Implements
+        ),
+        Some(Confidence::Exact)
+    );
+    let rolled = model
+        .edges()
+        .find(|e| {
+            String::from(e.key.from.clone()) == "L2:cargo:core-lib#graph"
+                && String::from(e.key.to.clone()) == "L2:cargo:core-lib#walk"
+        })
+        .map(|e| e.evidence.len());
+    assert_eq!(rolled, Some(1), "the L2 roll-up lists its L3 evidence");
+    // The cross-crate L2 edges roll up onto the Cargo L1 edge.
+    let l1 = model
+        .edges()
+        .find(|e| {
+            String::from(e.key.from.clone()) == "L1:cargo:app#"
+                && String::from(e.key.to.clone()) == "L1:cargo:core-lib#"
+                && e.key.kind == dep
+        })
+        .map(|e| (e.confidence, e.evidence.len(), e.dependency.len()));
+    assert_eq!(l1, Some((Confidence::Exact, 2, 1)));
+}
+
+#[test]
+fn only_declared_crates_resolve_and_only_declared_dependencies_reach_l1() {
+    let entries: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"t\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\n[dependencies]\nbee = { package = \"b\", path = \"../b\" }\n[dev-dependencies]\nt = { path = \"../t\" }\n",
+        ),
+        (
+            "a/src/lib.rs",
+            "mod toml;\nmod inner;\nuse bee::Thing;\nuse c::Other;\nuse b::Thing as T2;\n#[cfg(test)]\nmod tests { use t::Fixture; }\n",
+        ),
+        ("a/src/toml.rs", "pub struct Value;\n"),
+        ("a/src/inner.rs", "use toml::Value;\n"),
+        (
+            "b/Cargo.toml",
+            "[package]\nname = \"b\"\n[lib]\nname = \"bee_lib\"\n",
+        ),
+        ("b/src/lib.rs", "pub struct Thing;\npub trait Show {}\n"),
+        (
+            "c/Cargo.toml",
+            "[package]\nname = \"c\"\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "c/src/lib.rs",
+            "pub struct Other;\nuse bee_lib::Show;\nimpl Show for Local {}\nstruct Local;\n",
+        ),
+        ("t/Cargo.toml", "[package]\nname = \"t\"\n"),
+        ("t/src/lib.rs", "pub struct Fixture;\n"),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let dep = EdgeKind::DependsOn;
+    // A rename in the manifest is the name the code uses.
+    assert_eq!(
+        edge(&model, "L2:cargo:a#", "L2:cargo:b#", dep),
+        Some(Confidence::Exact)
+    );
+    // `c` is a workspace member that `a` does not declare: no edge, and the
+    // package name of a renamed dependency is not in scope either.
+    assert!(
+        model
+            .edges()
+            .all(|e| e.key.to.system_key().dir.to_string() != "c")
+    );
+    // A dev-dependency: the test module's edge exists, but `a` does not
+    // depend on `t` as a system.
+    assert_eq!(
+        edge(&model, "L2:cargo:a#tests", "L2:cargo:t#", dep),
+        Some(Confidence::Exact)
+    );
+    assert!(edge(&model, "L1:cargo:a#", "L1:cargo:t#", dep).is_none());
+    // Under its `[lib] name`, `b` is found from `c`, and c's impl of b's
+    // trait for its own type points c -> b, the dependency's direction.
+    assert_eq!(
+        edge(
+            &model,
+            "L3:cargo:c#Local",
+            "L3:cargo:b#Show",
+            EdgeKind::Implements
+        ),
+        Some(Confidence::Exact)
+    );
+    // A declared crate wins over a same-named root module: `toml` here is
+    // not a declared crate, so the root module `toml` is used (2015 path).
+    assert_eq!(
+        edge(&model, "L2:cargo:a#inner", "L2:cargo:a#toml", dep),
+        Some(Confidence::Exact)
+    );
+}
+
+#[test]
+fn an_impl_of_a_local_trait_for_a_foreign_type_gives_no_edge() {
+    let entries: &[(&str, &str)] = &[
+        ("Cargo.toml", "[workspace]\nmembers = [\"x\", \"y\"]\n"),
+        ("x/Cargo.toml", "[package]\nname = \"x\"\n"),
+        ("x/src/lib.rs", "pub struct Foreign;\n"),
+        (
+            "y/Cargo.toml",
+            "[package]\nname = \"y\"\n[dependencies]\nx = { path = \"../x\" }\n",
+        ),
+        (
+            "y/src/lib.rs",
+            "use x::Foreign;\npub trait Mine {}\nimpl Mine for Foreign {}\n",
+        ),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    assert!(model.edges().all(|e| e.key.kind != EdgeKind::Implements));
+    assert!(edge(&model, "L1:cargo:x#", "L1:cargo:y#", EdgeKind::Implements).is_none());
 }

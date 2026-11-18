@@ -8,6 +8,8 @@
 //! - **Other files** (other languages, and Rust outside the module tree):
 //!   one L3 component per file, `unknown`, with no L4 (§3.4).
 //!
+//! Edges between them come from the analysers' references ([`edges`]).
+//!
 //! Ids follow DR 0008: an L3 id is its module's path plus the item name, and
 //! an L4 id its component's path plus the function's name, with `<Trait>::`
 //! for trait methods and `~2`, `~3`… for any clash left.
@@ -23,6 +25,11 @@ use rayon::prelude::*;
 
 use crate::l1::{Diagnostic, Read};
 use crate::l2::Placement;
+
+mod edges;
+
+/// One analysed file: its path, placement, module, and facts.
+type Parsed<'a> = (&'a RepoPath, &'a Placement, &'a Vec<String>, FileFacts);
 
 /// The reserved L3 segment for a module's free functions.
 pub const FUNCTIONS: &str = "(functions)";
@@ -48,7 +55,7 @@ pub fn analyse(
             _ => plain.push((path, place)),
         }
     }
-    let parsed: Vec<_> = sources
+    let parsed: Vec<Parsed<'_>> = sources
         .into_par_iter()
         .map(|(path, place, module, bytes)| (path, place, module, rust.analyse(path, &bytes)))
         .collect();
@@ -83,6 +90,7 @@ pub fn analyse(
     for (path, place) in plain {
         b.add_file(path, place);
     }
+    edges::add(&mut b, &parsed, read);
     b.diags.sort();
     b.diags
 }
