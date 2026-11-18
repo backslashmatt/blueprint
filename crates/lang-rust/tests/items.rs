@@ -312,3 +312,29 @@ fn pub_self_is_private() {
         Some(Visibility::Restricted)
     );
 }
+
+#[test]
+fn impl_names_are_spelt_from_tokens() {
+    let kind = |src: &str| analyse(src.as_bytes()).items[0].kind.clone();
+    let method = |t: &str, tr: Option<&str>| ItemKind::Method {
+        self_type: t.into(),
+        r#trait: tr.map(Into::into),
+    };
+    assert_eq!(
+        kind("impl Tr for (u8,u16) { fn f() {} }"),
+        method("(u8,u16)", Some("Tr"))
+    );
+    assert_eq!(
+        kind("impl Tr for ( u8 , u16 ) { fn f() {} }"),
+        method("(u8,u16)", Some("Tr"))
+    );
+    assert_eq!(
+        kind("impl<'a> Tr for (&'a u8, Vec<u8>) { fn f() {} }"),
+        method("(&u8,Vec<u8>)", Some("Tr"))
+    );
+    assert_eq!(kind("impl dyn Tr { fn f() {} }"), method("dyn Tr", None));
+    assert_eq!(
+        kind("impl std::convert::From<u16> for X { fn from(_: u16) -> X { X } }"),
+        method("X", Some("From<u16>"))
+    );
+}

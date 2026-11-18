@@ -259,7 +259,14 @@ impl TryFrom<String> for NodeId {
         };
         let dir = RepoPath::parse(&split(dir_raw).join("/")).map_err(|_| bad())?;
         let path = split(path);
-        if path.iter().any(String::is_empty) || (level == Level::System) != path.is_empty() {
+        // L1 has no path; L3 and L4 always have one; an empty L2 path is a
+        // crate's root module (DR 0008).
+        let path_ok = match level {
+            Level::System => path.is_empty(),
+            Level::Module => true,
+            Level::Component | Level::Code => !path.is_empty(),
+        };
+        if path.iter().any(String::is_empty) || !path_ok {
             return Err(bad());
         }
         let id = NodeId {
@@ -327,6 +334,28 @@ pub struct Node {
     /// does not apply, as for systems and directories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
+    /// Where an L3 or L4 node's code is, and fingerprints of it, for the
+    /// diff. `None` above L3 and for files no analyser reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Code>,
+}
+
+/// The code of an L3 or L4 node: its lines in [`Node::source`], and hashes
+/// of its tokens that ignore whitespace, comments and the node's own name
+/// (DR 0008). Equal body hashes with different ids mean a move or rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Code {
+    /// First and last line, 1-based and inclusive.
+    pub lines: (u32, u32),
+    /// The line the body starts on; lines before it are the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_line: Option<u32>,
+    /// Hash of everything outside the body: the public surface.
+    pub signature_hash: u64,
+    /// Hash of the body; `None` for an item without one, which is never
+    /// paired as a move or rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hash: Option<u64>,
 }
 
 /// How visible a node is outside its parent (§3.3: public surface changes).
@@ -648,6 +677,7 @@ mod tests {
             parent: None,
             confidence: Confidence::Exact,
             visibility: None,
+            code: None,
         }
     }
 
@@ -664,6 +694,7 @@ mod tests {
             parent: Some(NodeId::system(key(dir))),
             confidence: Confidence::Exact,
             visibility: Some(Visibility::Public),
+            code: None,
         }
     }
 
@@ -741,6 +772,8 @@ mod tests {
     fn id_text_round_trips_and_rejects_junk() {
         for id in [
             NodeId::system(key("")),
+            // A crate's root module.
+            NodeId::within(Level::Module, key("crates/x"), Vec::new()),
             NodeId::within(
                 Level::Code,
                 key("crates/x"),
@@ -753,7 +786,8 @@ mod tests {
             "garbage",
             "L9:cargo:#",
             "L1:cargo:x#y",
-            "L2:cargo:x#",
+            "L3:cargo:x#",
+            "L4:cargo:x#",
             "L2:cargo:x#a//b",
             "L1:cargo:a/../b#",
             "L1:cargo:a%2fb#",
