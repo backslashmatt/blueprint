@@ -105,6 +105,10 @@ pub struct Map {
     base: Arc<Model>,
     head: Arc<Model>,
     status: HashMap<NodeId, Status>,
+    /// Every model edge rolled up once: per view (its parent), each pair of
+    /// siblings joined, and whether base and head have it. Drilling then
+    /// costs only the view's own edges.
+    rolled: Arc<Rolled>,
     /// The nodes drilled into, from the top: the breadcrumb.
     pub path: Vec<NodeId>,
     /// The current view.
@@ -132,24 +136,26 @@ impl Map {
             };
             status.insert(id.clone(), s);
         }
-        // Everything above a change, in either model, has changes inside.
+        // Everything above a change, in either model, has changes inside,
+        // except above a contained change: that stays quiet (§3.3).
         let mut inside = Vec::new();
-        for id in status.keys() {
+        for (id, s) in &status {
+            if *s == Status::Contained {
+                continue;
+            }
             for model in [&base, &head] {
-                let mut at = model.node(id).and_then(|n| n.parent.clone());
-                while let Some(p) = at {
-                    at = model.node(&p).and_then(|n| n.parent.clone());
-                    inside.push(p);
-                }
+                inside.extend(chain(model, id).into_iter().flatten().skip(1));
             }
         }
         for p in inside {
             status.entry(p).or_insert(Status::Inside);
         }
+        let rolled = Arc::new(roll_up(&base, &head));
         let mut map = Map {
             base,
             head,
             status,
+            rolled,
             path: Vec::new(),
             view: View::default(),
             selected: None,
@@ -159,7 +165,13 @@ impl Map {
     }
 
     fn rebuild(&mut self) {
-        self.view = view(&self.base, &self.head, &self.status, self.path.last());
+        self.view = view(
+            &self.base,
+            &self.head,
+            &self.status,
+            &self.rolled,
+            self.path.last(),
+        );
         // Select the most changed node, so Enter goes where the change is.
         self.selected = self
             .view
@@ -241,11 +253,65 @@ pub fn nearest_towards(points: &[(f32, f32)], from: usize, dx: f32, dy: f32) -> 
         .map(|(_, i)| i)
 }
 
+/// The deepest a node may be. Models are trees, but one loaded from a
+/// damaged index is not checked; a parent cycle must not hang the map.
+const MAX_DEPTH: usize = 256;
+
+/// `id` and its ancestors, nearest first; `None` if the chain is broken off
+/// by a cycle or is deeper than [`MAX_DEPTH`].
+fn chain(m: &Model, id: &NodeId) -> Option<Vec<NodeId>> {
+    let mut out = vec![id.clone()];
+    let mut at = m.node(id)?.parent.clone();
+    while let Some(p) = at {
+        if out.len() > MAX_DEPTH {
+            return None;
+        }
+        at = m.node(&p).and_then(|n| n.parent.clone());
+        out.push(p);
+    }
+    Some(out)
+}
+
+/// Per view (its parent), each pair of siblings an edge joins: whether base
+/// has it, and whether head does.
+type Rolled = HashMap<Option<NodeId>, BTreeMap<(NodeId, NodeId), (bool, bool)>>;
+
+/// Rolls every edge of both models up to the view where its ends part: the
+/// children of their nearest common ancestor (§3.2).
+fn roll_up(base: &Model, head: &Model) -> Rolled {
+    let mut out = Rolled::new();
+    for (in_head, m) in [(false, base), (true, head)] {
+        for e in m.edges() {
+            let (Some(mut a), Some(mut b)) = (chain(m, &e.key.from), chain(m, &e.key.to)) else {
+                continue;
+            };
+            a.reverse();
+            b.reverse();
+            let Some(i) = (0..a.len().min(b.len())).find(|i| a[*i] != b[*i]) else {
+                continue;
+            };
+            let parent = if i == 0 { None } else { Some(a[i - 1].clone()) };
+            let flags = out
+                .entry(parent)
+                .or_default()
+                .entry((a[i].clone(), b[i].clone()))
+                .or_default();
+            if in_head {
+                flags.1 = true;
+            } else {
+                flags.0 = true;
+            }
+        }
+    }
+    out
+}
+
 /// The view under `parent` (`None`: the systems) of base and head together.
 fn view(
     base: &Model,
     head: &Model,
     status: &HashMap<NodeId, Status>,
+    rolled: &Rolled,
     parent: Option<&NodeId>,
 ) -> View {
     let children = |m: &Model| -> Vec<NodeId> {
@@ -274,43 +340,29 @@ fn view(
         })
         .collect();
     let index: BTreeMap<&NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
-    // Roll each model's edges up to this view's nodes.
-    let rolled = |m: &Model| -> BTreeSet<(usize, usize)> {
-        let lift = |id: &NodeId| -> Option<usize> {
-            let mut at = id.clone();
-            loop {
-                let node = m.node(&at)?;
-                if node.parent.as_ref() == parent {
-                    return index.get(&at).copied();
-                }
-                at = node.parent.clone()?;
-            }
-        };
-        m.edges()
-            .filter_map(|e| Some((lift(&e.key.from)?, lift(&e.key.to)?)))
-            .filter(|(a, b)| a != b)
-            .collect()
-    };
-    let (before, after) = (rolled(base), rolled(head));
-    let edges = before
-        .union(&after)
-        .map(|&(from, to)| MapEdge {
-            from,
-            to,
-            status: match (before.contains(&(from, to)), after.contains(&(from, to))) {
-                (false, true) => EdgeStatus::Added,
-                (true, false) => EdgeStatus::Removed,
-                _ => EdgeStatus::Unchanged,
-            },
+    let mut edges: Vec<MapEdge> = rolled
+        .get(&parent.cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|((a, b), (before, after))| {
+            Some(MapEdge {
+                from: *index.get(a)?,
+                to: *index.get(b)?,
+                status: match (before, after) {
+                    (false, true) => EdgeStatus::Added,
+                    (true, false) => EdgeStatus::Removed,
+                    _ => EdgeStatus::Unchanged,
+                },
+            })
         })
         .collect();
+    edges.sort();
     View {
         parent: parent.cloned(),
         nodes,
         edges,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +480,25 @@ mod tests {
         assert_eq!(nearest_towards(&pts, 1, 0.0, 1.0), Some(4));
         assert_eq!(nearest_towards(&pts, 0, -1.0, 0.0), None);
         assert_eq!(nearest_towards(&pts, 9, 1.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_contained_change_stays_quiet_above_it() {
+        let base = model(&[
+            ("Cargo.toml", "[package]\nname = \"q\"\n"),
+            ("src/lib.rs", "pub fn f() -> u32 {\n    1\n}\n"),
+        ]);
+        let head = model(&[
+            ("Cargo.toml", "[package]\nname = \"q\"\n"),
+            ("src/lib.rs", "pub fn f() -> u32 {\n    2\n}\n"),
+        ]);
+        let diff = blueprint_engine::diff::diff(&base, &head);
+        let m = Map::new(Arc::new(base), Arc::new(head), &diff);
+        assert!(
+            m.view.nodes.iter().all(|n| n.status == Status::Unchanged),
+            "{:?}",
+            m.view.nodes
+        );
     }
 
     #[test]

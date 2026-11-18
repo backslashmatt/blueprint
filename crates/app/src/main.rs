@@ -3,7 +3,7 @@
 //! shell without one.
 //!
 //! ```text
-//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file>]
+//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open]]
 //! ```
 //!
 //! - `--cold-start-report <file>` writes the time from process start to the
@@ -12,7 +12,8 @@
 //! - `--script <keys>` presses the comma-separated keys (GPUI key names) in
 //!   the review list once it has loaded, and `--review-report <file>` writes
 //!   the review reached as JSON and quits once its diff is complete and
-//!   its map laid out: the app test of #90 and #92.
+//!   its map laid out: the app test of #90 and #92. With `--stay-open` it
+//!   does not quit, so a screenshot can be taken (`.github/scripts`).
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,7 +27,7 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
 static START: OnceLock<Instant> = OnceLock::new();
 
-const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file>]";
+const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open]]";
 
 #[derive(Default)]
 struct Args {
@@ -34,6 +35,7 @@ struct Args {
     cold_start_report: Option<String>,
     script: Vec<String>,
     review_report: Option<String>,
+    stay_open: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -51,6 +53,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .collect();
             }
             "--review-report" => out.review_report = Some(value()?),
+            "--stay-open" => out.stay_open = true,
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             repo if out.repo.is_none() => out.repo = Some(repo.to_owned()),
             extra => return Err(format!("unexpected argument {extra}")),
@@ -97,6 +100,7 @@ fn main() {
                 let service = Arc::new(service);
                 let script = args.script.clone();
                 let review_report = args.review_report.clone();
+                let stay_open = args.stay_open;
                 let opened = cx.open_window(options, |window, cx| {
                     if let Some(path) = report.clone() {
                         first_paint(window, cx, start, path);
@@ -108,7 +112,7 @@ fn main() {
                     window.focus(&focus, cx);
                     pump(ws.clone(), replies, Arc::clone(&service), cx);
                     if let Some(path) = review_report {
-                        report_review(&ws, path, cx);
+                        report_review(&ws, path, stay_open, cx);
                     }
                     ws
                 });
@@ -120,7 +124,7 @@ fn main() {
             std::process::exit(1);
         }
         cx.activate(true);
-        if report.is_some() || args.review_report.is_some() {
+        if report.is_some() || (args.review_report.is_some() && !args.stay_open) {
             // Never hang a benchmark or a test.
             cx.spawn(async move |cx| {
                 cx.background_executor()
@@ -164,15 +168,20 @@ fn pump(
 
 /// Once the review's diff is complete and its map laid out, writes it to
 /// `path` as JSON and quits.
-fn report_review(ws: &gpui::Entity<Workspace>, path: String, cx: &mut App) {
+fn report_review(ws: &gpui::Entity<Workspace>, path: String, stay_open: bool, cx: &mut App) {
+    let mut written = false;
     cx.observe(ws, move |ws, cx| {
-        let Screen::Review(r) = &ws.read(cx).screen else {
+        if written {
+            return;
+        }
+        let w = ws.read(cx);
+        let Screen::Review(r) = &w.screen else {
             return;
         };
         let (Some(map), Some(_)) = (&r.map, &r.layout) else {
             return;
         };
-        if r.detail != Some(Detail::Full) {
+        if r.mapped != Some(Detail::Full) || w.script_pending() {
             return;
         }
         let json = format!(
@@ -187,7 +196,10 @@ fn report_review(ws: &gpui::Entity<Workspace>, path: String, cx: &mut App) {
             eprintln!("blueprint: cannot write {path}: {e}");
             std::process::exit(1);
         }
-        cx.quit();
+        written = true;
+        if !stay_open {
+            cx.quit();
+        }
     })
     .detach();
 }
@@ -208,11 +220,13 @@ mod tests {
             "down,b,,enter",
             "--review-report",
             "r",
+            "--stay-open",
         ]));
         let a = a.unwrap_or_default();
         assert_eq!(a.repo.as_deref(), Some("repo"));
         assert_eq!(a.script, vec!["down", "b", "enter"]);
         assert_eq!(a.review_report.as_deref(), Some("r"));
+        assert!(a.stay_open);
         assert!(parse(&args(&["--bogus"])).is_err());
         assert!(parse(&args(&["a", "b"])).is_err());
         assert!(parse(&args(&["--script"])).is_err());

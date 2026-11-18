@@ -33,6 +33,8 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 - **Edges** are rolled up from the code (§3.2). A dependent is drawn above what it depends on. Green edges are new, red ones are gone, and grey ones are in both.
 - **Layout** follows DR 0010. Base and head share one layout, and going back to a view keeps its nodes where they were.
 - The view is centred on the selected node, which starts as the most changed one. Only what is on screen is drawn.
+- The map is built and laid out off the UI thread. A drill only reads its view's edges, which were rolled up once when the map was built: on medium, 0.03 ms on average and 3 ms at worst (`crates/ui/examples/map_measure.rs`).
+- A contained change (body only) does not mark its ancestors, so the map stays quiet about it until you drill down to it (§3.3).
 
 | Key | Action |
 |---|---|
@@ -47,7 +49,8 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 | Option | What it does |
 |---|---|
 | `--cold-start-report <file>` | Writes `{"cold_start_ms": …}` when the first frame is painted, then quits. bp-bench measures this as the `cold_start` budget. |
-| `--script <keys>` | Presses comma-separated keys (GPUI key names such as `down`, `b`, `enter`) once the review list has loaded. Keys after the one that opens a review wait for its full map. |
-| `--review-report <file>` | Once the review's full diff has arrived and its map is laid out, writes `{"base", "head", "findings", "changed", "map_nodes"}` and quits. |
+| `--script <keys>` | Presses comma-separated keys (GPUI key names such as `down`, `b`, `enter`) once the review list has loaded. Keys after the one that opens a review wait for its full map, and each waits for the view it acts on to be laid out. |
+| `--review-report <file>` | Once the review's full map is laid out and every `--script` key has been pressed, writes `{"base", "head", "findings", "changed", "map_nodes"}` and quits. |
+| `--stay-open` | With `--review-report`: does not quit after writing it, so that a screenshot can be taken. |
 
 CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).

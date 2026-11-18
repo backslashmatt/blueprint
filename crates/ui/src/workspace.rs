@@ -36,6 +36,8 @@ pub struct Review {
     pub changed: usize,
     /// The map of the diff so far.
     pub map: Option<Map>,
+    /// How much of the diff the map shows.
+    pub mapped: Option<Detail>,
     /// The current view's layout, once computed.
     pub layout: Option<Layout>,
 }
@@ -152,33 +154,81 @@ impl Workspace {
                 review.detail = Some(*detail);
                 review.findings = diff.findings.len();
                 review.changed = diff.nodes.len();
-                let mut map = Map::new(base_model.clone(), head_model.clone(), diff);
-                // The full answer keeps the place the coarse one was at.
-                if let Some(old) = &review.map {
-                    for id in &old.path {
-                        map.selected = map.view.nodes.iter().position(|n| &n.id == id);
-                        if map.selected.is_none() || !map.drill_down() {
-                            break;
-                        }
-                    }
-                    if let Some(sel) = old.selected.and_then(|i| old.view.nodes.get(i))
-                        && let Some(i) = map.view.nodes.iter().position(|n| n.id == sel.id)
-                    {
-                        map.selected = Some(i);
-                    }
-                }
-                let full = *detail == Detail::Full;
-                review.map = Some(map);
-                if full {
-                    for key in std::mem::take(&mut self.script) {
-                        self.key(&key, cx);
-                    }
-                }
-                self.lay_out(cx);
+                // Building the map rolls up every edge once: off the UI
+                // thread (§4).
+                let (base, head, diff) = (base_model.clone(), head_model.clone(), diff.clone());
+                let detail = *detail;
+                let request = reply.id;
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { Map::new(base, head, &diff) });
+                cx.spawn(async move |this, cx| {
+                    let map = task.await;
+                    let _ = this.update(cx, |w, cx| w.map_ready(request, detail, map, cx));
+                })
+                .detach();
             }
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Puts a newly built map on screen, keeping the place the reviewer had
+    /// reached on the previous one, and lays it out.
+    fn map_ready(
+        &mut self,
+        request: RequestId,
+        detail: Detail,
+        mut map: Map,
+        cx: &mut Context<Self>,
+    ) {
+        if self.waiting != Some(request) {
+            return;
+        }
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        if let Some(old) = &review.map {
+            for id in &old.path {
+                map.selected = map.view.nodes.iter().position(|n| &n.id == id);
+                if map.selected.is_none() || !map.drill_down() {
+                    break;
+                }
+            }
+            if let Some(sel) = old.selected.and_then(|i| old.view.nodes.get(i))
+                && let Some(i) = map.view.nodes.iter().position(|n| n.id == sel.id)
+            {
+                map.selected = Some(i);
+            }
+        }
+        review.map = Some(map);
+        review.mapped = Some(detail);
+        // The old layout belongs to the old map.
+        review.layout = None;
+        self.lay_out(cx);
+        cx.notify();
+    }
+
+    /// Whether `--script` keys are still waiting to be pressed.
+    #[must_use]
+    pub fn script_pending(&self) -> bool {
+        !self.script.is_empty()
+    }
+
+    /// Presses waiting `--script` keys on the full map, each once the view
+    /// it acts on is laid out.
+    fn replay(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let ready = matches!(
+                &self.screen,
+                Screen::Review(r) if r.mapped == Some(Detail::Full) && r.layout.is_some()
+            );
+            if !ready || self.script.is_empty() {
+                return;
+            }
+            let key = self.script.remove(0);
+            self.key(&key, cx);
+        }
     }
 
     /// Lays out the current view on a background thread, seeded from its
@@ -215,6 +265,7 @@ impl Workspace {
                 if let Screen::Review(r) = &mut w.screen {
                     r.layout = Some(l);
                 }
+                w.replay(cx);
                 cx.notify();
             });
         })
@@ -248,6 +299,7 @@ impl Workspace {
                         findings: 0,
                         changed: 0,
                         map: None,
+                        mapped: None,
                         layout: None,
                     }));
                 }
@@ -289,6 +341,9 @@ impl Workspace {
             Screen::Review(_) | Screen::Failed(_) if key == "escape" => {
                 if let Some(list) = self.list.take() {
                     self.waiting = None;
+                    // Layouts still running belong to the review left.
+                    self.layout_generation += 1;
+                    self.seeds.clear();
                     self.screen = Screen::List(list);
                 }
             }

@@ -91,13 +91,16 @@ jobs:
           if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
             echo "the keys chose the same commit as base and head"; exit 1
           fi
+          if grep -q '"map_nodes": 0' review.json; then
+            echo "the map is empty"; exit 1
+          fi
       # Screenshots of the map from the virtual display, for review (§9.4).
       - name: map screenshots
         if: runner.os == 'Linux'
         run: |
           mkdir -p screenshots
-          .github/scripts/screenshot.sh screenshots/map-systems.png 15 target/debug/blueprint . --script end,b,home,h,enter
-          .github/scripts/screenshot.sh screenshots/map-drilled.png 15 target/debug/blueprint . --script end,b,home,h,enter,enter
+          timeout 600 .github/scripts/screenshot.sh screenshots/map-systems.png 240 target/debug/blueprint . --script end,b,home,h,enter
+          timeout 600 .github/scripts/screenshot.sh screenshots/map-drilled.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
@@ -145,4 +148,7 @@ jobs:
           cat review.json
           if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' review.json; then
             echo "the keys chose the same commit as base and head"; exit 1
+          fi
+          if grep -q '"map_nodes": 0' review.json; then
+            echo "the map is empty"; exit 1
           fi
