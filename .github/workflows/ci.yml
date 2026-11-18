@@ -1,4 +1,5 @@
-# CI for every change (REQUIREMENTS §9.1): fmt once, clippy and tests on all three platforms.
+# CI for every change (REQUIREMENTS §9.1): fmt once, clippy and tests on every platform, and tests
+# on Fedora as well as Ubuntu (§5.1, #37).
 name: CI
 
 on:
@@ -24,7 +25,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -38,7 +39,8 @@ jobs:
       fail-fast: false
       matrix:
         # macOS is deferred by the owner (#15, DR 0004); reinstate by adding macos-latest back.
-        os: [ubuntu-latest, windows-latest]
+        # Ubuntu is pinned to the current LTS, the named Linux target (§5.1, #37).
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -51,5 +53,30 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features --locked
+
+  # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
+  # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
+  # release; `latest` is not used, so a release never changes CI unannounced.
+  fedora:
+    name: test (fedora-45)
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    timeout-minutes: 30
+    steps:
+      - name: Install build dependencies (see docs/building.md)
+        run: dnf install -y -q gcc git rustup
+      - uses: actions/checkout@v5
+      - name: Trust the checkout (the container runs as root; the runner owns the files)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install toolchain from rust-toolchain.toml
+        run: |
+          rustup-init -y -q --no-modify-path --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: test
         run: cargo test --workspace --all-features --locked
