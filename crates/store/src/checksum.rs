@@ -17,13 +17,11 @@ const PRIME: u64 = 0x0000_0100_0000_01b3;
 
 pub(crate) fn checksum(bytes: &[u8]) -> u64 {
     let mut h = OFFSET;
-    let mut words = bytes.chunks_exact(8);
-    for w in &mut words {
-        let mut a = [0u8; 8];
-        a.copy_from_slice(w);
-        h = step(h, u64::from_le_bytes(a));
+    let (words, rest) = bytes.as_chunks::<8>();
+    for w in words {
+        h = step(h, u64::from_le_bytes(*w));
     }
-    for &b in words.remainder() {
+    for &b in rest {
         h = step(h, u64::from(b));
     }
     step(h, bytes.len() as u64)

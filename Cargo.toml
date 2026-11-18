@@ -19,7 +19,7 @@ exclude = ["spikes", "crates/store/fuzz"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -32,6 +32,10 @@ blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
 # Git object access (DR 0005). Pure-Rust compression; `revision` for rev-parse.
 gix = { version = "0.90", default-features = false, features = ["max-performance", "sha1", "revision"] }
+# The UI toolkit (DR 0003): GPUI from Zed's main branch, pinned by revision. Only `ui` and
+# `app` depend on it; the layering test keeps it out of the engine. Upgrade deliberately.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "e2f00a41ac6789f0ae52b229567ad5715266e400" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e2f00a41ac6789f0ae52b229567ad5715266e400", features = ["font-kit", "wayland", "x11"] }
 
 [workspace.lints.rust]
 # rustc rejects any attempt to allow it. The one exception, crates/store,

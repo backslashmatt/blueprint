@@ -21,9 +21,9 @@ sudo apt-get install -y build-essential git rustup
 sudo dnf install -y gcc git rustup && rustup-init -y --default-toolchain none
 ```
 
-### From M3: the desktop app
+### The desktop app
 
-The app uses GPUI (DR 0003), which links the windowing, keyboard, font and Vulkan libraries. These are the packages the M0 spike needed; the M3 PR that adds GPUI to the workspace confirms them in CI on both distributions.
+The app (`crates/app`, binary `blueprint`) uses GPUI (DR 0003), which links the windowing, keyboard, font and Vulkan libraries. CI installs exactly these packages on both distributions, builds the app and opens its window (#88).
 
 | Library | Ubuntu 24.04 | Fedora 45 |
 |---|---|---|
@@ -32,6 +32,8 @@ The app uses GPUI (DR 0003), which links the windowing, keyboard, font and Vulka
 | X11 and XCB | `libx11-xcb-dev`, `libxcb1-dev` | `libX11-devel`, `libxcb-devel` |
 | Fontconfig | `libfontconfig-dev` | `fontconfig-devel` |
 | Vulkan (runtime) | `libvulkan1`, `mesa-vulkan-drivers` | `vulkan-loader`, `mesa-vulkan-drivers` |
+
+To run the app without a desktop, as CI does, also install Xvfb and openbox (`xvfb openbox` on Ubuntu, `xorg-x11-server-Xvfb openbox` on Fedora) and use `spikes/gpui/xvfb-run.sh target/debug/blueprint`. GPUI's X11 backend starts drawing only once a window manager reports the window visible.
 
 ## Windows and macOS
 
