@@ -1,5 +1,7 @@
 nodes:
   L1:cargo:#  System  "root"  Exact  Cargo.toml
+  L2:cargo:#  Module  "root"  Unknown  src/lib.rs  Public
+  L2:cargo:#.%2F  Directory  "./"  Unknown  
   L2:cargo:#a  Module  "a"  Exact  src/a.rs  Public
   L2:cargo:#benches%2F  Directory  "benches/"  Unknown  benches
   L2:cargo:#docs%2F  Directory  "docs/"  Unknown  docs

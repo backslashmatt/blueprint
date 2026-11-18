@@ -35,6 +35,14 @@ const FIXTURE: &[(&str, &str)] = &[
         "use crate::graph::Graph;\n\nimpl Graph {\n    pub fn len(&self) -> usize { self.nodes.len() }\n}\n\nimpl Foreign {\n    fn odd(&self) {}\n}\n\npub struct Graph2;\nfn broken() { let x = ; }\n",
     ),
     ("core/tests/it.rs", "#[test]\nfn it() {}\n"),
+    (
+        "core/src/main.rs",
+        "struct Args;\nimpl Args { fn parse() {} }\nfn main() {}\n",
+    ),
+    (
+        "core/src/bin/tool.rs",
+        "struct Args;\nimpl Args { fn parse() {} }\nfn main() {}\n",
+    ),
     ("web/package.json", "{ \"name\": \"web\" }"),
     ("web/src/index.ts", "export const x = 1;\n"),
 ];
@@ -44,7 +52,7 @@ fn types_functions_and_methods_sit_under_their_modules() {
     let model = deep(FIXTURE);
     let ids: Vec<String> = model
         .nodes()
-        .filter(|n| n.id.level() >= Level::Component)
+        .filter(|n| n.id.level() >= Level::Module)
         .map(|n| String::from(n.id.clone()))
         .collect();
     let has = |id: &str| assert!(ids.iter().any(|i| i == id), "no {id} in {ids:#?}");
@@ -57,7 +65,15 @@ fn types_functions_and_methods_sit_under_their_modules() {
     // Methods sit under their type, even from another module's impl; a
     // trait impl's method is named for its trait.
     has("L4:cargo:core#graph/Graph/new");
-    has("L4:cargo:core#graph/Graph/len");
+    // An impl in another module does not reach into the type's module.
+    has("L4:cargo:core#util/impl Graph/len");
+    // Each binary besides the primary crate has its own namespace.
+    has("L2:cargo:core#");
+    has("L2:cargo:core#(bin main)");
+    has("L3:cargo:core#(bin main)/Args");
+    has("L4:cargo:core#(bin main)/Args/parse");
+    has("L4:cargo:core#(bin tool)/Args/parse");
+    has("L4:cargo:core#(bin tool)/(functions)/main");
     has("L4:cargo:core#graph/Graph/<Default>%3A%3Adefault");
     has("L4:cargo:core#graph/Graph/<Walk>%3A%3Awalk");
     has("L4:cargo:core#graph/Walk/walk");
@@ -91,7 +107,7 @@ fn confidence_follows_the_module_and_the_parse() {
         "a method on a type outside the crate is placed by inference"
     );
     assert_eq!(
-        conf("L4:cargo:core#graph/Graph/len"),
+        conf("L4:cargo:core#util/impl Graph/len"),
         Some(Confidence::Inferred)
     );
     let unknown = model

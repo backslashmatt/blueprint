@@ -257,9 +257,9 @@ fn index_then_model_reads_the_index_not_the_objects() {
     let _ = std::fs::remove_dir_all(&cache);
 
     let first = stdout(&bp_with_cache(&["index", d], &cache));
-    assert!(first.ends_with(" indexed (8 nodes)\n"), "{first}");
+    assert!(first.ends_with(" indexed (14 nodes)\n"), "{first}");
     let again = stdout(&bp_with_cache(&["index", d, "--rev", "HEAD"], &cache));
-    assert!(again.ends_with(" already indexed (8 nodes)\n"), "{again}");
+    assert!(again.ends_with(" already indexed (14 nodes)\n"), "{again}");
     let index_dirs = std::fs::read_dir(cache.join("index")).unwrap().count();
     assert_eq!(index_dirs, 1, "one index directory per repository");
 
@@ -306,7 +306,7 @@ fn a_damaged_index_is_dropped_and_rebuilt() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rebuilt = stdout(&bp_with_cache(&["index", d], &cache));
-    assert!(rebuilt.ends_with(" indexed (8 nodes)\n"), "{rebuilt}");
+    assert!(rebuilt.ends_with(" indexed (14 nodes)\n"), "{rebuilt}");
 }
 
 #[test]

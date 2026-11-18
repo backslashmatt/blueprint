@@ -152,8 +152,8 @@ pub fn analyse_placed(
 }
 
 /// One `unknown` L2 directory node per top-level directory of `system` that
-/// holds any of `files`. Files directly in the system's directory belong to
-/// the system node itself.
+/// holds any of `files`, and `./` for files directly in the system's own
+/// directory (its manifest, README and so on), so every file has an L2 home.
 fn directories(
     system: &NodeId,
     key: &SystemKey,
@@ -162,14 +162,22 @@ fn directories(
     diags: &mut Vec<Diagnostic>,
 ) {
     let depth = key.dir.segments().len();
-    let tops: BTreeSet<&String> = files
+    let tops: BTreeSet<String> = files
         .iter()
-        .filter(|f| f.segments().len() > depth + 1)
-        .map(|f| &f.segments()[depth])
+        .filter(|f| f.segments().len() > depth)
+        .map(|f| {
+            if f.segments().len() > depth + 1 {
+                f.segments()[depth].clone()
+            } else {
+                ".".to_owned()
+            }
+        })
         .collect();
     for top in tops {
         let mut dir = key.dir.segments().to_vec();
-        dir.push(top.clone());
+        if top != "." {
+            dir.push(top.clone());
+        }
         // The trailing `/` keeps directory ids apart from module ids.
         let node = Node {
             id: NodeId::within(Level::Module, key.clone(), vec![format!("{top}/")]),

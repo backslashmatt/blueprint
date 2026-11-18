@@ -2,10 +2,19 @@ nodes:
   L1:cargo:bins#  System  "bins"  Exact  bins/Cargo.toml
   L1:cargo:custom#  System  "custom"  Exact  custom/Cargo.toml
   L1:unowned:#  Unowned  "(unowned)"  Unknown  
-  L2:cargo:bins#cli  Module  "cli"  Exact  bins/src/bin/cli.rs  Private
+  L2:cargo:bins#  Module  "bins"  Exact  bins/src/lib.rs  Public
+  L2:cargo:bins#(bin big)  Module  "(bin big)"  Exact  bins/src/bin/big/main.rs  Public
+  L2:cargo:bins#(bin big)/parts  Module  "(bin big)::parts"  Exact  bins/src/bin/big/parts.rs  Private
+  L2:cargo:bins#(bin cli)  Module  "(bin cli)"  Exact  bins/src/bin/cli.rs  Public
+  L2:cargo:bins#(bin tool)  Module  "(bin tool)"  Exact  bins/src/bin/tool.rs  Public
+  L2:cargo:bins#(bin tool)/cli  Module  "(bin tool)::cli"  Exact  bins/src/bin/cli.rs  Private
+  L2:cargo:bins#.%2F  Directory  "./"  Unknown  bins
   L2:cargo:bins#core  Module  "core"  Exact  bins/src/core.rs  Public
-  L2:cargo:bins#parts  Module  "parts"  Exact  bins/src/bin/big/parts.rs  Private
+  L2:cargo:custom#  Module  "custom"  Exact  custom/lib.rs  Public
+  L2:cargo:custom#(bin t)  Module  "(bin t)"  Exact  custom/tools/t.rs  Public
+  L2:cargo:custom#(bin t)/helper  Module  "(bin t)::helper"  Exact  custom/tools/helper.rs  Private
+  L2:cargo:custom#.%2F  Directory  "./"  Unknown  custom
   L2:cargo:custom#a  Module  "a"  Exact  custom/a.rs  Public
-  L2:cargo:custom#helper  Module  "helper"  Exact  custom/tools/helper.rs  Private
+  L2:unowned:#.%2F  Directory  "./"  Unknown  
 edges:
 diagnostics:

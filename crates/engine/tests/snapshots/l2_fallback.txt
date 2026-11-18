@@ -3,8 +3,13 @@ nodes:
   L1:cargo:tool#  System  "tool"  Exact  tool/Cargo.toml
   L1:npm:editors/code#  System  "code"  Exact  editors/code/package.json
   L1:unowned:#  Unowned  "(unowned)"  Unknown  
+  L2:cargo:lib#  Module  "lib"  Exact  lib/src/lib.rs  Public
+  L2:cargo:lib#.%2F  Directory  "./"  Unknown  lib
+  L2:cargo:tool#.%2F  Directory  "./"  Unknown  tool
   L2:cargo:tool#assets%2F  Directory  "assets/"  Unknown  tool/assets
   L2:cargo:tool#scripts%2F  Directory  "scripts/"  Unknown  tool/scripts
+  L2:npm:editors/code#.%2F  Directory  "./"  Unknown  editors/code
+  L2:unowned:#.%2F  Directory  "./"  Unknown  
   L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
 edges:
 diagnostics:

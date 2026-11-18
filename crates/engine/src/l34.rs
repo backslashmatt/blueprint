@@ -212,11 +212,12 @@ impl Builder<'_> {
                     Some(t) if t != self_type => format!("<{t}>::{}", item.name),
                     _ => item.name.clone(),
                 };
-                match self.type_for(system, &module_id, self_type) {
-                    // In the impl's own module: resolved.
-                    Some((ty, true)) => (ty, segment, conf),
-                    // Elsewhere in the crate: matched by name only.
-                    Some((ty, false)) => (ty, segment, Confidence::Inferred.min(conf)),
+                // Only a type in the impl's own module is certain. Anything
+                // else goes to an `impl <Type>` group in the impl's module,
+                // so an unrelated type of the same name elsewhere can never
+                // move these methods (the diff compares by id).
+                match self.type_in(&module_id, system, self_type) {
+                    Some(ty) => (ty, segment, conf),
                     None => {
                         let conf = Confidence::Inferred.min(conf);
                         let group =
@@ -244,20 +245,15 @@ impl Builder<'_> {
         });
     }
 
-    /// The L3 node of the type `name` for a method in `module`, and whether
-    /// it is in that module: the one in that module if there is one, else
-    /// the only one of that name in the system. `None` if there is none, or
-    /// several and none in `module`.
-    fn type_for(&self, system: &SystemKey, module: &NodeId, name: &str) -> Option<(NodeId, bool)> {
-        let found = self.types.get(&(system.clone(), name.to_owned()))?;
-        let here = found.iter().find(|t| {
-            t.path().len() == module.path().len() + 1 && t.path().starts_with(module.path())
-        });
-        match (here, found.as_slice()) {
-            (Some(t), _) => Some((t.clone(), true)),
-            (None, [only]) => Some((only.clone(), false)),
-            _ => None,
-        }
+    /// The L3 node of the type `name` declared directly in `module`.
+    fn type_in(&self, module: &NodeId, system: &SystemKey, name: &str) -> Option<NodeId> {
+        self.types
+            .get(&(system.clone(), name.to_owned()))?
+            .iter()
+            .find(|t| {
+                t.path().len() == module.path().len() + 1 && t.path().starts_with(module.path())
+            })
+            .cloned()
     }
 
     /// A synthetic L3 component under `module`, added when first needed.

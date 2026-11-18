@@ -34,7 +34,7 @@ impl LanguageAnalyser for Rust {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -176,7 +176,9 @@ impl<'s> Out<'s> {
                 };
                 let owner = Owner::Impl {
                     self_type: type_name(src, ty),
-                    r#trait: node.child_by_field_name("trait").map(|t| type_name(src, t)),
+                    r#trait: node
+                        .child_by_field_name("trait")
+                        .map(|t| trait_name(src, t)),
                     header: hash(src, &[node], &[body]),
                 };
                 work.push((body, module.to_vec(), owner));
@@ -343,7 +345,9 @@ fn visibility(src: &[u8], item: Node<'_>) -> Option<Visibility> {
     })
 }
 
-/// The type's own name: `Foo` for `Foo<T>`, `a::b::Foo` or `&Foo`.
+/// The type's own name: `Foo` for `Foo<T>`, `a::b::Foo` or `&Foo`. Any
+/// other type (a tuple, `dyn Trait`, a slice) is spelt from its tokens, so
+/// formatting and lifetime names never change it.
 fn type_name(src: &[u8], ty: Node<'_>) -> String {
     let mut node = ty;
     loop {
@@ -354,9 +358,51 @@ fn type_name(src: &[u8], ty: Node<'_>) -> String {
         };
         match next {
             Some(n) => node = n,
-            None => return text(src, node),
+            None => return spelt(src, node),
         }
     }
+}
+
+/// A trait's name with its generic arguments, `From<u16>` for
+/// `std::convert::From<u16>`, so the impls of one trait for different
+/// arguments have different ids rather than order-dependent suffixes.
+fn trait_name(src: &[u8], tr: Node<'_>) -> String {
+    match (
+        tr.kind(),
+        tr.child_by_field_name("type"),
+        tr.child_by_field_name("type_arguments"),
+    ) {
+        ("generic_type", Some(base), Some(args)) => {
+            format!("{}{}", type_name(src, base), spelt(src, args))
+        }
+        _ => type_name(src, tr),
+    }
+}
+
+/// `node`'s tokens without comments or lifetimes, joined with a space only
+/// where two words would otherwise run together: `(&'a u8, Vec<T>)` gives
+/// `(&u8,Vec<T>)`.
+fn spelt(src: &[u8], node: Node<'_>) -> String {
+    let mut out = String::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind().ends_with("comment") || n.kind() == "lifetime" {
+            continue;
+        }
+        if n.child_count() == 0 {
+            let t = text(src, n);
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if word(out.chars().last()) && word(t.chars().next()) {
+                out.push(' ');
+            }
+            out.push_str(&t);
+        } else {
+            let mut cursor = n.walk();
+            let children: Vec<Node<'_>> = n.children(&mut cursor).collect();
+            stack.extend(children.into_iter().rev());
+        }
+    }
+    out
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

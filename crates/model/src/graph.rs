@@ -259,7 +259,14 @@ impl TryFrom<String> for NodeId {
         };
         let dir = RepoPath::parse(&split(dir_raw).join("/")).map_err(|_| bad())?;
         let path = split(path);
-        if path.iter().any(String::is_empty) || (level == Level::System) != path.is_empty() {
+        // L1 has no path; L3 and L4 always have one; an empty L2 path is a
+        // crate's root module (DR 0008).
+        let path_ok = match level {
+            Level::System => path.is_empty(),
+            Level::Module => true,
+            Level::Component | Level::Code => !path.is_empty(),
+        };
+        if path.iter().any(String::is_empty) || !path_ok {
             return Err(bad());
         }
         let id = NodeId {
@@ -765,6 +772,8 @@ mod tests {
     fn id_text_round_trips_and_rejects_junk() {
         for id in [
             NodeId::system(key("")),
+            // A crate's root module.
+            NodeId::within(Level::Module, key("crates/x"), Vec::new()),
             NodeId::within(
                 Level::Code,
                 key("crates/x"),
@@ -777,7 +786,8 @@ mod tests {
             "garbage",
             "L9:cargo:#",
             "L1:cargo:x#y",
-            "L2:cargo:x#",
+            "L3:cargo:x#",
+            "L4:cargo:x#",
             "L2:cargo:x#a//b",
             "L1:cargo:a/../b#",
             "L1:cargo:a%2fb#",

@@ -11,6 +11,9 @@ nodes:
   L1:cargo:crates/ui#  System  "blueprint-ui"  Exact  crates/ui/Cargo.toml
   L1:cargo:xtask#  System  "xtask"  Exact  xtask/Cargo.toml
   L1:unowned:#  Unowned  "(unowned)"  Unknown  
+  L2:cargo:bench#  Module  "blueprint-bench"  Exact  bench/src/lib.rs  Public
+  L2:cargo:bench#(bin bp-bench)  Module  "(bin bp-bench)"  Exact  bench/src/bin/bp-bench.rs  Public
+  L2:cargo:bench#.%2F  Directory  "./"  Unknown  bench
   L2:cargo:bench#budgets  Module  "budgets"  Exact  bench/src/budgets.rs  Public
   L2:cargo:bench#budgets/tests  Module  "budgets::tests"  Exact  bench/src/budgets.rs  Private
   L2:cargo:bench#floor  Module  "floor"  Exact  bench/src/floor.rs  Public
@@ -21,8 +24,14 @@ nodes:
   L2:cargo:bench#report/tests  Module  "report::tests"  Exact  bench/src/report.rs  Private
   L2:cargo:bench#repos  Module  "repos"  Exact  bench/src/repos.rs  Public
   L2:cargo:bench#repos/tests  Module  "repos::tests"  Exact  bench/src/repos.rs  Private
+  L2:cargo:crates/app#  Module  "blueprint-app"  Exact  crates/app/src/lib.rs  Public
+  L2:cargo:crates/app#.%2F  Directory  "./"  Unknown  crates/app
+  L2:cargo:crates/cli#  Module  "blueprint-cli"  Exact  crates/cli/src/main.rs  Public
+  L2:cargo:crates/cli#.%2F  Directory  "./"  Unknown  crates/cli
   L2:cargo:crates/cli#tests  Module  "tests"  Exact  crates/cli/src/main.rs  Private
   L2:cargo:crates/cli#tests%2F  Directory  "tests/"  Unknown  crates/cli/tests
+  L2:cargo:crates/engine#  Module  "blueprint-engine"  Exact  crates/engine/src/lib.rs  Public
+  L2:cargo:crates/engine#.%2F  Directory  "./"  Unknown  crates/engine
   L2:cargo:crates/engine#git  Module  "git"  Exact  crates/engine/src/git.rs  Public
   L2:cargo:crates/engine#index  Module  "index"  Exact  crates/engine/src/index.rs  Public
   L2:cargo:crates/engine#index/tests  Module  "index::tests"  Exact  crates/engine/src/index.rs  Private
@@ -42,19 +51,35 @@ nodes:
   L2:cargo:crates/engine#l34  Module  "l34"  Exact  crates/engine/src/l34.rs  Public
   L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
   L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests
+  L2:cargo:crates/lang-rust#  Module  "blueprint-lang-rust"  Exact  crates/lang-rust/src/lib.rs  Public
+  L2:cargo:crates/lang-rust#.%2F  Directory  "./"  Unknown  crates/lang-rust
   L2:cargo:crates/lang-rust#tests%2F  Directory  "tests/"  Unknown  crates/lang-rust/tests
+  L2:cargo:crates/model#  Module  "blueprint-model"  Exact  crates/model/src/lib.rs  Public
+  L2:cargo:crates/model#.%2F  Directory  "./"  Unknown  crates/model
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
   L2:cargo:crates/model#lang  Module  "lang"  Exact  crates/model/src/lang.rs  Public
   L2:cargo:crates/model#tests  Module  "tests"  Exact  crates/model/src/lib.rs  Private
+  L2:cargo:crates/protocol#  Module  "blueprint-protocol"  Exact  crates/protocol/src/lib.rs  Public
+  L2:cargo:crates/protocol#.%2F  Directory  "./"  Unknown  crates/protocol
+  L2:cargo:crates/store#  Module  "blueprint-store"  Exact  crates/store/src/lib.rs  Public
+  L2:cargo:crates/store#.%2F  Directory  "./"  Unknown  crates/store
   L2:cargo:crates/store#checksum  Module  "checksum"  Exact  crates/store/src/checksum.rs  Private
   L2:cargo:crates/store#checksum/tests  Module  "checksum::tests"  Exact  crates/store/src/checksum.rs  Private
   L2:cargo:crates/store#segment  Module  "segment"  Exact  crates/store/src/segment.rs  Private
   L2:cargo:crates/store#store  Module  "store"  Exact  crates/store/src/store.rs  Private
   L2:cargo:crates/store#tests%2F  Directory  "tests/"  Unknown  crates/store/tests
+  L2:cargo:crates/store/fuzz#  Module  "blueprint-store-fuzz"  Exact  crates/store/fuzz/fuzz_targets/segment.rs  Public
+  L2:cargo:crates/store/fuzz#.%2F  Directory  "./"  Unknown  crates/store/fuzz
+  L2:cargo:crates/ui#  Module  "blueprint-ui"  Exact  crates/ui/src/lib.rs  Public
+  L2:cargo:crates/ui#.%2F  Directory  "./"  Unknown  crates/ui
+  L2:cargo:xtask#  Module  "xtask"  Exact  xtask/src/lib.rs  Public
+  L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
+  L2:cargo:xtask#.%2F  Directory  "./"  Unknown  xtask
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs  Public
   L2:cargo:xtask#layering/tests  Module  "layering::tests"  Exact  xtask/src/layering.rs  Private
   L2:cargo:xtask#tests%2F  Directory  "tests/"  Unknown  xtask/tests
+  L2:unowned:#.%2F  Directory  "./"  Unknown  
   L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
 edges:
   L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}

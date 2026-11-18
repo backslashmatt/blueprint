@@ -8,7 +8,7 @@ mod common;
 
 use blueprint_engine::l1::{self, Diagnostic};
 use blueprint_engine::l2;
-use blueprint_model::{Confidence, Level, Model, RepoPath};
+use blueprint_model::{Confidence, Level, Model, NodeKind, RepoPath};
 
 use common::{Files, files, render, snapshot};
 
@@ -68,9 +68,9 @@ fn rust_module_tree_follows_the_reference_rules() {
     assert_eq!(confidence(&model, "gone"), Some(Confidence::Inferred));
     assert_eq!(confidence(&model, "type"), Some(Confidence::Exact));
     assert_eq!(
-        confidence(&model, "cli"),
+        confidence(&model, "(bin main)::cli"),
         Some(Confidence::Exact),
-        "binary-only modules are included"
+        "binary-only modules are included, in the binary's own namespace"
     );
 }
 
@@ -197,7 +197,12 @@ fn deeply_nested_inline_modules_stop_at_the_depth_limit() {
         "took {:?}",
         start.elapsed()
     );
-    assert_eq!(model.level(Level::Module).count(), l2::rust::MAX_DEPTH + 1);
+    // The nested modules up to the limit, plus the crate root.
+    let modules = model
+        .level(Level::Module)
+        .filter(|n| n.kind == NodeKind::Module)
+        .count();
+    assert_eq!(modules, l2::rust::MAX_DEPTH + 2);
     assert!(
         diags.iter().any(|d| d.message.contains("deeper than")),
         "{diags:?}"
@@ -314,7 +319,14 @@ fn crate_roots_come_from_the_manifest() {
         ],
     );
     let n = names(&model);
-    for m in ["a", "helper", "core", "cli", "parts"] {
+    // The library is the primary crate; every binary has a namespace.
+    for m in [
+        "a",
+        "(bin t)::helper",
+        "core",
+        "(bin tool)::cli",
+        "(bin big)::parts",
+    ] {
         assert!(n.contains(&m.to_owned()), "{m} missing from {n:?}");
     }
 }
