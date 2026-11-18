@@ -327,6 +327,26 @@ pub struct Node {
     /// does not apply, as for systems and directories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
+    /// Where an L3 or L4 node's code is, and fingerprints of it, for the
+    /// diff. `None` above L3 and for files no analyser reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Code>,
+}
+
+/// The code of an L3 or L4 node: its lines in [`Node::source`], and hashes
+/// of its tokens that ignore whitespace, comments and the node's own name
+/// (DR 0008). Equal body hashes with different ids mean a move or rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Code {
+    /// First and last line, 1-based and inclusive.
+    pub lines: (u32, u32),
+    /// The line the body starts on; lines before it are the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_line: Option<u32>,
+    /// Hash of everything outside the body: the public surface.
+    pub signature_hash: u64,
+    /// Hash of the body.
+    pub body_hash: u64,
 }
 
 /// How visible a node is outside its parent (§3.3: public surface changes).
@@ -648,6 +668,7 @@ mod tests {
             parent: None,
             confidence: Confidence::Exact,
             visibility: None,
+            code: None,
         }
     }
 
@@ -664,6 +685,7 @@ mod tests {
             parent: Some(NodeId::system(key(dir))),
             confidence: Confidence::Exact,
             visibility: Some(Visibility::Public),
+            code: None,
         }
     }
 

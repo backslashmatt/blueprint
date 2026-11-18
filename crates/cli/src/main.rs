@@ -8,7 +8,7 @@ use blueprint_engine::git::{ObjectId, Repo};
 use blueprint_engine::index::{Index, Indexed};
 use blueprint_engine::l1::Diagnostic;
 use blueprint_engine::source::{Commit, Directory};
-use blueprint_model::{Level, Model};
+use blueprint_model::{Level, Model, RepoPath};
 
 /// Exit code for a command that ran but could not do its job.
 const EXIT_FAILURE: u8 = 1;
@@ -16,7 +16,7 @@ const EXIT_FAILURE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
 const USAGE: &str = "\
-usage: bp model <dir> [--rev <rev>] [--level 1|2] [--json]
+usage: bp model <dir> [--rev <rev>] [--level 1|2|3|4] [--json]
        bp index <repo> [--rev <rev>]
        bp --version
        bp --help
@@ -33,13 +33,15 @@ options for index:
 options for model:
   --rev <rev>   Read the commit <rev> of the git repository at <dir> instead of
                 its working tree (a branch, tag, commit id or HEAD)
-  --level 1|2   The deepest level to include (default 2)
+  --level N     The deepest level to include, 1 to 4 (default 2)
   --json        Print the model as JSON (docs/model-json.md) instead of text";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Depth {
     L1,
     L2,
+    L3,
+    L4,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,8 +85,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
                         level = match it.next().map(String::as_str) {
                             Some("1") => Depth::L1,
                             Some("2") => Depth::L2,
-                            Some(v) => return Err(format!("--level takes 1 or 2, not `{v}`")),
-                            None => return Err("--level needs a value: 1 or 2".into()),
+                            Some("3") => Depth::L3,
+                            Some("4") => Depth::L4,
+                            Some(v) => return Err(format!("--level takes 1 to 4, not `{v}`")),
+                            None => return Err("--level needs a value: 1 to 4".into()),
                         }
                     }
                     "--help" | "-h" => return Ok(Command::Help),
@@ -135,6 +139,8 @@ fn up_to(model: &Model, depth: Depth) -> Model {
     let max = match depth {
         Depth::L1 => Level::System,
         Depth::L2 => Level::Module,
+        Depth::L3 => Level::Component,
+        Depth::L4 => Level::Code,
     };
     let mut out = Model::default();
     // Nodes come out parents first (ids sort by level), so every parent is
@@ -234,15 +240,36 @@ fn report_peak_rss() {
 }
 
 fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
+    let deep = matches!(level, Depth::L3 | Depth::L4);
     let (model, diags) = match rev {
         None => match Directory::open(path) {
             Ok((dir, mut diags)) => {
-                let (model, more) = blueprint_engine::analyse(dir.paths(), &|p| dir.read(p));
+                let read = |p: &RepoPath| dir.read(p);
+                let (model, more) = if deep {
+                    blueprint_engine::analyse_deep(dir.paths(), &read)
+                } else {
+                    blueprint_engine::analyse(dir.paths(), &read)
+                };
                 diags.extend(more);
                 (model, diags)
             }
             Err(e) => {
                 eprintln!("bp: cannot read {}: {e}", path.display());
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        },
+        // The index holds L1–L2 only, so deeper levels are analysed.
+        Some(rev) if deep => match Commit::open(path, rev) {
+            Ok((source, mut diags)) => {
+                let (model, more) =
+                    blueprint_engine::analyse_deep(&source.paths(), &|p| source.read(p));
+                diags.extend(more);
+                diags.extend(unreadable(&source));
+                diags.sort();
+                (model, diags)
+            }
+            Err(e) => {
+                eprintln!("bp: {}: {e}", path.display());
                 return ExitCode::from(EXIT_FAILURE);
             }
         },
@@ -334,18 +361,14 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
     diags.extend(more);
     // A model built without some of its files describes less than the commit,
     // so it is reported and never stored under the commit's tree.
-    let unreadable = source.unreadable();
-    for path in &unreadable {
-        diags.push(Diagnostic {
-            path: path.clone(),
-            message: "the file's object could not be read (a partial clone?)".into(),
-        });
-    }
+    let missing = unreadable(&source);
+    let complete = missing.is_empty();
+    diags.extend(missing);
     diags.sort();
     let indexed = Indexed::new(model, &diags);
     let mut stored = false;
     if store
-        && unreadable.is_empty()
+        && complete
         && let Some(mut index) = index
     {
         stored = index
@@ -358,6 +381,18 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
         from_index: false,
         stored,
     })
+}
+
+/// A warning for each file of `source` whose object could not be read.
+fn unreadable(source: &Commit) -> Vec<Diagnostic> {
+    source
+        .unreadable()
+        .into_iter()
+        .map(|path| Diagnostic {
+            path,
+            message: "the file's object could not be read (a partial clone?)".into(),
+        })
+        .collect()
 }
 
 fn index(path: &Path, rev: &str) -> ExitCode {
@@ -446,7 +481,7 @@ mod tests {
             &["model"][..],
             &["model", "d", "e"],
             &["model", "d", "--level"],
-            &["model", "d", "--level", "3"],
+            &["model", "d", "--level", "5"],
             &["model", "d", "--rev"],
             &["model", "d", "--rev", ""],
             &["model", "d", "--rev", "--json"],

@@ -293,6 +293,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
                 Confidence::Unknown
             },
             visibility: None,
+            code: None,
         };
         match model.add_node(node) {
             Ok(()) => added.push(i),

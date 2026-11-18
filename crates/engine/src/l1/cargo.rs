@@ -295,6 +295,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
                 Confidence::Unknown
             },
             visibility: None,
+            code: None,
         };
         if let Err(e) = model.add_node(node) {
             diags.push(Diagnostic {

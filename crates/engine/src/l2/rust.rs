@@ -30,7 +30,7 @@
 //! Recursion is bounded by [`MAX_DEPTH`] and the work per crate by
 //! [`MAX_FILE_WALKS`], so hostile input cannot exhaust the stack or time.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use blueprint_model::{
     Confidence, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey, Visibility,
@@ -55,15 +55,16 @@ struct Ctx<'a> {
     /// Files on the current inclusion chain, to stop `#[path]` cycles.
     stack: Vec<Vec<String>>,
     walks: usize,
-    /// Every file walked: what the module tree reaches.
-    reached: BTreeSet<RepoPath>,
+    /// Every file walked (what the module tree reaches), with the module it
+    /// is. A file included twice keeps the first module.
+    reached: BTreeMap<RepoPath, Vec<String>>,
     model: &'a mut Model,
     diags: &'a mut Vec<Diagnostic>,
 }
 
 /// Adds the module tree of the package `system` to `model`, and returns the
-/// files it reached; `None` if the package has no Rust crate root, so the
-/// caller can fall back to directories.
+/// files it reached, each with the module path it is; `None` if the package
+/// has no Rust crate root, so the caller can fall back to directories.
 pub fn analyse_crate(
     system: &NodeId,
     key: &SystemKey,
@@ -71,7 +72,7 @@ pub fn analyse_crate(
     read: Read<'_>,
     model: &mut Model,
     diags: &mut Vec<Diagnostic>,
-) -> Option<BTreeSet<RepoPath>> {
+) -> Option<BTreeMap<RepoPath, Vec<String>>> {
     let roots = crate_roots(key, files, read);
     if roots.is_empty() {
         return None;
@@ -83,7 +84,7 @@ pub fn analyse_crate(
         read,
         stack: Vec::new(),
         walks: 0,
-        reached: BTreeSet::new(),
+        reached: BTreeMap::new(),
         model,
         diags,
     };
@@ -196,6 +197,7 @@ impl Ctx<'_> {
             parent: Some(self.system.clone()),
             confidence,
             visibility: Some(visibility),
+            code: None,
         };
         match self.model.add_node(node) {
             Ok(()) => true,
@@ -239,7 +241,9 @@ impl Ctx<'_> {
         }
         self.walks += 1;
         let path = repo_path(file);
-        self.reached.insert(path.clone());
+        self.reached
+            .entry(path.clone())
+            .or_insert_with(|| module.to_vec());
         let Some(bytes) = (self.read)(&path) else {
             self.diag(file, "cannot be read");
             return Confidence::Unknown;

@@ -25,9 +25,29 @@ use crate::l1::{Diagnostic, Read};
 /// The display name of the synthetic system for files outside every system.
 pub const UNOWNED_NAME: &str = "(unowned)";
 
+/// Where a file sits in the L1–L2 model, for the L3–L4 pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    /// The system that owns it.
+    pub system: SystemKey,
+    /// The Rust module it is, if a module tree reached it; otherwise it is
+    /// shown by directory.
+    pub module: Option<Vec<String>>,
+}
+
 /// Adds L2 nodes for every L1 system already in `model`, and the unowned
 /// system for files outside all of them. Never fails: problems degrade nodes.
 pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Diagnostic> {
+    analyse_placed(paths, read, model).0
+}
+
+/// [`analyse`], also returning where each file was placed.
+pub fn analyse_placed(
+    paths: &[RepoPath],
+    read: Read<'_>,
+    model: &mut Model,
+) -> (Vec<Diagnostic>, BTreeMap<RepoPath, Placement>) {
+    let mut placed = BTreeMap::new();
     let mut diags = Vec::new();
     let systems: Vec<(NodeId, SystemKey)> = model
         .level(Level::System)
@@ -63,9 +83,31 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         // build scripts, docs, files behind unparsed macros) still shows up,
         // by directory.
         let rest: BTreeSet<&RepoPath> = match &reached {
-            Some(r) => files.iter().copied().filter(|f| !r.contains(*f)).collect(),
+            Some(r) => files
+                .iter()
+                .copied()
+                .filter(|f| !r.contains_key(*f))
+                .collect(),
             None => files,
         };
+        for (path, module) in reached.into_iter().flatten() {
+            placed.insert(
+                path,
+                Placement {
+                    system: key.clone(),
+                    module: Some(module),
+                },
+            );
+        }
+        for f in &rest {
+            placed.insert(
+                (*f).clone(),
+                Placement {
+                    system: key.clone(),
+                    module: None,
+                },
+            );
+        }
         directories(id, key, &rest, model, &mut diags);
     }
 
@@ -83,11 +125,21 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
             parent: None,
             confidence: Confidence::Unknown,
             visibility: None,
+            code: None,
         };
         match model.add_node(node) {
             Ok(()) => {
                 let files: BTreeSet<&RepoPath> = unowned.into_iter().collect();
                 directories(&id, &key, &files, model, &mut diags);
+                for f in files {
+                    placed.insert(
+                        f.clone(),
+                        Placement {
+                            system: key.clone(),
+                            module: None,
+                        },
+                    );
+                }
             }
             Err(e) => diags.push(Diagnostic {
                 path: RepoPath::root(),
@@ -96,7 +148,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         }
     }
     diags.sort();
-    diags
+    (diags, placed)
 }
 
 /// One `unknown` L2 directory node per top-level directory of `system` that
@@ -127,6 +179,7 @@ fn directories(
             parent: Some(system.clone()),
             confidence: Confidence::Unknown,
             visibility: None,
+            code: None,
         };
         if let Err(e) = model.add_node(node) {
             diags.push(Diagnostic {
