@@ -420,3 +420,38 @@ fn a_request_sent_after_open_reads_the_newly_opened_repository() {
     );
     until_last(&rx, 2, &mut others);
 }
+
+#[test]
+fn requests_sent_from_many_threads_each_get_one_final_reply() {
+    let a = repo("threads-a", &[BASE]);
+    let b = repo("threads-b", &[BASE, HEAD]);
+    let (service, rx) = start();
+    let service = std::sync::Arc::new(service);
+    let mut senders = Vec::new();
+    for t in 0..4u64 {
+        let service = std::sync::Arc::clone(&service);
+        let (a, b) = (a.display().to_string(), b.display().to_string());
+        senders.push(std::thread::spawn(move || {
+            for i in 0..10u64 {
+                let id = t * 100 + i * 2;
+                let path = if (t + i) % 2 == 0 { &a } else { &b };
+                service.send(id, Request::Open { path: path.clone() });
+                service.send(id + 1, Request::Model { rev: "main".into() });
+            }
+        }));
+    }
+    for s in senders {
+        s.join().unwrap();
+    }
+    let mut finals = std::collections::BTreeMap::new();
+    while finals.len() < 80 {
+        let r = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        if r.response.is_last() {
+            assert!(
+                finals.insert(r.id, ()).is_none(),
+                "{} got two final replies",
+                r.id
+            );
+        }
+    }
+}

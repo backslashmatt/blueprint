@@ -88,7 +88,7 @@ pub struct Service {
     shared: Arc<Shared>,
     lanes: HashMap<Lane, Sender<Job>>,
     /// The repository the last [`Request::Open`] named, as later requests
-    /// see it.
+    /// see it. Held for the whole of [`Service::send`].
     repo: Mutex<Option<PathBuf>>,
 }
 
@@ -136,16 +136,16 @@ impl Service {
     /// sent before it, even if that Open has not finished yet.
     pub fn send(&self, id: RequestId, request: Request) {
         let lane = request.lane();
-        let repo = {
-            let mut repo = self.repo.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Request::Open { path } = &request {
-                *repo = Some(PathBuf::from(path));
-                for l in LANES {
-                    *self.shared.lane(l) += 1;
-                }
+        // One send at a time: the repository a request is bound to, its
+        // generation and its place in the queue must agree with every Open,
+        // even when several threads send.
+        let mut repo = self.repo.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Request::Open { path } = &request {
+            *repo = Some(PathBuf::from(path));
+            for l in LANES {
+                *self.shared.lane(l) += 1;
             }
-            repo.clone()
-        };
+        }
         let generation = {
             let mut g = self.shared.lane(lane);
             *g += 1;
@@ -155,7 +155,7 @@ impl Service {
             id,
             request,
             generation,
-            repo,
+            repo: repo.clone(),
         };
         if self.lanes[&lane].send(job).is_err() {
             self.shared.send(
