@@ -11,6 +11,7 @@
 | `bp model <dir> --level 1` | Prints L1 systems and their edges only (`--level 2`, the default, adds L2 modules) |
 | `bp model <dir> --level 3`, `--level 4` | Adds L3 components (types, groups of functions, and one component per file no analyser reads), then L4 functions and methods (DR 0008) |
 | `bp model <dir> --rev <rev>` | Prints the model of commit `<rev>` of the git repository at `<dir>`, not of its working tree. `<rev>` is a branch, tag, full or abbreviated commit id, `HEAD`, or any rev-parse expression such as `main~2` |
+| `bp diff <repo> <base> <head> [--json]` | Prints the architectural diff of two commits |
 | `bp index <repo> [--rev <rev>] [--level 2\|4]` | Analyses commit `<rev>` (default `HEAD`) and stores its L1–L2 model in the index, so that `bp model --rev` reopens it without analysing. With `--level 4` it also parses every Rust file and stores its facts |
 | `bp --version`, `bp -V` | Prints `bp <version>` |
 | `bp --help`, `bp -h`, `bp help`, `bp` | Prints usage |
@@ -27,7 +28,7 @@ If some of a commit's files cannot be read, for example in a partial clone, each
 
 The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set `BLUEPRINT_CACHE_DIR` to use another directory. Nothing is ever written inside the repository. The index can be deleted at any time. A damaged index is dropped with a warning and rebuilt, never fatal. Models are keyed by the commit's tree id, so commits with the same files share one (DR 0007), and facts by the file's blob id and the analyser's name and version (DR 0008). Entries written by an older version of the analysers are dropped when the index is compacted.
 
-Diffs (`bp diff`) arrive in M2.
+`bp diff <repo> <base> <head>` prints the architectural diff of two commits: findings first (new dependencies across systems or modules, new dependency cycles), then changed nodes, then added and removed edges. Text lines are tab-separated: `finding`, `added`, `removed`, `moved`, `renamed`, `surface`, `contained`, `changed`, `+edge` or `-edge`, then the ids. `--json` prints the format in [diff-json.md](diff-json.md). Two identical commits print nothing. It exits 0 whether or not anything changed.
 
 ## Output
 

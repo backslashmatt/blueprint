@@ -21,6 +21,7 @@ const EXIT_USAGE: u8 = 2;
 const USAGE: &str = "\
 usage: bp model <dir> [--rev <rev>] [--level 1|2|3|4] [--json]
        bp index <repo> [--rev <rev>] [--level 2|4]
+       bp diff <repo> <base> <head> [--json]
        bp --version
        bp --help
 
@@ -29,6 +30,13 @@ commands:
 
   index <repo>  Analyse a commit (default HEAD) and store its model in the
                 index, so that `bp model --rev` reopens it without analysing
+
+  diff <repo> <base> <head>
+                Print the architectural diff of two commits: findings (new
+                dependencies and cycles), then changed nodes and edges
+
+options for diff:
+  --json        Print the diff as JSON (docs/diff-json.md) instead of text
 
 options for index:
   --rev <rev>   The commit to index (default HEAD)
@@ -60,6 +68,12 @@ enum Command {
         deep: bool,
     },
     Help,
+    Diff {
+        path: PathBuf,
+        base: String,
+        head: String,
+        json: bool,
+    },
     Model {
         path: PathBuf,
         rev: Option<String>,
@@ -114,6 +128,31 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 level,
                 json,
             })
+        }
+        "diff" => {
+            let mut json = false;
+            let mut positional = Vec::new();
+            for arg in rest {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    "--help" | "-h" => return Ok(Command::Help),
+                    flag if flag.starts_with('-') && flag != "-" => {
+                        return Err(format!("unknown option `{flag}`"));
+                    }
+                    p => positional.push(p.to_owned()),
+                }
+            }
+            match <[String; 3]>::try_from(positional) {
+                Ok([path, base, head]) => Ok(Command::Diff {
+                    path: PathBuf::from(path),
+                    base,
+                    head,
+                    json,
+                }),
+                Err(_) => {
+                    Err("diff needs a repository, a base revision and a head revision".into())
+                }
+            }
         }
         "index" => {
             let (mut path, mut rev, mut deep) = (None, None, false);
@@ -253,6 +292,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Index { path, rev, deep } => index(&path, &rev, deep),
+        Command::Diff {
+            path,
+            base,
+            head,
+            json,
+        } => diff(&path, &base, &head, json),
         Command::Model {
             path,
             rev,
@@ -448,6 +493,102 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
     })
 }
 
+/// `bp diff`: builds the L1–L4 model of both commits, with stored facts
+/// where the index has them, and prints the architectural diff.
+fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
+    let index = match Index::open_existing(path) {
+        Ok(index) => index,
+        Err(e) => {
+            eprintln!("warning: cannot open the index, analysing instead: {e}");
+            None
+        }
+    };
+    let mut models = Vec::new();
+    for rev in [base, head] {
+        match Commit::open(path, rev) {
+            Ok((source, mut diags)) => {
+                let deep = deep_at(&source, index.as_ref());
+                diags.extend(deep.diags);
+                diags.extend(unreadable(&source));
+                diags.sort();
+                warn(&diags);
+                models.push(deep.model);
+            }
+            Err(e) => {
+                eprintln!("bp: {}: {e}", path.display());
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        }
+    }
+    let d = blueprint_engine::diff::diff(&models[0], &models[1]);
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let written = if json {
+        serde_json::to_writer_pretty(&mut out, &d)
+            .map_err(std::io::Error::from)
+            .and_then(|()| out.write_all(b"\n"))
+    } else {
+        out.write_all(diff_text(&d).as_bytes())
+    };
+    if let Err(e) = written.and_then(|()| out.flush()) {
+        eprintln!("bp: cannot write the diff: {e}");
+        return ExitCode::from(EXIT_FAILURE);
+    }
+    ExitCode::SUCCESS
+}
+
+/// The text form of a diff: one tab-separated line per finding, node change
+/// and edge change, in that order.
+fn diff_text(d: &blueprint_engine::diff::Diff) -> String {
+    use blueprint_engine::diff::{Finding, NodeChange};
+    use std::fmt::Write as _;
+    let edge =
+        |k: &blueprint_model::EdgeKey| format!("{} -> {}\t{}", k.from, k.to, edge_kind(k.kind));
+    let mut s = String::new();
+    for f in &d.findings {
+        let _ = match f {
+            Finding::NewDependency { edge: k } => {
+                writeln!(s, "finding\tnew-dependency\t{}", edge(k))
+            }
+            Finding::NewCycle {
+                level,
+                nodes,
+                new_edges,
+            } => {
+                let nodes: Vec<String> = nodes.iter().map(ToString::to_string).collect();
+                let new: Vec<String> = new_edges
+                    .iter()
+                    .map(|k| format!("{} -> {}", k.from, k.to))
+                    .collect();
+                writeln!(
+                    s,
+                    "finding\tnew-cycle\tL{level}\t{}\tnew: {}",
+                    nodes.join(", "),
+                    new.join(", ")
+                )
+            }
+        };
+    }
+    for n in &d.nodes {
+        let _ = match n {
+            NodeChange::Added { id } => writeln!(s, "added\t{id}"),
+            NodeChange::Removed { id } => writeln!(s, "removed\t{id}"),
+            NodeChange::Moved { from, to } => writeln!(s, "moved\t{from} -> {to}"),
+            NodeChange::Renamed { from, to } => writeln!(s, "renamed\t{from} -> {to}"),
+            NodeChange::Surface { id } => writeln!(s, "surface\t{id}"),
+            NodeChange::Contained { id } => writeln!(s, "contained\t{id}"),
+            NodeChange::Changed { id } => writeln!(s, "changed\t{id}"),
+        };
+    }
+    for k in &d.added_edges {
+        let _ = writeln!(s, "+edge\t{}", edge(k));
+    }
+    for k in &d.removed_edges {
+        let _ = writeln!(s, "-edge\t{}", edge(k));
+    }
+    s
+}
+
 /// What [`deep_at`] built.
 struct Deep {
     model: Model,
@@ -641,6 +782,15 @@ mod tests {
                 json: true
             })
         );
+        assert_eq!(
+            parse(&args(&["diff", "r", "main", "HEAD", "--json"])),
+            Ok(Command::Diff {
+                path: "r".into(),
+                base: "main".into(),
+                head: "HEAD".into(),
+                json: true
+            })
+        );
         for bad in [
             &["model"][..],
             &["model", "d", "e"],
@@ -653,6 +803,9 @@ mod tests {
             &["index", "d", "e"],
             &["index", "d", "--rev"],
             &["index", "d", "--level", "1"],
+            &["diff", "r", "a"],
+            &["diff", "r", "a", "b", "c"],
+            &["diff", "r", "a", "b", "--x"],
             &["index", "d", "--level", "3"],
             &["index", "d", "--level"],
             &["model", "d", "--x"],
