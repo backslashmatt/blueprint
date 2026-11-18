@@ -306,7 +306,12 @@ fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
         Some(rev) if deep => match Commit::open(path, rev) {
             Ok((source, mut diags)) => {
                 let index = match Index::open_existing(path) {
-                    Ok(index) => index,
+                    Ok(index) => {
+                        for d in index.iter().flat_map(Index::dropped) {
+                            eprintln!("warning: index segment dropped and will be rebuilt: {d}");
+                        }
+                        index
+                    }
                     Err(e) => {
                         eprintln!("warning: cannot open the index, analysing instead: {e}");
                         None
@@ -502,23 +507,23 @@ fn unreadable(source: &Commit) -> Vec<Diagnostic> {
 
 fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
     match at_rev(path, rev, true) {
-        Ok(r) if deep => match index_facts(path, &r.commit.to_string()) {
-            Ok((parsed, reused)) => {
-                if !r.from_index {
-                    warn(&r.indexed.diagnostics());
+        // Facts are stored only for a commit whose L1–L2 model could be.
+        Ok(r) if deep && (r.from_index || r.stored) => {
+            match index_facts(path, &r.commit.to_string()) {
+                Ok((parsed, reused)) => {
+                    println!(
+                        "{} indexed to level 4 ({} nodes at L1–L2; {parsed} files parsed, {reused} reused)",
+                        r.commit,
+                        r.indexed.model.nodes().count()
+                    );
+                    ExitCode::SUCCESS
                 }
-                println!(
-                    "{} indexed to level 4 ({} nodes at L1–L2; {parsed} files parsed, {reused} reused)",
-                    r.commit,
-                    r.indexed.model.nodes().count()
-                );
-                ExitCode::SUCCESS
+                Err(e) => {
+                    eprintln!("bp: {}: {e}", path.display());
+                    ExitCode::from(EXIT_FAILURE)
+                }
             }
-            Err(e) => {
-                eprintln!("bp: {}: {e}", path.display());
-                ExitCode::from(EXIT_FAILURE)
-            }
-        },
+        }
         Ok(r) => {
             let nodes = r.indexed.model.nodes().count();
             if r.from_index {
@@ -548,11 +553,27 @@ fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
 /// Builds the L1–L4 model of `rev`, reusing the facts the index holds, and
 /// stores the facts of every file it had to parse. Returns how many files
 /// were parsed and how many reused.
+///
+/// # Errors
+/// If the commit or the index cannot be opened, a file cannot be read, or
+/// nothing that was parsed could be stored (object ids that are not SHA-1).
 fn index_facts(path: &Path, rev: &str) -> Result<(usize, usize), String> {
     let (source, _) = Commit::open(path, rev).map_err(|e| e.to_string())?;
     let mut index = Index::open(path)?;
     let deep = deep_at(&source, Some(&index));
-    index.put_facts(&Rust, deep.parsed.iter().map(|(b, f)| (*b, f)))?;
+    // Every level's diagnostics: the L1–L2 ones were not printed on the way.
+    warn(&deep.diags);
+    if !source.unreadable().is_empty() {
+        return Err(format!(
+            "{rev}: some files could not be read, so not every file's facts are stored"
+        ));
+    }
+    let stored = index.put_facts(&Rust, deep.parsed.iter().map(|(b, f)| (*b, f)))?;
+    if stored == 0 && !deep.parsed.is_empty() {
+        return Err(format!(
+            "{rev}: facts not stored: its object ids are not SHA-1"
+        ));
+    }
     Ok((deep.parsed.len(), deep.reused))
 }
 

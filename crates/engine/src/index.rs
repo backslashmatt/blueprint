@@ -37,9 +37,14 @@ const MAX_SEGMENTS: usize = 16;
 
 /// What kind of value a key holds (byte 24 of the key).
 const KIND_L1_L2_MODEL: u8 = 1;
-/// A language analyser's [`FileFacts`] for one blob. Bytes 25.. of the key
-/// hold the start of the analyser's name.
+/// A language analyser's [`FileFacts`] for one blob. Bytes 25..31 of the
+/// key hold the start of the analyser's name, and byte 31 [`FACTS_FORMAT`].
 const KIND_FACTS: u8 = 2;
+
+/// The layout of [`FileFacts`] itself. Bump it whenever `FileFacts` or what
+/// it holds changes shape, so stored facts that would still decode, with
+/// defaults for new fields, are not reused.
+const FACTS_FORMAT: u8 = 1;
 
 /// What the index holds for one tree: the model, and what the analysers
 /// could not fully understand when they built it.
@@ -224,8 +229,8 @@ impl Index {
 }
 
 /// The key for `analyser`'s facts of `blob`: the 20-byte blob id,
-/// `analyser`'s version, the kind, then up to 7 bytes of its name. `None` for
-/// ids of another length.
+/// `analyser`'s version, the kind, up to 6 bytes of its name, then
+/// [`FACTS_FORMAT`]. `None` for ids of another length.
 fn facts_key(analyser: &dyn LanguageAnalyser, blob: ObjectId) -> Option<Key> {
     let id = blob.as_bytes();
     if id.len() != 20 {
@@ -235,13 +240,15 @@ fn facts_key(analyser: &dyn LanguageAnalyser, blob: ObjectId) -> Option<Key> {
     k[..20].copy_from_slice(id);
     k[20..24].copy_from_slice(&analyser.version().to_le_bytes());
     k[24] = KIND_FACTS;
-    k[25..].copy_from_slice(&name_bytes(analyser));
+    k[25..31].copy_from_slice(&name_bytes(analyser));
+    k[31] = FACTS_FORMAT;
     Some(Key(k))
 }
 
-/// The first 7 bytes of `analyser`'s name, zero-padded: the end of its keys.
-fn name_bytes(analyser: &dyn LanguageAnalyser) -> [u8; KEY_LEN - 25] {
-    let mut out = [0u8; KEY_LEN - 25];
+/// The first 6 bytes of `analyser`'s name, zero-padded. Analysers' names
+/// must differ within them.
+fn name_bytes(analyser: &dyn LanguageAnalyser) -> [u8; 6] {
+    let mut out = [0u8; 6];
     let name = analyser.name().as_bytes();
     let n = name.len().min(out.len());
     out[..n].copy_from_slice(&name[..n]);
@@ -269,7 +276,9 @@ fn current_version(key: &Key) -> bool {
         // Rust is the only language analyser so far; facts of any other
         // name are from a version that no longer exists.
         KIND_FACTS => {
-            key.0[20..24] == Rust.version().to_le_bytes() && key.0[25..] == name_bytes(&Rust)
+            key.0[20..24] == Rust.version().to_le_bytes()
+                && key.0[25..31] == name_bytes(&Rust)
+                && key.0[31] == FACTS_FORMAT
         }
         _ => false,
     }
@@ -311,7 +320,8 @@ mod tests {
         assert_eq!(k.0[20..24], Rust.version().to_le_bytes());
         assert_eq!(k.0[24], KIND_FACTS);
         assert_eq!(&k.0[25..29], b"rust");
-        assert_eq!(k.0[29..], [0, 0, 0]);
+        assert_eq!(k.0[29..31], [0, 0]);
+        assert_eq!(k.0[31], FACTS_FORMAT);
         assert!(current_version(&k), "kept by compaction");
         let mut old = k;
         old.0[20..24].copy_from_slice(&(Rust.version() - 1).to_le_bytes());
@@ -319,6 +329,9 @@ mod tests {
         let mut other = k;
         other.0[25] = b'g';
         assert!(!current_version(&other), "no other analyser yet");
+        let mut format = k;
+        format.0[31] = FACTS_FORMAT + 1;
+        assert!(!current_version(&format), "another facts layout");
     }
 
     #[test]

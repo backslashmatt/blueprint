@@ -345,6 +345,9 @@ fn a_commit_with_unreadable_files_is_reported_and_never_indexed() {
     assert!(err.contains("not indexed"), "{err}");
     let again = bp_with_cache(&["index", d], &cache);
     assert_eq!(again.status.code(), Some(1), "nothing was stored to find");
+    let deep = bp_with_cache(&["index", d, "--level", "4"], &cache);
+    assert_eq!(deep.status.code(), Some(1), "level 4 fails the same way");
+    assert!(deep.stdout.is_empty(), "no success line");
 }
 
 #[cfg(target_os = "linux")]
