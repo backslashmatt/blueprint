@@ -442,13 +442,22 @@ fn diff_reports_what_the_second_commit_added() {
     // HEAD adds the app crate, which depends on core.
     assert!(text.contains("added\tL1:cargo:crates/app#\n"), "{text}");
     assert!(
-        text.contains("finding\tnew-dependency\tL1:cargo:crates/app# -> L1:cargo:crates/core#\tdepends-on\n"),
+        text.contains(
+            "finding\tnew-dependency\tL1:cargo:crates/app# -> L1:cargo:crates/core#\tdepends-on\n"
+        ),
         "{text}"
     );
     let json = stdout(&bp(&["diff", d, "HEAD~1", "HEAD", "--json"]));
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(v["findings"].as_array().is_some_and(|f| !f.is_empty()), "{json}");
-    assert_eq!(stdout(&bp(&["diff", d, "HEAD~1", "HEAD"])), text, "deterministic");
+    assert!(
+        v["findings"].as_array().is_some_and(|f| !f.is_empty()),
+        "{json}"
+    );
+    assert_eq!(
+        stdout(&bp(&["diff", d, "HEAD~1", "HEAD"])),
+        text,
+        "deterministic"
+    );
     assert_eq!(stdout(&bp(&["diff", d, "HEAD", "HEAD"])), "", "no change");
     let bad = bp(&["diff", d, "HEAD", "no-such-rev"]);
     assert_eq!(bad.status.code(), Some(1));
