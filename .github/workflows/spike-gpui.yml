@@ -1,5 +1,6 @@
-# M0 UI toolkit spike (issue #13): builds and runs spikes/gpui on all three platforms,
-# recording metrics and a screenshot of each scene. Runs only when the spike changes.
+# M0 UI toolkit spike (issue #13): builds and runs spikes/gpui on every platform, and on
+# Fedora as well as Ubuntu (#37), recording metrics and a screenshot of each scene. Runs only
+# when the spike changes.
 name: Spike GPUI
 
 on:
@@ -52,50 +53,7 @@ jobs:
       - name: Run scenes
         env:
           RUST_LOG: warn
-        run: |
-          mkdir -p out
-          bin=target/release/gpui-spike
-          failed=0
-          required_failed=0
-          # Text runs first: it is the cold first launch on this runner.
-          for name in text-default graph-quads graph-default; do
-            scene=${name%%-*}
-            extra=""; [ "$name" = graph-quads ] && extra="SPIKE_EDGES_QUADS=1"
-            case "$RUNNER_OS" in
-              Linux)
-                env $extra timeout 200 ./xvfb-run.sh sh -c "$bin $scene --out out/$name.json --hold-ms 4000 & pid=\$!; \
-                  while kill -0 \$pid 2>/dev/null && [ ! -f out/$name.json ]; do sleep 0.2; done; \
-                  [ -f out/$name.json ] && sleep 1 && xwd -root -display :99 | convert xwd:- out/$name.png; wait \$pid" || { echo "::error::$name exited with failure"; failed=1; }
-                ;;
-              macOS)
-                env $extra $bin $scene --out out/$name.json --hold-ms 4000 & pid=$!
-                while kill -0 $pid 2>/dev/null && [ ! -f out/$name.json ]; do sleep 0.2; done
-                [ -f out/$name.json ] && { sleep 1; screencapture -x out/$name.png || echo "::warning::screencapture failed"; }
-                wait $pid || { echo "::error::$name exited with failure"; failed=1; }
-                ;;
-              Windows)
-                env $extra $bin.exe $scene --out out/$name.json --hold-ms 4000 & pid=$!
-                while kill -0 $pid 2>/dev/null && [ ! -f out/$name.json ]; do sleep 0.2; done
-                if [ -f out/$name.json ]; then
-                  sleep 1
-                  powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-                    \$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \$i=New-Object System.Drawing.Bitmap \$b.Width,\$b.Height; \
-                    \$g=[System.Drawing.Graphics]::FromImage(\$i); \$g.CopyFromScreen(\$b.Location,[System.Drawing.Point]::Empty,\$b.Size); \
-                    \$i.Save('out/$name.png')" || echo "::warning::screenshot failed"
-                fi
-                wait $pid || { echo "::error::$name exited with failure"; failed=1; }
-                ;;
-            esac
-            if [ -f out/$name.json ]; then echo "$name: $(cat out/$name.json)"; else echo "::error::$name wrote no metrics"; failed=1; fi
-            # Path-drawn edges are measured but not used (DR 0003); they are known to time out
-            # under software rasterisers, so their failure is reported loudly but does not fail the job.
-            if [ "$name" = graph-default ] && [ $failed = 1 ] && [ "$required_failed" = 0 ]; then
-              echo "::warning::graph-default (path edges, not used by DR 0003) failed on $RUNNER_OS"; failed=0
-            fi
-            [ "$name" != graph-default ] && required_failed=$failed
-          done
-          ls -la target/release/gpui-spike* | head -3
-          exit $failed
+        run: ./run-scenes.sh
       - name: Summary
         if: always()
         run: |
@@ -110,4 +68,57 @@ jobs:
         if: always()
         with:
           name: spike-gpui-${{ matrix.os }}
+          path: spikes/gpui/out/
+
+  # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner.
+  # The same scenes under Xvfb and openbox with software Vulkan; package names are in
+  # docs/building.md.
+  spike-fedora:
+    name: spike (fedora-45)
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/gpui
+    steps:
+      - name: Fedora packages (toolchain, software Vulkan, Xvfb, window manager, fonts)
+        working-directory: /
+        run: |
+          dnf install -y -q gcc gcc-c++ git rustup procps-ng findutils \
+            mesa-vulkan-drivers vulkan-loader xorg-x11-server-Xvfb openbox xwd ImageMagick \
+            libxkbcommon-devel libxkbcommon-x11-devel wayland-devel libX11-devel libxcb-devel \
+            fontconfig-devel dejavu-sans-mono-fonts
+      - uses: actions/checkout@v5
+      - name: Install toolchain
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          rustup-init -y -q --no-modify-path --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/gpui
+      - name: Build
+        run: cargo build --release --locked
+      - name: Run scenes
+        env:
+          RUST_LOG: warn
+          RUNNER_OS: Linux
+        run: ./run-scenes.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### GPUI spike on fedora-45"
+            echo
+            echo "Binary size: $(du -h target/release/gpui-spike 2>/dev/null | head -1 | cut -f1)"
+            echo
+            for f in out/*.json; do echo "- \`$(basename $f)\`: \`$(cat $f)\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-gpui-fedora-45
           path: spikes/gpui/out/
