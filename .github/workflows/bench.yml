@@ -53,8 +53,16 @@ jobs:
           fi
           git fetch --quiet --depth 1 origin "$BASE_SHA"
           git worktree add --detach ../base "$BASE_SHA"
-          (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/base" cargo build --release --locked -p blueprint-cli)
-          echo "args=--base-bp target/base/release/bp --base-commit $BASE_SHA" >> "$GITHUB_OUTPUT"
+          args="--base-bp target/base/release/bp --base-commit $BASE_SHA"
+          # The app's cold start is compared too once the base has the app (#88).
+          if [ -f ../base/crates/app/src/main.rs ]; then
+            pkgs="-p blueprint-cli -p blueprint-app"
+            args="$args --base-app target/base/release/blueprint"
+          else
+            pkgs="-p blueprint-cli"
+          fi
+          (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/base" cargo build --release --locked $pkgs)
+          echo "args=$args" >> "$GITHUB_OUTPUT"
       - name: Cache reference repositories
         uses: actions/cache@v4
         with:
