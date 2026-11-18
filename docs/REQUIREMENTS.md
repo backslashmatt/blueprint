@@ -172,6 +172,12 @@ macOS (Apple silicon and Intel), Windows 10+ (x64 and ARM64) and Linux (x64 and
 ARM64, Wayland and X11) are required and ship together from M1. iPadOS, Android
 and web are later targets: do not build them, and do not block them (see 5.3).
 
+On Linux the named distributions are Ubuntu (current LTS) and Fedora (current
+release). Each must build, pass the tests and run the app on Wayland and X11;
+Wayland is the primary session type, since both default to it. CI covers both
+distributions, with build dependencies documented for each, and the M5
+installers include a `.deb` and an `.rpm` (#37, 2026-11-18).
+
 "Native" means compiled to machine code with a GPU-rendered UI and platform
 conventions for menus, shortcuts, file dialogs, windowing, fonts and
 accessibility. It rules out Electron and other browser-shell approaches.
