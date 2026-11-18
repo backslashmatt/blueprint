@@ -185,6 +185,12 @@ impl Commit {
         self.files.iter().map(|(p, _)| p.clone()).collect()
     }
 
+    /// Every file with its blob id, sorted by path.
+    #[must_use]
+    pub fn blob_ids(&self) -> &[(RepoPath, ObjectId)] {
+        &self.files
+    }
+
     /// Reads one file's bytes as stored in the commit. A file that is in the
     /// commit but whose blob cannot be read is remembered; see
     /// [`Commit::unreadable`].

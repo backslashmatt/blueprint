@@ -1,15 +1,21 @@
-//! The persisted index (DR 0005, DR 0007): the L1–L2 model of each indexed
-//! tree, stored in the platform cache so that reopening a repository does not
-//! analyse it again.
+//! The persisted index (DR 0005, DR 0007, DR 0008), stored in the platform
+//! cache so that reopening a repository does not analyse it again. It holds:
 //!
-//! An entry is keyed by the commit's root tree id and [`ANALYSER_VERSION`].
-//! The tree id is a hash of every file in the commit, so an entry is correct
-//! for any commit, in any repository, that has the same tree. Nothing needs
-//! to be invalidated when a repository changes; a new tree is simply a new
-//! key. A damaged or foreign index is dropped and rebuilt (§5.5).
+//! - the L1–L2 model of each indexed tree, keyed by the commit's root tree
+//!   id and [`ANALYSER_VERSION`];
+//! - each language analyser's facts for each file, keyed by the file's blob
+//!   id and that analyser's name and version, so an unchanged file is never
+//!   parsed twice, whichever commit it is in.
+//!
+//! Both ids are hashes of content, so an entry is correct for any commit, in
+//! any repository, with the same tree or blob. Nothing needs to be
+//! invalidated when a repository changes; new content is simply a new key. A
+//! damaged or foreign index is dropped and rebuilt (§5.5).
 
 use std::path::{Path, PathBuf};
 
+use blueprint_lang_rust::Rust;
+use blueprint_model::lang::{FileFacts, LanguageAnalyser};
 use blueprint_model::{Model, RepoPath};
 use blueprint_store::{KEY_LEN, Key, SegmentWriter, Store, StoreError};
 use serde::{Deserialize, Serialize};
@@ -31,6 +37,9 @@ const MAX_SEGMENTS: usize = 16;
 
 /// What kind of value a key holds (byte 24 of the key).
 const KIND_L1_L2_MODEL: u8 = 1;
+/// A language analyser's [`FileFacts`] for one blob. Bytes 25.. of the key
+/// hold the start of the analyser's name.
+const KIND_FACTS: u8 = 2;
 
 /// What the index holds for one tree: the model, and what the analysers
 /// could not fully understand when they built it.
@@ -164,14 +173,79 @@ impl Index {
         let value = serde_json::to_vec(indexed).map_err(|e| e.to_string())?;
         let mut writer = SegmentWriter::new();
         writer.insert(key, value);
-        self.store.add(&writer).map_err(|e| e.to_string())?;
+        self.add(&writer)?;
+        Ok(true)
+    }
+}
+
+impl Index {
+    /// `analyser`'s stored facts for the file whose blob is `blob`, if any.
+    /// An entry that does not decode is treated as absent, so it is re-parsed.
+    #[must_use]
+    pub fn get_facts(&self, analyser: &dyn LanguageAnalyser, blob: ObjectId) -> Option<FileFacts> {
+        let bytes = self.store.get(&facts_key(analyser, blob)?)?;
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// Stores `analyser`'s facts for each blob, in one segment, and returns
+    /// how many were stored. Blobs whose ids are not SHA-1 are skipped.
+    ///
+    /// # Errors
+    /// If the segment cannot be written.
+    pub fn put_facts<'f>(
+        &mut self,
+        analyser: &dyn LanguageAnalyser,
+        facts: impl IntoIterator<Item = (ObjectId, &'f FileFacts)>,
+    ) -> Result<usize, String> {
+        let mut writer = SegmentWriter::new();
+        for (blob, facts) in facts {
+            if let Some(key) = facts_key(analyser, blob) {
+                writer.insert(key, serde_json::to_vec(facts).map_err(|e| e.to_string())?);
+            }
+        }
+        let stored = writer.len();
+        if stored > 0 {
+            self.add(&writer)?;
+        }
+        Ok(stored)
+    }
+
+    /// Adds a segment, compacting the store when it has too many. Entries
+    /// written by another version of their analyser are dropped then.
+    fn add(&mut self, writer: &SegmentWriter) -> Result<(), String> {
+        self.store.add(writer).map_err(|e| e.to_string())?;
         if self.store.segment_count() > MAX_SEGMENTS {
             self.store
                 .compact_retain(current_version)
                 .map_err(|e| e.to_string())?;
         }
-        Ok(true)
+        Ok(())
     }
+}
+
+/// The key for `analyser`'s facts of `blob`: the 20-byte blob id,
+/// `analyser`'s version, the kind, then up to 7 bytes of its name. `None` for
+/// ids of another length.
+fn facts_key(analyser: &dyn LanguageAnalyser, blob: ObjectId) -> Option<Key> {
+    let id = blob.as_bytes();
+    if id.len() != 20 {
+        return None;
+    }
+    let mut k = [0u8; KEY_LEN];
+    k[..20].copy_from_slice(id);
+    k[20..24].copy_from_slice(&analyser.version().to_le_bytes());
+    k[24] = KIND_FACTS;
+    k[25..].copy_from_slice(&name_bytes(analyser));
+    Some(Key(k))
+}
+
+/// The first 7 bytes of `analyser`'s name, zero-padded: the end of its keys.
+fn name_bytes(analyser: &dyn LanguageAnalyser) -> [u8; KEY_LEN - 25] {
+    let mut out = [0u8; KEY_LEN - 25];
+    let name = analyser.name().as_bytes();
+    let n = name.len().min(out.len());
+    out[..n].copy_from_slice(&name[..n]);
+    out
 }
 
 /// The key for `tree`'s L1–L2 model: the 20-byte tree id, the analyser
@@ -188,9 +262,17 @@ fn key(tree: ObjectId) -> Option<Key> {
     Some(Key(k))
 }
 
-/// Whether `key` was written by this [`ANALYSER_VERSION`].
+/// Whether `key` was written by the current version of what wrote it.
 fn current_version(key: &Key) -> bool {
-    key.0[20..24] == ANALYSER_VERSION.to_le_bytes()
+    match key.0[24] {
+        KIND_L1_L2_MODEL => key.0[20..24] == ANALYSER_VERSION.to_le_bytes(),
+        // Rust is the only language analyser so far; facts of any other
+        // name are from a version that no longer exists.
+        KIND_FACTS => {
+            key.0[20..24] == Rust.version().to_le_bytes() && key.0[25..] == name_bytes(&Rust)
+        }
+        _ => false,
+    }
 }
 
 /// 64-bit FNV-1a: a stable directory name for a path. Collisions only cost
@@ -216,6 +298,47 @@ mod tests {
             Some(ANALYSER_VERSION.to_le_bytes().to_vec())
         );
         assert_eq!(k.map(|k| k[24]), Some(KIND_L1_L2_MODEL));
+    }
+
+    #[test]
+    fn facts_keys_hold_the_blob_the_version_the_kind_and_the_name() {
+        let blob = ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").ok();
+        let k = blob.and_then(|b| facts_key(&Rust, b));
+        let Some(k) = k else {
+            panic!("a SHA-1 blob has a key");
+        };
+        assert_eq!(k.0[19], 0x67);
+        assert_eq!(k.0[20..24], Rust.version().to_le_bytes());
+        assert_eq!(k.0[24], KIND_FACTS);
+        assert_eq!(&k.0[25..29], b"rust");
+        assert_eq!(k.0[29..], [0, 0, 0]);
+        assert!(current_version(&k), "kept by compaction");
+        let mut old = k;
+        old.0[20..24].copy_from_slice(&(Rust.version() - 1).to_le_bytes());
+        assert!(!current_version(&old), "dropped by compaction");
+        let mut other = k;
+        other.0[25] = b'g';
+        assert!(!current_version(&other), "no other analyser yet");
+    }
+
+    #[test]
+    fn stored_facts_are_read_back_by_blob() {
+        let dir = std::env::temp_dir().join(format!("bp-index-facts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut index = Index::open_at(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let a = ObjectId::from_hex(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").ok();
+        let b = ObjectId::from_hex(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").ok();
+        let (Some(a), Some(b)) = (a, b) else {
+            panic!("valid ids");
+        };
+        let facts = blueprint_lang_rust::Rust.analyse(
+            &RepoPath::parse("lib.rs").unwrap_or_else(|_| RepoPath::root()),
+            b"pub fn f() {}",
+        );
+        assert_eq!(index.put_facts(&Rust, [(a, &facts)]), Ok(1));
+        assert_eq!(index.get_facts(&Rust, a), Some(facts));
+        assert_eq!(index.get_facts(&Rust, b), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

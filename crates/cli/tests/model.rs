@@ -401,3 +401,32 @@ fn every_level_keeps_the_system_edges() {
         assert_eq!(l1_edges(level), at_1, "level {level}");
     }
 }
+
+#[test]
+fn index_level_4_parses_each_blob_once_and_model_reuses_the_facts() {
+    let dir = git_fixture("facts");
+    let d = dir.to_str().unwrap();
+    let cache = cache().join("facts-test");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    // The first commit holds core's three Rust files; HEAD adds app's two.
+    let first = stdout(&bp_with_cache(
+        &["index", d, "--rev", "HEAD~1", "--level", "4"],
+        &cache,
+    ));
+    assert!(first.ends_with("; 3 files parsed, 0 reused)\n"), "{first}");
+    let head = stdout(&bp_with_cache(&["index", d, "--level", "4"], &cache));
+    assert!(head.ends_with("; 2 files parsed, 3 reused)\n"), "{head}");
+    let again = stdout(&bp_with_cache(&["index", d, "--level", "4"], &cache));
+    assert!(again.ends_with("; 0 files parsed, 5 reused)\n"), "{again}");
+
+    // Facts from the index build the same model as parsing.
+    let reused = stdout(&bp_with_cache(
+        &["model", d, "--rev", "HEAD", "--level", "4"],
+        &cache,
+    ));
+    snapshot("model_fixture_l4.txt", &reused);
+    // Level 2 indexing still stores nothing deeper.
+    let shallow = stdout(&bp_with_cache(&["index", d], &cache.join("l2")));
+    assert!(shallow.ends_with(" indexed (8 nodes)\n"), "{shallow}");
+}
