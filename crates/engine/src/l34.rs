@@ -440,16 +440,20 @@ pub(crate) fn update_items(
             return Err(NotBody::Structure);
         }
     }
-    let item_names = |f: &FileFacts| -> BTreeSet<(Vec<String>, String)> {
+    // An item is what its name resolves to: its module, its name and its
+    // kind, which for a method holds its type and trait. A name changes when
+    // any of those does, so a function that becomes a type or a method,
+    // or a method that moves to another type or into a trait impl, counts.
+    let item_names = |f: &FileFacts| -> BTreeSet<(Vec<String>, String, ItemKind)> {
         f.items
             .iter()
-            .map(|i| (i.module.clone(), i.name.clone()))
+            .map(|i| (i.module.clone(), i.name.clone(), i.kind.clone()))
             .collect()
     };
     let (old_names, new_names) = (item_names(&file.facts), item_names(&facts));
     let changed: BTreeSet<&str> = old_names
         .symmetric_difference(&new_names)
-        .map(|(_, n)| n.as_str())
+        .map(|(_, n, _)| n.as_str())
         .collect();
     // Another file's reference can only resolve into this file's module by
     // a path that names every segment of the module below the deepest

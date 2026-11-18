@@ -370,3 +370,55 @@ fn structural_edits_reach_relative_aliased_and_glob_paths() {
         .collect();
     assert!(calls.len() >= 4, "every path reached `target`: {calls:#?}");
 }
+
+/// Edits that keep every name but change what it is (from review of #87).
+#[test]
+fn a_name_that_changes_kind_or_owner_reaches_its_callers() {
+    let cases: &[(&str, &str, &str)] = &[
+        // A function becomes a type.
+        (
+            "pub fn S() {}\n",
+            "pub fn h() { crate::a::S(); }\n",
+            "pub struct S {}\n",
+        ),
+        // A free function becomes a method.
+        (
+            "pub struct S;\npub fn new() {}\n",
+            "pub fn h() { crate::a::new(); crate::a::S::new(); }\n",
+            "pub struct S;\nimpl S { pub fn new() {} }\n",
+        ),
+        // An inherent method moves into a trait impl.
+        (
+            "pub struct S;\npub trait T {}\nimpl S { pub fn m() {} }\n",
+            "pub fn h() { crate::a::S::m(); }\n",
+            "pub struct S;\npub trait T {}\nimpl T for S { fn m() {} }\n",
+        ),
+        // A method moves to another type.
+        (
+            "pub struct S;\npub struct R;\nimpl S { pub fn m() {} }\n",
+            "pub fn h() { crate::a::S::m(); crate::a::R::m(); }\n",
+            "pub struct S;\npub struct R;\nimpl R { pub fn m() {} }\n",
+        ),
+    ];
+    for (a, b, edit) in cases {
+        let entries = [
+            ("Cargo.toml", "[package]\nname = \"app\"\n"),
+            ("src/lib.rs", "mod a;\nmod b;\n"),
+            ("src/a.rs", *a),
+            ("src/b.rs", *b),
+        ];
+        let mut tree = files(&entries);
+        let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+        let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+        assert_eq!(
+            change(&mut r, &mut tree, "src/a.rs", edit),
+            Update::Items,
+            "{edit}"
+        );
+        assert_eq!(
+            change(&mut r, &mut tree, "src/a.rs", a),
+            Update::Items,
+            "{a}"
+        );
+    }
+}
