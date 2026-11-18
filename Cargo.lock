@@ -680,6 +680,8 @@ name = "blueprint-protocol"
 version = "0.1.0"
 dependencies = [
  "blueprint-model",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

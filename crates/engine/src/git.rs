@@ -347,4 +347,126 @@ impl Repo {
         }
         Ok(obj.detach().data)
     }
+
+    /// The commit `HEAD` points at, or `None` in a repository with no
+    /// commits yet.
+    pub fn head(&self) -> Option<ObjectId> {
+        self.resolve("HEAD").ok()
+    }
+
+    /// Every branch (local and remote), tag and pull request ref
+    /// (`refs/pull/…`, where a forge's refs were fetched) that leads to a
+    /// commit, sorted by name. Symbolic refs such as `refs/remotes/origin/HEAD`, and tags of
+    /// trees or blobs, are left out.
+    pub fn refs(&self) -> Result<Vec<RefInfo>, GitError> {
+        let platform = self.inner.references().map_err(read_err)?;
+        let mut out = Vec::new();
+        for r in platform.all().map_err(read_err)? {
+            let Ok(mut r) = r else { continue };
+            if matches!(r.target(), gix::refs::TargetRef::Symbolic(_)) {
+                continue;
+            }
+            let name = r.name().as_bstr().to_str_lossy().into_owned();
+            let kind = if name.starts_with("refs/heads/") {
+                RefKind::Branch
+            } else if name.starts_with("refs/remotes/") {
+                RefKind::RemoteBranch
+            } else if name.starts_with("refs/tags/") {
+                RefKind::Tag
+            } else if name.starts_with("refs/pull/") {
+                RefKind::PullRequest
+            } else {
+                continue;
+            };
+            let Ok(commit) = r.peel_to_commit() else {
+                continue;
+            };
+            out.push(RefInfo {
+                name,
+                kind,
+                commit: commit.id,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Up to `limit` commits reachable from `from`, newest first by commit
+    /// time, `from` included.
+    pub fn log(&self, from: ObjectId, limit: usize) -> Result<Vec<CommitInfo>, GitError> {
+        use gix::revision::walk::Sorting;
+        use gix::traverse::commit::simple::CommitTimeOrder;
+        let walk = self
+            .inner
+            .rev_walk([from])
+            .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
+            .all()
+            .map_err(read_err)?;
+        let mut out = Vec::new();
+        for info in walk.take(limit) {
+            let info = info.map_err(read_err)?;
+            out.push(self.commit_info(info.id)?);
+        }
+        Ok(out)
+    }
+
+    /// The summary, author, time and parents of `commit`.
+    pub fn commit_info(&self, commit: ObjectId) -> Result<CommitInfo, GitError> {
+        let c = self.inner.find_commit(commit).map_err(read_err)?;
+        let summary = c
+            .message()
+            .map(|m| m.summary().to_str_lossy().into_owned())
+            .unwrap_or_default();
+        let author = c
+            .author()
+            .map(|a| a.name.to_str_lossy().into_owned())
+            .unwrap_or_default();
+        let time = c.time().map(|t| t.seconds).unwrap_or_default();
+        Ok(CommitInfo {
+            id: commit,
+            summary,
+            author,
+            time,
+            parents: c.parent_ids().map(gix::Id::detach).collect(),
+        })
+    }
+}
+
+/// What kind of ref a [`RefInfo`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefKind {
+    /// A local branch, `refs/heads/…`.
+    Branch,
+    /// A remote-tracking branch, `refs/remotes/…`.
+    RemoteBranch,
+    /// A tag, `refs/tags/…`.
+    Tag,
+    /// A pull request's ref, `refs/pull/…`, as GitHub names them.
+    PullRequest,
+}
+
+/// A branch or tag and the commit it leads to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefInfo {
+    /// The full name, such as `refs/heads/main`.
+    pub name: String,
+    /// What kind of ref it is.
+    pub kind: RefKind,
+    /// The commit, with annotated tags peeled.
+    pub commit: ObjectId,
+}
+
+/// A commit, as a review list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// The commit.
+    pub id: ObjectId,
+    /// The first line of its message.
+    pub summary: String,
+    /// The author's name.
+    pub author: String,
+    /// The commit time, in seconds since the Unix epoch.
+    pub time: i64,
+    /// Its parents, in order.
+    pub parents: Vec<ObjectId>,
 }
