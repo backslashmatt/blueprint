@@ -100,6 +100,8 @@ pub struct Diff {
     pub added_edges: Vec<EdgeKey>,
     /// Edges only in base, sorted.
     pub removed_edges: Vec<EdgeKey>,
+    /// Each node's change weight, sorted by id; empty until [`weigh`].
+    pub weights: Vec<Weight>,
 }
 
 impl Diff {
@@ -151,6 +153,7 @@ pub fn diff(base: &Model, head: &Model) -> Diff {
         nodes,
         added_edges,
         removed_edges,
+        weights: Vec::new(),
     }
 }
 
@@ -414,4 +417,180 @@ mod tests {
         sccs.sort();
         assert_eq!(sccs, vec![vec![0, 1, 2], vec![3, 4], vec![5]]);
     }
+}
+
+/// Lines changed in one node and everything under it (DR 0008 decision 6:
+/// change weight): lines removed from base plus lines added in head. A line
+/// before the node's body, or the line the node starts on, is a signature
+/// line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Lines {
+    /// Changed lines in signatures.
+    pub signature: u32,
+    /// Changed lines in bodies, and anything else.
+    pub body: u32,
+}
+
+impl Lines {
+    fn add(&mut self, other: Lines) {
+        self.signature += other.signature;
+        self.body += other.body;
+    }
+
+    fn is_zero(self) -> bool {
+        self.signature == 0 && self.body == 0
+    }
+}
+
+/// One node's change weight.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Weight {
+    /// The node.
+    pub id: NodeId,
+    /// Its changed lines, its descendants' included.
+    #[serde(flatten)]
+    pub lines: Lines,
+}
+
+/// A file that differs between the two commits: its bytes in base and in
+/// head, `None` where it does not exist.
+pub struct ChangedFile<'a> {
+    /// The file.
+    pub path: &'a blueprint_model::RepoPath,
+    /// Its bytes in base.
+    pub base: Option<&'a [u8]>,
+    /// Its bytes in head.
+    pub head: Option<&'a [u8]>,
+}
+
+/// Fills in `d.weights` from a line diff of each changed file. Every
+/// removed line counts against the innermost base node whose span holds
+/// it, and every added line against the innermost head node; lines no item
+/// holds count for the file's own node (its module, or the component of a
+/// file no analyser reads). Weights then roll up each model's parents, and
+/// the two are summed by id.
+pub fn weigh(d: &mut Diff, base: &Model, head: &Model, files: &[ChangedFile<'_>]) {
+    use imara_diff::{Algorithm, InternedInput};
+    let mut own: BTreeMap<(bool, NodeId), Lines> = BTreeMap::new();
+    let paths: BTreeSet<&blueprint_model::RepoPath> = files.iter().map(|f| f.path).collect();
+    let by_base = by_source(base, &paths);
+    let by_head = by_source(head, &paths);
+    for f in files {
+        let b = f.base.unwrap_or_default();
+        let h = f.head.unwrap_or_default();
+        let input = InternedInput::new(
+            imara_diff::sources::byte_lines(b),
+            imara_diff::sources::byte_lines(h),
+        );
+        let mut diff = imara_diff::Diff::compute(Algorithm::Histogram, &input);
+        diff.postprocess_lines(&input);
+        let removed: Vec<u32> = (0..input.before.len() as u32)
+            .filter(|&i| diff.is_removed(i))
+            .map(|i| i + 1)
+            .collect();
+        let added: Vec<u32> = (0..input.after.len() as u32)
+            .filter(|&i| diff.is_added(i))
+            .map(|i| i + 1)
+            .collect();
+        for (lines, nodes, in_base) in [
+            (&removed, by_base.get(f.path), true),
+            (&added, by_head.get(f.path), false),
+        ] {
+            if lines.is_empty() {
+                continue;
+            }
+            for (id, w) in attribute(lines, nodes.map_or(&[][..], Vec::as_slice)) {
+                own.entry((in_base, id))
+                    .or_insert(Lines {
+                        signature: 0,
+                        body: 0,
+                    })
+                    .add(w);
+            }
+        }
+    }
+    // Roll up each model's own weights through its own parents.
+    let mut total: BTreeMap<NodeId, Lines> = BTreeMap::new();
+    for (model, in_base) in [(base, true), (head, false)] {
+        for ((_, id), w) in own
+            .iter()
+            .filter(|((b, id), _)| *b == in_base && model.node(id).is_some())
+        {
+            let mut cur = Some(id.clone());
+            while let Some(c) = cur {
+                total
+                    .entry(c.clone())
+                    .or_insert(Lines {
+                        signature: 0,
+                        body: 0,
+                    })
+                    .add(*w);
+                cur = model.node(&c).and_then(|n| n.parent.clone());
+            }
+        }
+    }
+    d.weights = total
+        .into_iter()
+        .filter(|(_, w)| !w.is_zero())
+        .map(|(id, lines)| Weight { id, lines })
+        .collect();
+}
+
+/// The nodes each file holds that can take a line: items with a span, and
+/// the file's own module or component.
+fn by_source<'m>(
+    m: &'m Model,
+    paths: &BTreeSet<&blueprint_model::RepoPath>,
+) -> BTreeMap<&'m blueprint_model::RepoPath, Vec<&'m Node>> {
+    let mut out: BTreeMap<&blueprint_model::RepoPath, Vec<&Node>> = BTreeMap::new();
+    for n in m.nodes().filter(|n| paths.contains(&n.source)) {
+        let file_node = matches!(n.kind, blueprint_model::NodeKind::Module)
+            || (n.code.is_none()
+                && n.confidence == blueprint_model::Confidence::Unknown
+                && n.level() == Level::Component);
+        if n.code.is_some() || file_node {
+            out.entry(&n.source).or_default().push(n);
+        }
+    }
+    out
+}
+
+/// Each changed line's innermost item, or else the file's own node.
+fn attribute(lines: &[u32], nodes: &[&Node]) -> Vec<(NodeId, Lines)> {
+    // Items by span length, so the innermost claims a line first.
+    let mut items: Vec<(&Node, (u32, u32), Option<u32>)> = nodes
+        .iter()
+        .filter_map(|n| n.code.as_ref().map(|c| (*n, c.lines, c.body_line)))
+        .collect();
+    items.sort_by_key(|(n, (a, b), _)| (b - a, n.id.clone()));
+    let mut out: BTreeMap<NodeId, Lines> = BTreeMap::new();
+    let file = nodes
+        .iter()
+        .filter(|n| n.code.is_none())
+        .min_by_key(|n| (n.id.path().len(), n.id.clone()));
+    for &line in lines {
+        let hit = items.iter().find(|(_, (a, b), _)| *a <= line && line <= *b);
+        let (id, signature) = match hit {
+            // A signature usually shares its line with the body's opening
+            // brace: the line the item starts on counts as signature.
+            Some((n, (start, _), body)) => (
+                n.id.clone(),
+                line == *start || body.is_none_or(|b| line < b),
+            ),
+            None => match file {
+                Some(n) => (n.id.clone(), false),
+                None => continue,
+            },
+        };
+        let w = out.entry(id).or_insert(Lines {
+            signature: 0,
+            body: 0,
+        });
+        if signature {
+            w.signature += 1;
+        } else {
+            w.body += 1;
+        }
+    }
+    out.into_iter().collect()
 }

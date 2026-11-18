@@ -28,7 +28,7 @@ If some of a commit's files cannot be read, for example in a partial clone, each
 
 The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set `BLUEPRINT_CACHE_DIR` to use another directory. Nothing is ever written inside the repository. The index can be deleted at any time. A damaged index is dropped with a warning and rebuilt, never fatal. Models are keyed by the commit's tree id, so commits with the same files share one (DR 0007), and facts by the file's blob id and the analyser's name and version (DR 0008). Entries written by an older version of the analysers are dropped when the index is compacted.
 
-`bp diff <repo> <base> <head>` prints the architectural diff of two commits: findings first (new dependencies across systems or modules, new dependency cycles), then changed nodes, then added and removed edges. Text lines are tab-separated: `finding`, `added`, `removed`, `moved`, `renamed`, `surface`, `contained`, `changed`, `+edge` or `-edge`, then the ids. `--json` prints the format in [diff-json.md](diff-json.md). Two identical commits print nothing. It exits 0 whether or not anything changed.
+`bp diff <repo> <base> <head>` prints the architectural diff of two commits: findings first (new dependencies across systems or modules, new dependency cycles), then changed nodes, then added and removed edges. Text lines are tab-separated: `finding`, `added`, `removed`, `moved`, `renamed`, `surface`, `contained`, `changed`, `+edge` or `-edge`, then the ids. `weight` lines then give each changed node's id and its changed signature and body lines, descendants included. `--json` prints the format in [diff-json.md](diff-json.md). Two identical commits print nothing. It exits 0 whether or not anything changed.
 
 ## Output
 
