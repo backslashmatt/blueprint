@@ -1,15 +1,22 @@
 //! Edges from the analysers' references (#62, §3.2), and their roll-up.
 //!
 //! - **depends-on (L2):** each `use` in a module, resolved through `crate`,
-//!   `self`, `super`, the module's own submodules, the crate root (2015
-//!   paths) and the workspace's other crates. `exact` when the named item or
-//!   module exists, `inferred` when only its module does. Paths into std and
-//!   external crates give no edge: they are outside the model.
+//!   `self`, `super`, names the module binds with `use … as`, the module's
+//!   own submodules, the crates this crate declares in its manifest (by the
+//!   name it uses for them, renames and `[lib] name` included), and finally
+//!   the crate root (2015 paths). `exact` when the named item or module
+//!   exists, `inferred` when only its module does. Crates it does not
+//!   declare — std, external crates, unrelated workspace members — give no
+//!   edge.
 //! - **implements (L3):** `impl Trait for Type` where both resolve to L3
-//!   nodes, through the module's own items and its `use` imports.
+//!   nodes and the impl is in the type's crate, so the edge runs the way
+//!   the dependency does. An impl of a local trait for a foreign type gives
+//!   no edge.
 //! - **Roll-up:** every edge between nodes with different parents adds the
-//!   same edge between the parents, with the lower edges as evidence, up to
-//!   L1. A roll-up is as sure as its surest evidence.
+//!   same edge between the parents, with the lower edges as evidence, as
+//!   sure as its surest evidence. At L1 it only adds evidence to edges the
+//!   manifests declare: a crate used only by tests (a dev-dependency) or not
+//!   declared at all does not become a system dependency.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -18,7 +25,10 @@ use blueprint_model::{
     Confidence, Ecosystem, Edge, EdgeKey, EdgeKind, Level, NodeId, NodeKind, RepoPath, SystemKey,
 };
 
+use toml::{Table, Value};
+
 use super::{Builder, FUNCTIONS, Parsed};
+use crate::l1::Read;
 
 /// The names each module binds with `use`: (system, module) -> name -> path.
 type Imports = HashMap<(SystemKey, Vec<String>), HashMap<String, Vec<String>>>;
@@ -33,15 +43,98 @@ struct Resolved {
     found: bool,
 }
 
-pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
-    let crates: HashMap<String, SystemKey> = b
+/// The crates each Cargo system can name: extern name -> system.
+type Crates = HashMap<SystemKey, HashMap<String, SystemKey>>;
+
+/// For each Cargo system, the crates its manifest declares, by the name its
+/// code uses for them, and its own library name (for its binaries).
+fn crate_names(b: &Builder<'_>, read: Read<'_>) -> Crates {
+    let systems: Vec<(SystemKey, String, Table)> = b
         .model
         .level(Level::System)
         .filter(|n| n.id.system_key().ecosystem == Ecosystem::Cargo)
-        .map(|n| (n.name.replace('-', "_"), n.id.system_key().clone()))
+        .map(|n| {
+            let key = n.id.system_key().clone();
+            let mut manifest = key.dir.segments().to_vec();
+            manifest.push("Cargo.toml".into());
+            let table: Table = RepoPath::parse(&manifest.join("/"))
+                .ok()
+                .and_then(|p| read(&p))
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|text| text.parse().ok())
+                .unwrap_or_default();
+            (key, n.name.clone(), table)
+        })
         .collect();
-    // Names bound by `use` in each module: name -> path. Only `impl`
-    // resolution needs them, so only modules with an `impl` are recorded.
+    let lib_name = |package: &str, table: &Table| {
+        table
+            .get("lib")
+            .and_then(|l| l.get("name"))
+            .and_then(Value::as_str)
+            .map_or_else(|| package.replace('-', "_"), str::to_owned)
+    };
+    // (system, package name, library name) for every Cargo system.
+    let info: Vec<(&SystemKey, &str, String)> = systems
+        .iter()
+        .map(|(k, name, t)| (k, name.as_str(), lib_name(name, t)))
+        .collect();
+    let mut out = Crates::new();
+    for (key, name, table) in &systems {
+        let names = out.entry(key.clone()).or_default();
+        names.insert(lib_name(name, table), key.clone());
+        // What Cargo resolved: the L1 analyser's edges from this system.
+        let resolved: Vec<&SystemKey> = b
+            .model
+            .edges()
+            .filter(|e| {
+                e.key.kind == EdgeKind::DependsOn
+                    && e.key.from.level() == Level::System
+                    && e.key.from.system_key() == key
+            })
+            .map(|e| e.key.to.system_key())
+            .collect();
+        for section in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            let deps = table
+                .get(section)
+                .and_then(Value::as_table)
+                .into_iter()
+                .flatten();
+            for (dep, spec) in deps {
+                let renamed = spec.get("package").and_then(Value::as_str);
+                let package = renamed.unwrap_or(dep);
+                let target = if section == "dev-dependencies" {
+                    // Cargo's graph leaves dev-dependencies out, so only a
+                    // `path` into the workspace identifies one.
+                    let dir = spec
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .and_then(|p| crate::l1::path::normalise(key.dir.segments(), p));
+                    info.iter()
+                        .find(|(k, n, _)| *n == package && dir.as_deref() == Some(k.dir.segments()))
+                } else {
+                    info.iter()
+                        .find(|(k, n, _)| *n == package && resolved.contains(k))
+                };
+                let Some((target, _, lib)) = target else {
+                    continue;
+                };
+                let extern_name = match renamed {
+                    Some(_) => dep.replace('-', "_"),
+                    None => lib.clone(),
+                };
+                names.insert(extern_name, (*target).clone());
+            }
+        }
+    }
+    out
+}
+
+pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>], read: Read<'_>) {
+    let crates = crate_names(b, read);
+    // Names bound by `use` in each module: name -> path. `impl` resolution
+    // needs every one in its module; use resolution needs only renames and
+    // single-segment imports (`use a as b`, `use some_crate`), which can
+    // start a later path. Recording only those keeps this cheap.
     let mut imports: Imports = HashMap::new();
     for (_, place, file_module, facts) in parsed {
         let impl_modules: HashSet<&Vec<String>> = facts
@@ -52,9 +145,6 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
                 Reference::Use { .. } => None,
             })
             .collect();
-        if impl_modules.is_empty() {
-            continue;
-        }
         for r in &facts.references {
             if let Reference::Use {
                 path,
@@ -62,7 +152,7 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
                 module,
             } = r
             {
-                if !impl_modules.contains(module) {
+                if alias.is_none() && path.len() > 1 && !impl_modules.contains(module) {
                     continue;
                 }
                 let bound = alias.clone().or_else(|| path.last().cloned());
@@ -92,7 +182,7 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
                     path: p, module, ..
                 } => {
                     let m = [file_module.as_slice(), module.as_slice()].concat();
-                    let Some(to) = r.resolve(system, &m, p, false) else {
+                    let Some(to) = r.resolve(system, &m, p, true) else {
                         continue;
                     };
                     let conf = if to.found {
@@ -117,7 +207,11 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
                     let m = [file_module.as_slice(), module.as_slice()].concat();
                     let ty = r.item(system, &m, self_type);
                     let tr = r.item(system, &m, r#trait);
-                    if let (Some(from), Some(to)) = (ty, tr) {
+                    // Only an impl in the type's own crate: then the edge
+                    // runs the way the dependency does.
+                    if let (Some(from), Some(to)) = (ty, tr)
+                        && from.system_key() == system
+                    {
                         let key = EdgeKey {
                             from,
                             to,
@@ -171,7 +265,7 @@ pub(super) fn add(b: &mut Builder<'_>, parsed: &[Parsed<'_>]) {
 
 struct Resolver<'a, 'b> {
     b: &'a Builder<'b>,
-    crates: &'a HashMap<String, SystemKey>,
+    crates: &'a Crates,
     imports: &'a Imports,
     index: &'a Index,
 }
@@ -307,8 +401,12 @@ impl Resolver<'_, '_> {
                 return self.resolve(system, m, &whole, false);
             }
             s if self.is_child(system, &mut m.to_vec(), s) => (system.clone(), m.to_vec(), 0),
+            // A declared crate wins over a same-named root module (2018+).
+            s if let Some(target) = self.crates.get(system).and_then(|c| c.get(s)) => {
+                (target.clone(), Vec::new(), 1)
+            }
             s if self.is_child(system, &mut root.clone(), s) => (system.clone(), root, 0),
-            s => (self.crates.get(s)?.clone(), Vec::new(), 1),
+            _ => return None,
         };
         let mut i = rest;
         while let Some(seg) = segs.get(i) {
@@ -376,6 +474,10 @@ fn roll_up(b: &mut Builder<'_>) {
             entry.1.insert(e.key.clone());
         }
         for (key, (confidence, evidence)) in up {
+            // Systems depend on each other only where a manifest says so.
+            if key.from.level() == Level::System && b.model.edge(&key).is_none() {
+                continue;
+            }
             let edge = Edge {
                 key,
                 confidence,

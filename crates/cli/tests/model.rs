@@ -13,7 +13,10 @@ const FILES: &[(&str, &str)] = &[
         "crates/app/Cargo.toml",
         "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
     ),
-    ("crates/app/src/main.rs", "mod cli;\nfn main() {}\n"),
+    (
+        "crates/app/src/main.rs",
+        "mod cli;\nuse core::graph::Graph;\nfn main() {}\n",
+    ),
     (
         "crates/app/src/cli.rs",
         "pub struct Args {\n    pub verbose: bool,\n}\n\nimpl Args {\n    pub fn parse() -> Self {\n        Args { verbose: false }\n    }\n}\n",
@@ -379,4 +382,22 @@ fn level_4_reads_types_and_functions_the_same_from_disk_and_from_git() {
         disk, text,
         "the working tree and the commit hold the same files"
     );
+}
+
+#[test]
+fn every_level_keeps_the_system_edges() {
+    let dir = fixture("levels");
+    let d = dir.to_str().unwrap();
+    let l1_edges = |level: &str| -> Vec<String> {
+        stdout(&bp(&["model", d, "--level", level]))
+            .lines()
+            .filter(|l| l.starts_with("L1:") && l.contains(" -> "))
+            .map(str::to_owned)
+            .collect()
+    };
+    let at_1 = l1_edges("1");
+    assert!(!at_1.is_empty());
+    for level in ["2", "3", "4"] {
+        assert_eq!(l1_edges(level), at_1, "level {level}");
+    }
 }

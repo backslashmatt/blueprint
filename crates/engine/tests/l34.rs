@@ -275,3 +275,100 @@ fn uses_and_impls_become_edges_and_roll_up() {
         .map(|e| (e.confidence, e.evidence.len(), e.dependency.len()));
     assert_eq!(l1, Some((Confidence::Exact, 2, 1)));
 }
+
+#[test]
+fn only_declared_crates_resolve_and_only_declared_dependencies_reach_l1() {
+    let entries: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"t\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\n[dependencies]\nbee = { package = \"b\", path = \"../b\" }\n[dev-dependencies]\nt = { path = \"../t\" }\n",
+        ),
+        (
+            "a/src/lib.rs",
+            "mod toml;\nmod inner;\nuse bee::Thing;\nuse c::Other;\nuse b::Thing as T2;\n#[cfg(test)]\nmod tests { use t::Fixture; }\n",
+        ),
+        ("a/src/toml.rs", "pub struct Value;\n"),
+        ("a/src/inner.rs", "use toml::Value;\n"),
+        (
+            "b/Cargo.toml",
+            "[package]\nname = \"b\"\n[lib]\nname = \"bee_lib\"\n",
+        ),
+        ("b/src/lib.rs", "pub struct Thing;\npub trait Show {}\n"),
+        (
+            "c/Cargo.toml",
+            "[package]\nname = \"c\"\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "c/src/lib.rs",
+            "pub struct Other;\nuse bee_lib::Show;\nimpl Show for Local {}\nstruct Local;\n",
+        ),
+        ("t/Cargo.toml", "[package]\nname = \"t\"\n"),
+        ("t/src/lib.rs", "pub struct Fixture;\n"),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let dep = EdgeKind::DependsOn;
+    // A rename in the manifest is the name the code uses.
+    assert_eq!(
+        edge(&model, "L2:cargo:a#", "L2:cargo:b#", dep),
+        Some(Confidence::Exact)
+    );
+    // `c` is a workspace member that `a` does not declare: no edge, and the
+    // package name of a renamed dependency is not in scope either.
+    assert!(
+        model
+            .edges()
+            .all(|e| e.key.to.system_key().dir.to_string() != "c")
+    );
+    // A dev-dependency: the test module's edge exists, but `a` does not
+    // depend on `t` as a system.
+    assert_eq!(
+        edge(&model, "L2:cargo:a#tests", "L2:cargo:t#", dep),
+        Some(Confidence::Exact)
+    );
+    assert!(edge(&model, "L1:cargo:a#", "L1:cargo:t#", dep).is_none());
+    // Under its `[lib] name`, `b` is found from `c`, and c's impl of b's
+    // trait for its own type points c -> b, the dependency's direction.
+    assert_eq!(
+        edge(
+            &model,
+            "L3:cargo:c#Local",
+            "L3:cargo:b#Show",
+            EdgeKind::Implements
+        ),
+        Some(Confidence::Exact)
+    );
+    // A declared crate wins over a same-named root module: `toml` here is
+    // not a declared crate, so the root module `toml` is used (2015 path).
+    assert_eq!(
+        edge(&model, "L2:cargo:a#inner", "L2:cargo:a#toml", dep),
+        Some(Confidence::Exact)
+    );
+}
+
+#[test]
+fn an_impl_of_a_local_trait_for_a_foreign_type_gives_no_edge() {
+    let entries: &[(&str, &str)] = &[
+        ("Cargo.toml", "[workspace]\nmembers = [\"x\", \"y\"]\n"),
+        ("x/Cargo.toml", "[package]\nname = \"x\"\n"),
+        ("x/src/lib.rs", "pub struct Foreign;\n"),
+        (
+            "y/Cargo.toml",
+            "[package]\nname = \"y\"\n[dependencies]\nx = { path = \"../x\" }\n",
+        ),
+        (
+            "y/src/lib.rs",
+            "use x::Foreign;\npub trait Mine {}\nimpl Mine for Foreign {}\n",
+        ),
+    ];
+    let files = files(entries);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    assert!(model.edges().all(|e| e.key.kind != EdgeKind::Implements));
+    assert!(edge(&model, "L1:cargo:x#", "L1:cargo:y#", EdgeKind::Implements).is_none());
+}

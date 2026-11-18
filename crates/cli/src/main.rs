@@ -149,8 +149,18 @@ fn up_to(model: &Model, depth: Depth) -> Model {
     for n in model.nodes().filter(|n| n.level() <= max) {
         let _ = out.add_node(n.clone());
     }
-    for e in model.edges().filter(|e| e.key.from.level() <= max) {
-        let _ = out.add_edge(e.clone());
+    // Edges go in lowest level first, because a roll-up's evidence (one
+    // level down) must already be present; evidence below `max` is dropped
+    // with the edges it names.
+    let mut edges: Vec<_> = model
+        .edges()
+        .filter(|e| e.key.from.level() <= max)
+        .collect();
+    edges.sort_by_key(|e| std::cmp::Reverse(e.key.from.level()));
+    for e in edges {
+        let mut e = e.clone();
+        e.evidence.retain(|ev| ev.from.level() <= max);
+        let _ = out.add_edge(e);
     }
     out
 }

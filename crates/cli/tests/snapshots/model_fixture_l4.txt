@@ -23,4 +23,5 @@ L3:unowned:#docs%2F/docs%2Fguide.md	component	guide.md	unknown
 L4:cargo:crates/app#(functions)/main	function	main	exact	private
 L4:cargo:crates/app#cli/Args/parse	function	parse	exact	public
 L1:cargo:crates/app# -> L1:cargo:crates/core#	depends-on	exact	normal
+L2:cargo:crates/app# -> L2:cargo:crates/core#graph	depends-on	exact
 L3:cargo:crates/core#graph/Graph -> L3:cargo:crates/core#graph/Walk	implements	exact

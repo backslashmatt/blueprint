@@ -90,7 +90,7 @@ pub fn analyse(
     for (path, place) in plain {
         b.add_file(path, place);
     }
-    edges::add(&mut b, &parsed);
+    edges::add(&mut b, &parsed, read);
     b.diags.sort();
     b.diags
 }
