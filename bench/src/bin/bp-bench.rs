@@ -7,7 +7,10 @@
 //! bp-bench run   [--manifest ..] [--dest ..] --bp <bp under test> --out results.json
 //!                [--base-bp <bp built from the base commit>] [--base-commit <sha>]
 //!                [--commit <sha>] [--summary summary.md]
+//!                [--app <blueprint app> [--base-app <app built from the base commit>]]
 //! ```
+//!
+//! With `--app`, the app's cold start is measured too; it needs a display.
 //!
 //! `run` exits 1 if any measurement fails after re-measuring, 2 on errors.
 
@@ -21,7 +24,7 @@ use blueprint_bench::repos::{self, RefRepo};
 use blueprint_engine::git::Repo;
 use blueprint_store::{KEY_LEN, Key, SegmentWriter, Store};
 
-const USAGE: &str = "usage: bp-bench fetch [--manifest F] [--dest D]\n       bp-bench run [--manifest F] [--dest D] --bp PATH --out F [--base-bp PATH] [--base-commit SHA] [--commit SHA] [--summary F]";
+const USAGE: &str = "usage: bp-bench fetch [--manifest F] [--dest D]\n       bp-bench run [--manifest F] [--dest D] --bp PATH --out F [--base-bp PATH] [--base-commit SHA] [--commit SHA] [--summary F] [--app PATH [--base-app PATH]]";
 
 const OPTIONS: &[&str] = &[
     "manifest",
@@ -32,6 +35,8 @@ const OPTIONS: &[&str] = &[
     "commit",
     "out",
     "summary",
+    "app",
+    "base-app",
 ];
 
 /// Re-measurements allowed before a failure counts (DR 0002).
@@ -74,15 +79,34 @@ fn run_cli(args: &[String]) -> Result<ExitCode, Error> {
                 return Err("--base-bp and --base-commit go together".into());
             }
             let out = PathBuf::from(opts.get("out").ok_or("--out is required")?);
+            let app = opts.get("app").map(PathBuf::from);
+            let base_app = opts.get("base-app").map(PathBuf::from);
+            if base_app.is_some() && (app.is_none() || base_bp.is_none()) {
+                return Err("--base-app needs --app and --base-bp".into());
+            }
             let mut report = Report {
                 schema: SCHEMA,
                 commit: opts.get("commit").cloned(),
                 base_commit: opts.get("base-commit").cloned(),
                 runner: runner(),
-                measurements: measure(&bp, base_bp.as_deref(), &dest, &repos)?,
+                measurements: measure(
+                    &bp,
+                    base_bp.as_deref(),
+                    app.as_deref(),
+                    base_app.as_deref(),
+                    &dest,
+                    &repos,
+                )?,
             };
             confirm(&mut report, RETRIES, || {
-                measure(&bp, base_bp.as_deref(), &dest, &repos)
+                measure(
+                    &bp,
+                    base_bp.as_deref(),
+                    app.as_deref(),
+                    base_app.as_deref(),
+                    &dest,
+                    &repos,
+                )
             })?;
             std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
             let table = markdown(&report);
@@ -722,10 +746,16 @@ fn index_budget(repo: &str) -> Option<String> {
 fn measure(
     bp: &Path,
     base_bp: Option<&Path>,
+    app: Option<&Path>,
+    base_app: Option<&Path>,
     dest: &Path,
     repos: &[RefRepo],
 ) -> Result<Vec<Measurement>, Error> {
     let mut out = Vec::new();
+
+    if let Some(app) = app {
+        out.push(cold_start(app, base_app)?);
+    }
 
     // 40 spawns per sample keep one sample around 50 ms, so a 5% change is
     // well above timer and scheduler jitter (DR 0002).
@@ -898,6 +928,68 @@ const STORE_ENTRIES: u32 = 64_465;
 /// Reopening the persisted index (#28): open a store directory holding one
 /// segment, validate it, and look up every key. This is the storage part of
 /// the 200 ms reopen budget; the budget itself needs the L1–L2 model on top.
+/// Samples of the app's cold start. Each is a fresh process; the first run
+/// after a build also fills the font and shader caches, so `best_ms` runs it
+/// once beforehand without counting it.
+const COLD_START_SAMPLES: usize = 7;
+
+/// Launches `app --cold-start-report <file>`: the app opens its window, writes
+/// the time from `main` to the first presented frame and quits (#88). The
+/// wall time of the whole process is what is measured, so process creation,
+/// dynamic loading and the shutdown after the frame are included.
+fn spawn_app(app: &Path, report: PathBuf) -> impl FnMut() -> Result<(), Error> + '_ {
+    move || {
+        let _ = std::fs::remove_file(&report);
+        let status = Command::new(app)
+            .arg("--cold-start-report")
+            .arg(&report)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(format!("`{} --cold-start-report` failed: {status}", app.display()).into());
+        }
+        // The report proves a frame was presented, not just that the process exited.
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&report)?)?;
+        json["cold_start_ms"]
+            .as_f64()
+            .ok_or("cold-start report has no `cold_start_ms`")?;
+        Ok(())
+    }
+}
+
+/// The §4 cold-start row, compared with the base build's app when the base
+/// commit has one (DR 0002).
+fn cold_start(app: &Path, base_app: Option<&Path>) -> Result<Measurement, Error> {
+    let tmp = |which: &str| {
+        std::env::temp_dir().join(format!("bp-bench-cold-{which}-{}.json", std::process::id()))
+    };
+    let mut head = spawn_app(app, tmp("head"));
+    let mut base = base_app.map(|b| spawn_app(b, tmp("base")));
+    let (value, base) = best_ms(
+        COLD_START_SAMPLES,
+        1,
+        &mut head,
+        base.as_mut()
+            .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+    )?;
+    let _ = std::fs::remove_file(tmp("head"));
+    let _ = std::fs::remove_file(tmp("base"));
+    Ok(Measurement {
+        name: "cold_start".into(),
+        repo: None,
+        value,
+        base,
+        unit: "ms".into(),
+        budget: Some("cold_start".into()),
+        samples: COLD_START_SAMPLES,
+        note: Some(format!(
+            "`blueprint --cold-start-report`: process start to first frame and exit, fastest of {COLD_START_SAMPLES} after one unmeasured run"
+        )),
+        gated: true,
+    })
+}
+
 fn store_reopen() -> Result<Measurement, Error> {
     let dir = std::env::temp_dir().join(format!("bp-bench-store-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

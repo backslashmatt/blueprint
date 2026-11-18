@@ -48,6 +48,12 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         shell: bash
         run: rustup toolchain install
+      - name: Install the app's libraries and a headless display (see docs/building.md)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -55,6 +61,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: test
         run: cargo test --workspace --all-features --locked
+      # The app opens its window, paints one frame and quits (#88). No real GPU on these runners.
+      - name: app smoke run
+        shell: bash
+        run: |
+          cargo build --locked -p blueprint-app
+          if [ "$RUNNER_OS" = Linux ]; then
+            timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
+          else
+            timeout 120 target/debug/blueprint --cold-start-report cold-start.json
+          fi
+          cat cold-start.json
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
@@ -66,7 +83,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Install build dependencies (see docs/building.md)
-        run: dnf install -y -q gcc git rustup
+        run: >
+          dnf install -y -q gcc git rustup libxkbcommon-devel libxkbcommon-x11-devel wayland-devel
+          libX11-devel libxcb-devel fontconfig-devel vulkan-loader mesa-vulkan-drivers
+          xorg-x11-server-Xvfb openbox procps-ng
       - uses: actions/checkout@v5
       - name: Trust the checkout (the container runs as root; the runner owns the files)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -80,3 +100,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: test
         run: cargo test --workspace --all-features --locked
+      - name: app smoke run
+        run: |
+          cargo build --locked -p blueprint-app
+          timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
+          cat cold-start.json
