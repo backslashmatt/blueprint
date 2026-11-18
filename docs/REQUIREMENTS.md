@@ -385,8 +385,8 @@ breakdown and ordering within a milestone.
 - publishing outside the repository: releases, package registries, app stores,
   websites, announcements
 - a new dependency whose licence is not MIT, Apache-2.0, BSD, ISC, Zlib or
-  MPL-2.0. The owner has also allowed Unicode-3.0, and NCSA for developer
-  tooling such as fuzzing (#33, 2026-11-17)
+  MPL-2.0. The owner has also allowed Unicode-3.0 and CC0-1.0, and NCSA
+  for developer tooling such as fuzzing (#33, 2026-11-17 and 2026-11-18)
 - sending source code or repository contents to any external service
 - anything destructive or hard to reverse: deleting branches or history, force
   pushing a shared branch, rewriting the index format after a release without a
