@@ -348,6 +348,28 @@ impl Repo {
         Ok(obj.detach().data)
     }
 
+    /// The bytes of the file at `path` (its segments) in `commit`, or `None`
+    /// if there is no blob there (missing, a directory, a submodule). Looks
+    /// up only the trees on the way, not the whole tree.
+    pub fn blob_at(&self, commit: ObjectId, path: &[String]) -> Result<Option<Vec<u8>>, GitError> {
+        let tree = self
+            .inner
+            .find_commit(commit)
+            .map_err(read_err)?
+            .tree()
+            .map_err(read_err)?;
+        let Some(entry) = tree
+            .lookup_entry(path.iter().map(|s| s.as_bytes()))
+            .map_err(read_err)?
+        else {
+            return Ok(None);
+        };
+        if !entry.mode().is_blob() {
+            return Ok(None);
+        }
+        self.blob(entry.object_id()).map(Some)
+    }
+
     /// The commit `HEAD` points at, or `None` in a repository with no
     /// commits yet.
     pub fn head(&self) -> Option<ObjectId> {

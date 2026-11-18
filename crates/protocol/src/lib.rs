@@ -23,7 +23,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub use blueprint_model as model;
 
 use blueprint_model::Model;
-use blueprint_model::diff::Diff;
+use blueprint_model::diff::{Diff, FileDiff};
 
 /// Chosen by the front end; echoed in the [`Reply`].
 pub type RequestId = u64;
@@ -54,6 +54,16 @@ pub enum Request {
         /// The head revision.
         head: String,
     },
+    /// One file's side-by-side diff between two commits, highlighted, for
+    /// the code view at L4 (#93).
+    FileDiff {
+        /// The base revision.
+        base: String,
+        /// The head revision.
+        head: String,
+        /// The file, relative to the repository root, `/`-separated.
+        path: String,
+    },
     /// Lines of one file at one commit, for the code view at L4.
     Source {
         /// The revision.
@@ -77,7 +87,7 @@ pub enum Lane {
     Model,
     /// [`Request::Diff`].
     Diff,
-    /// [`Request::Source`].
+    /// [`Request::Source`] and [`Request::FileDiff`].
     Source,
 }
 
@@ -89,7 +99,7 @@ impl Request {
             Request::Open { .. } | Request::Refs { .. } => Lane::Repository,
             Request::Model { .. } => Lane::Model,
             Request::Diff { .. } => Lane::Diff,
-            Request::Source { .. } => Lane::Source,
+            Request::Source { .. } | Request::FileDiff { .. } => Lane::Source,
         }
     }
 }
@@ -202,6 +212,16 @@ pub enum Response {
         /// The text.
         text: String,
     },
+    /// The answer to [`Request::FileDiff`]: first plain
+    /// ([`Detail::Coarse`]), then highlighted ([`Detail::Full`]).
+    FileDiff {
+        /// The file.
+        path: String,
+        /// Whether this answer is highlighted.
+        detail: Detail,
+        /// Its diff; a side is empty where the file does not exist.
+        diff: Arc<FileDiff>,
+    },
     /// A newer request in the same lane replaced this one before it finished.
     Superseded,
     /// The request could not be answered.
@@ -213,7 +233,7 @@ pub enum Response {
 
 impl Response {
     /// Whether no further reply will follow for this request: everything
-    /// but a coarse model or diff.
+    /// but a coarse model, diff or file diff.
     #[must_use]
     pub fn is_last(&self) -> bool {
         !matches!(
@@ -222,6 +242,9 @@ impl Response {
                 detail: Detail::Coarse,
                 ..
             } | Response::Diff {
+                detail: Detail::Coarse,
+                ..
+            } | Response::FileDiff {
                 detail: Detail::Coarse,
                 ..
             }

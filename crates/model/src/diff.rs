@@ -130,3 +130,60 @@ pub struct Weight {
     #[serde(flatten)]
     pub lines: Lines,
 }
+
+/// One side of a [`FileDiff`]: the file's lines and their coloured tokens.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct FileText {
+    /// The lines, without line endings; invalid UTF-8 replaced.
+    pub lines: Vec<String>,
+    /// For each line, its coloured tokens as byte ranges within the line,
+    /// sorted and not overlapping.
+    pub highlights: Vec<Vec<LineSpan>>,
+}
+
+/// A coloured token within one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LineSpan {
+    /// First byte in the line.
+    pub start: u32,
+    /// One past the last byte in the line.
+    pub end: u32,
+    /// What it is.
+    pub class: crate::lang::TokenClass,
+}
+
+/// How one row of a side-by-side diff changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RowKind {
+    /// The same line on both sides.
+    Same,
+    /// A line replaced by another.
+    Changed,
+    /// Only in base.
+    Removed,
+    /// Only in head.
+    Added,
+}
+
+/// One row of a side-by-side diff: a line on either side, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiffRow {
+    /// The base line's index (from 0), if this row has one.
+    pub base: Option<u32>,
+    /// The head line's index (from 0), if this row has one.
+    pub head: Option<u32>,
+    /// How it changed.
+    pub kind: RowKind,
+}
+
+/// A file's side-by-side diff for the code view at L4 (§5.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct FileDiff {
+    /// The file in base; empty where it does not exist.
+    pub base: FileText,
+    /// The file in head; empty where it does not exist.
+    pub head: FileText,
+    /// Every row, top to bottom.
+    pub rows: Vec<DiffRow>,
+}
