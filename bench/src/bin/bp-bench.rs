@@ -784,6 +784,7 @@ fn measure(
     });
 
     out.push(store_reopen()?);
+    out.extend(open_50k_file());
 
     // L1–L2 of each reference checkout through `bp model` (#30). Read from
     // the working tree until commits can be read (#24); the budget is the
@@ -988,6 +989,84 @@ fn cold_start(app: &Path, base_app: Option<&Path>) -> Result<Measurement, Error>
         )),
         gated: true,
     })
+}
+
+/// A Rust file of `lines` lines, the same every run: functions of ten lines
+/// with comments, strings, calls and types, so highlighting has work.
+fn synthetic_rust(lines: usize, variant: bool) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(lines * 40);
+    for i in 0..lines / 10 {
+        // Every 100th function differs in head: a one-in-a-hundred change.
+        let changed = variant && i % 100 == 7;
+        let _ = write!(
+            s,
+            "/// Function {i}, documented.\n\
+             pub fn item_{i}(value: u64, name: &str) -> Option<String> {{\n\
+             \x20   // A comment inside.\n\
+             \x20   let label = format!(\"{{name}}-{i}\");\n\
+             \x20   if value > {limit} {{\n\
+             \x20       return None;\n\
+             \x20   }}\n\
+             \x20   helper::check(value, &label);\n\
+             \x20   Some(label)\n\
+             }}\n",
+            limit = if changed { i + 1 } else { i },
+        );
+    }
+    s.into_bytes()
+}
+
+/// `open_50k_file` (§4, #93): what opening a 50,000-line file at L4 asks of
+/// the engine before the file is on screen, in process: the side-by-side
+/// diff of two versions that differ in one function in a hundred. The view
+/// lays out only the lines on screen. Highlighting follows in a second
+/// answer, as it parses both files whole; `highlight_50k_file` reports it.
+fn open_50k_file() -> Vec<Measurement> {
+    let lines = 50_000;
+    let (base, head) = (synthetic_rust(lines, false), synthetic_rust(lines, true));
+    let path = blueprint_model::RepoPath::parse("src/big.rs")
+        .unwrap_or_else(|_| blueprint_model::RepoPath::root());
+    let mut out = Vec::new();
+    for (name, highlighted, budget, samples) in [
+        ("open_50k_file", false, Some("open_50k_file"), 11),
+        ("highlight_50k_file", true, None, 5),
+    ] {
+        let mut best = f64::INFINITY;
+        let mut rows = 0;
+        for _ in 0..samples + 1 {
+            let start = std::time::Instant::now();
+            let d = blueprint_engine::source_diff::file_diff(
+                &path,
+                Some(&base),
+                Some(&head),
+                highlighted,
+            );
+            best = best.min(start.elapsed().as_secs_f64() * 1000.0);
+            rows = d.rows.len();
+            std::hint::black_box(d);
+        }
+        out.push(Measurement {
+            name: name.into(),
+            repo: None,
+            value: best,
+            base: None,
+            unit: "ms".into(),
+            budget: budget.map(Into::into),
+            samples,
+            note: Some(format!(
+                "in process: side-by-side diff of a generated {lines}-line Rust file ({} KB, one function in a hundred changed, {rows} rows){}; fastest of {samples} after one unmeasured run",
+                base.len() / 1024,
+                if highlighted {
+                    ", both sides highlighted (the second answer)"
+                } else {
+                    ", before highlighting (the first answer)"
+                }
+            )),
+            gated: false,
+        });
+    }
+    out
 }
 
 fn store_reopen() -> Result<Measurement, Error> {
