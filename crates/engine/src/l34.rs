@@ -34,6 +34,10 @@ type Parsed<'a> = (&'a RepoPath, &'a Placement, &'a Vec<String>, FileFacts);
 /// The reserved L3 segment for a module's free functions.
 pub const FUNCTIONS: &str = "(functions)";
 
+/// Facts already known for a file, such as those the index holds for its
+/// blob. `None` means the file must be parsed.
+pub type Cached<'a> = &'a (dyn Fn(&RepoPath) -> Option<FileFacts> + Sync);
+
 /// Adds L3 and L4 nodes for every placed file to `model`, which must already
 /// hold the L1–L2 model those placements refer to.
 pub fn analyse(
@@ -41,24 +45,54 @@ pub fn analyse(
     read: Read<'_>,
     model: &mut Model,
 ) -> Vec<Diagnostic> {
+    analyse_cached(placed, read, &|_| None, &mut |_, _| {}, model)
+}
+
+/// As [`analyse`], but takes each file's facts from `cached` when it has
+/// them, and parses only the rest. `parsed` is called, in path order, with
+/// every file that had to be parsed, so that its facts can be stored.
+pub fn analyse_cached(
+    placed: &BTreeMap<RepoPath, Placement>,
+    read: Read<'_>,
+    cached: Cached<'_>,
+    parsed: &mut dyn FnMut(&RepoPath, &FileFacts),
+    model: &mut Model,
+) -> Vec<Diagnostic> {
     let rust = Rust;
-    // Read sequentially (the reader need not be thread-safe), parse in
-    // parallel, then build nodes in path order so ids are deterministic.
-    let mut sources = Vec::new();
+    let mut wanted = Vec::new();
     let mut plain = Vec::new();
     for (path, place) in placed {
         match &place.module {
-            Some(module) if rust.handles(path) => match read(path) {
-                Some(bytes) => sources.push((path, place, module, bytes)),
-                None => plain.push((path, place)),
-            },
+            Some(module) if rust.handles(path) => wanted.push((path, place, module)),
             _ => plain.push((path, place)),
         }
     }
-    let parsed: Vec<Parsed<'_>> = sources
+    // Look up stored facts in parallel (decoding them is the cost), read the
+    // rest sequentially (the reader need not be thread-safe), parse those in
+    // parallel, then build nodes in path order so ids are deterministic.
+    let found: Vec<Option<FileFacts>> = wanted.par_iter().map(|(p, _, _)| cached(p)).collect();
+    let mut all: Vec<Parsed<'_>> = Vec::with_capacity(wanted.len());
+    let mut sources = Vec::new();
+    for ((path, place, module), facts) in wanted.into_iter().zip(found) {
+        match facts {
+            Some(facts) => all.push((path, place, module, facts)),
+            None => match read(path) {
+                Some(bytes) => sources.push((path, place, module, bytes)),
+                None => plain.push((path, place)),
+            },
+        }
+    }
+    let fresh: Vec<Parsed<'_>> = sources
         .into_par_iter()
         .map(|(path, place, module, bytes)| (path, place, module, rust.analyse(path, &bytes)))
         .collect();
+    for (path, _, _, facts) in &fresh {
+        parsed(path, facts);
+    }
+    all.extend(fresh);
+    all.sort_by(|a, b| a.0.cmp(b.0));
+    plain.sort_by(|a, b| a.0.cmp(b.0));
+    let parsed = all;
 
     let roots = placed
         .iter()

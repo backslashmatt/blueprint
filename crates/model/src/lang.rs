@@ -25,6 +25,9 @@ pub trait LanguageAnalyser: Sync {
     /// The facts of one file. Must never panic, whatever the bytes: anything
     /// that cannot be understood makes [`FileFacts::clean`] false and is
     /// otherwise skipped (§5.5).
+    ///
+    /// The facts must depend on the bytes alone, not on `path`: the engine
+    /// stores them by blob id, so two files with the same content share them.
     fn analyse(&self, path: &RepoPath, bytes: &[u8]) -> FileFacts;
 }
 

@@ -9,6 +9,8 @@ use blueprint_engine::git::{ObjectId, Repo};
 use blueprint_engine::index::{Index, Indexed};
 use blueprint_engine::l1::Diagnostic;
 use blueprint_engine::source::{Commit, Directory};
+use blueprint_lang_rust::Rust;
+use blueprint_model::lang::FileFacts;
 use blueprint_model::{EdgeKind, Level, Model, RepoPath};
 
 /// Exit code for a command that ran but could not do its job.
@@ -18,7 +20,7 @@ const EXIT_USAGE: u8 = 2;
 
 const USAGE: &str = "\
 usage: bp model <dir> [--rev <rev>] [--level 1|2|3|4] [--json]
-       bp index <repo> [--rev <rev>]
+       bp index <repo> [--rev <rev>] [--level 2|4]
        bp --version
        bp --help
 
@@ -30,6 +32,9 @@ commands:
 
 options for index:
   --rev <rev>   The commit to index (default HEAD)
+  --level N     2 (default) stores the L1–L2 model; 4 also parses every Rust
+                file and stores its facts, so `bp model --rev --level 3` or
+                `4` parses only files that changed since
 
 options for model:
   --rev <rev>   Read the commit <rev> of the git repository at <dir> instead of
@@ -51,6 +56,8 @@ enum Command {
     Index {
         path: PathBuf,
         rev: String,
+        /// Whether to store L3–L4 facts too (`--level 4`).
+        deep: bool,
     },
     Help,
     Model {
@@ -109,10 +116,20 @@ fn parse(args: &[String]) -> Result<Command, String> {
             })
         }
         "index" => {
-            let (mut path, mut rev) = (None, None);
+            let (mut path, mut rev, mut deep) = (None, None, false);
             let mut it = rest.iter();
             while let Some(arg) = it.next() {
                 match arg.as_str() {
+                    "--level" => {
+                        deep = match it.next().map(String::as_str) {
+                            Some("2") => false,
+                            Some("4") => true,
+                            Some(v) => {
+                                return Err(format!("--level for index takes 2 or 4, not `{v}`"));
+                            }
+                            None => return Err("--level needs a value: 2 or 4".into()),
+                        }
+                    }
                     "--rev" => match it.next() {
                         Some(r) if !r.is_empty() && !r.starts_with('-') => rev = Some(r.clone()),
                         _ => return Err("--rev needs a revision, such as HEAD".into()),
@@ -129,6 +146,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Index {
                 path,
                 rev: rev.unwrap_or_else(|| "HEAD".into()),
+                deep,
             })
         }
         other => Err(format!("unknown command `{other}`")),
@@ -234,7 +252,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Command::Index { path, rev } => index(&path, &rev),
+        Command::Index { path, rev, deep } => index(&path, &rev, deep),
         Command::Model {
             path,
             rev,
@@ -283,11 +301,25 @@ fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
                 return ExitCode::from(EXIT_FAILURE);
             }
         },
-        // The index holds L1–L2 only, so deeper levels are analysed.
+        // The index holds no L3–L4 model, so deeper levels are built, from
+        // the facts it holds where it has them.
         Some(rev) if deep => match Commit::open(path, rev) {
             Ok((source, mut diags)) => {
-                let (model, more) =
-                    blueprint_engine::analyse_deep(&source.paths(), &|p| source.read(p));
+                let index = match Index::open_existing(path) {
+                    Ok(index) => {
+                        for d in index.iter().flat_map(Index::dropped) {
+                            eprintln!("warning: index segment dropped and will be rebuilt: {d}");
+                        }
+                        index
+                    }
+                    Err(e) => {
+                        eprintln!("warning: cannot open the index, analysing instead: {e}");
+                        None
+                    }
+                };
+                let Deep {
+                    model, diags: more, ..
+                } = deep_at(&source, index.as_ref());
                 diags.extend(more);
                 diags.extend(unreadable(&source));
                 diags.sort();
@@ -416,6 +448,51 @@ fn at_rev(path: &Path, rev: &str, store: bool) -> Result<AtRev, String> {
     })
 }
 
+/// What [`deep_at`] built.
+struct Deep {
+    model: Model,
+    diags: Vec<Diagnostic>,
+    /// The facts of every file that had to be parsed, by blob.
+    parsed: Vec<(ObjectId, FileFacts)>,
+    /// How many files' facts came from the index.
+    reused: usize,
+}
+
+/// The L1–L4 model of `source`, with each Rust file's facts taken from
+/// `index` when it has them for the file's blob.
+fn deep_at(source: &Commit, index: Option<&Index>) -> Deep {
+    let blobs = source.blob_ids();
+    let blob = |p: &RepoPath| {
+        blobs
+            .binary_search_by(|(q, _)| q.cmp(p))
+            .ok()
+            .map(|i| blobs[i].1)
+    };
+    let reused = std::sync::atomic::AtomicUsize::new(0);
+    let cached = |p: &RepoPath| {
+        let facts = index?.get_facts(&Rust, blob(p)?)?;
+        reused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(facts)
+    };
+    let mut parsed = Vec::new();
+    let (model, diags) = blueprint_engine::analyse_deep_cached(
+        &source.paths(),
+        &|p| source.read(p),
+        &cached,
+        &mut |p, facts| {
+            if let Some(b) = blob(p) {
+                parsed.push((b, facts.clone()));
+            }
+        },
+    );
+    Deep {
+        model,
+        diags,
+        parsed,
+        reused: reused.into_inner(),
+    }
+}
+
 /// A warning for each file of `source` whose object could not be read.
 fn unreadable(source: &Commit) -> Vec<Diagnostic> {
     source
@@ -428,8 +505,25 @@ fn unreadable(source: &Commit) -> Vec<Diagnostic> {
         .collect()
 }
 
-fn index(path: &Path, rev: &str) -> ExitCode {
+fn index(path: &Path, rev: &str, deep: bool) -> ExitCode {
     match at_rev(path, rev, true) {
+        // Facts are stored only for a commit whose L1–L2 model could be.
+        Ok(r) if deep && (r.from_index || r.stored) => {
+            match index_facts(path, &r.commit.to_string()) {
+                Ok((parsed, reused)) => {
+                    println!(
+                        "{} indexed to level 4 ({} nodes at L1–L2; {parsed} files parsed, {reused} reused)",
+                        r.commit,
+                        r.indexed.model.nodes().count()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("bp: {}: {e}", path.display());
+                    ExitCode::from(EXIT_FAILURE)
+                }
+            }
+        }
         Ok(r) => {
             let nodes = r.indexed.model.nodes().count();
             if r.from_index {
@@ -456,6 +550,33 @@ fn index(path: &Path, rev: &str) -> ExitCode {
     }
 }
 
+/// Builds the L1–L4 model of `rev`, reusing the facts the index holds, and
+/// stores the facts of every file it had to parse. Returns how many files
+/// were parsed and how many reused.
+///
+/// # Errors
+/// If the commit or the index cannot be opened, a file cannot be read, or
+/// nothing that was parsed could be stored (object ids that are not SHA-1).
+fn index_facts(path: &Path, rev: &str) -> Result<(usize, usize), String> {
+    let (source, _) = Commit::open(path, rev).map_err(|e| e.to_string())?;
+    let mut index = Index::open(path)?;
+    let deep = deep_at(&source, Some(&index));
+    // Every level's diagnostics: the L1–L2 ones were not printed on the way.
+    warn(&deep.diags);
+    if !source.unreadable().is_empty() {
+        return Err(format!(
+            "{rev}: some files could not be read, so not every file's facts are stored"
+        ));
+    }
+    let stored = index.put_facts(&Rust, deep.parsed.iter().map(|(b, f)| (*b, f)))?;
+    if stored == 0 && !deep.parsed.is_empty() {
+        return Err(format!(
+            "{rev}: facts not stored: its object ids are not SHA-1"
+        ));
+    }
+    Ok((deep.parsed.len(), deep.reused))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,14 +594,24 @@ mod tests {
             parse(&args(&["index", "r"])),
             Ok(Command::Index {
                 path: "r".into(),
-                rev: "HEAD".into()
+                rev: "HEAD".into(),
+                deep: false
             })
         );
         assert_eq!(
             parse(&args(&["index", "--rev", "v1", "r"])),
             Ok(Command::Index {
                 path: "r".into(),
-                rev: "v1".into()
+                rev: "v1".into(),
+                deep: false
+            })
+        );
+        assert_eq!(
+            parse(&args(&["index", "r", "--level", "4"])),
+            Ok(Command::Index {
+                path: "r".into(),
+                rev: "HEAD".into(),
+                deep: true
             })
         );
         assert_eq!(
@@ -522,6 +653,8 @@ mod tests {
             &["index", "d", "e"],
             &["index", "d", "--rev"],
             &["index", "d", "--level", "1"],
+            &["index", "d", "--level", "3"],
+            &["index", "d", "--level"],
             &["model", "d", "--x"],
             &["nope"],
             &["--version", "x"],

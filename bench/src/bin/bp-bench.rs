@@ -306,6 +306,109 @@ fn first_index(
     Ok(out)
 }
 
+/// `bp index --level 4` of each reference repository's pinned commit into
+/// an empty cache (`first_index_l4`), then `bp model --rev --level 4` with
+/// that cache, so every Rust file's facts come from the index
+/// (`model_l4_indexed`, #63). One sample of each on the large repository,
+/// whose runs take seconds. A base build without `index --level 4` is not
+/// compared.
+fn deep_index(
+    bp: &Path,
+    base_bp: Option<&Path>,
+    dest: &Path,
+    repos: &[RefRepo],
+    cache: &Path,
+) -> Result<Vec<Measurement>, Error> {
+    let mut out = Vec::new();
+    let base_bp = base_bp.filter(|b| supports_index_level_4(b));
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let samples = if r.name == "large" { 1 } else { 3 };
+        let index = |bp: std::path::PathBuf, tag: &'static str| {
+            let mut n = 0u32;
+            let root = cache.join(&r.name).join(tag);
+            let dir = dir.clone();
+            let rev = r.commit.clone();
+            move || -> Result<(), Error> {
+                n += 1;
+                let out = Command::new(&bp)
+                    .arg("index")
+                    .arg(&dir)
+                    .args(["--rev", &rev, "--level", "4"])
+                    .env("BLUEPRINT_CACHE_DIR", root.join(n.to_string()))
+                    .stderr(std::process::Stdio::null())
+                    .output()?;
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if out.status.success() && stdout.contains(" 0 reused)") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "`{} index {} --level 4` did not index afresh: {} {stdout}",
+                        bp.display(),
+                        dir.display(),
+                        out.status
+                    )
+                    .into())
+                }
+            }
+        };
+        let mut head = index(bp.to_path_buf(), "head");
+        let mut base = base_bp.map(|b| index(b.to_path_buf(), "base"));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "first_index_l4".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: match r.name.as_str() {
+                "medium" => Some("index_medium".into()),
+                "large" => Some("index_large".into()),
+                _ => None,
+            },
+            samples,
+            note: Some(format!(
+                "`bp index <checkout> --rev <pinned> --level 4` into an empty cache, fastest of {samples}; warm OS cache"
+            )),
+            gated: true,
+        });
+
+        // Every sample above indexed into its own cache; the first of each
+        // holds every file's facts.
+        let head_cache = cache.join(&r.name).join("head").join("1");
+        let base_cache = cache.join(&r.name).join("base").join("1");
+        let mut head = spawn_l4(bp, &dir, &r.commit, &head_cache);
+        let mut base = base_bp.map(|b| spawn_l4(b, &dir, &r.commit, &base_cache));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "model_l4_indexed".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: None,
+            samples,
+            note: Some(format!(
+                "`bp model <checkout> --rev <pinned> --level 4 --json` after `bp index --level 4`: no file parsed; fastest of {samples}"
+            )),
+            gated: true,
+        });
+    }
+    Ok(out)
+}
+
 /// Runs `bp index <dir> --rev <rev>` twice with its cache in `cache`, and
 /// checks that the second run found the first one's entry. That is the same
 /// lookup `bp model --rev` makes, so the timed reopen really reads the index.
@@ -340,16 +443,27 @@ fn supports_level_4(bp: &Path) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("1 to 4"))
 }
 
+/// Whether `bp --help` offers `bp index --level 4`: older builds do not.
+fn supports_index_level_4(bp: &Path) -> bool {
+    Command::new(bp)
+        .arg("--help")
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("[--level 2|4]"))
+}
+
+/// `bp model --rev <rev> --level 4 --json` with its index in `cache`.
 fn spawn_l4<'a>(
     bp: &'a Path,
     dir: &'a Path,
     rev: &'a str,
+    cache: &'a Path,
 ) -> impl FnMut() -> Result<(), Error> + 'a {
     move || {
         let status = Command::new(bp)
             .arg("model")
             .arg(dir)
             .args(["--rev", rev, "--level", "4", "--json"])
+            .env("BLUEPRINT_CACHE_DIR", cache)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()?;
@@ -475,15 +589,15 @@ fn measure(
     // "open a previously indexed repository" budget. Each build gets its own
     // cache. A base build without `bp index` is not compared.
     // The full L1–L4 model of the pinned commit (#61): every Rust file
-    // parsed, held to the §4 "first index" budgets. `bp model --level 4`
-    // stands in for `bp index` until the index stores L3–L4 (#63). A base
-    // build without level 4 is not compared.
+    // parsed, held to the §4 "first index" budgets. The cache is empty, so
+    // no facts are reused. A base build without level 4 is not compared.
+    let empty = std::env::temp_dir().join(format!("bp-bench-empty-{}", std::process::id()));
     for r in repos {
         let dir = repos::checkout_dir(dest, r);
         let samples = if r.name == "large" { 1 } else { 3 };
         let base_bp = base_bp.filter(|b| supports_level_4(b));
-        let mut head = spawn_l4(bp, &dir, &r.commit);
-        let mut base = base_bp.map(|b| spawn_l4(b, &dir, &r.commit));
+        let mut head = spawn_l4(bp, &dir, &r.commit, &empty);
+        let mut base = base_bp.map(|b| spawn_l4(b, &dir, &r.commit, &empty));
         let (value, base) = best_ms(
             samples,
             1,
@@ -514,6 +628,7 @@ fn measure(
     let _ = std::fs::remove_dir_all(&cache);
     let reopened = open_indexed(bp, base_bp, dest, repos, &cache).and_then(|mut m| {
         m.extend(first_index(bp, base_bp, dest, repos, &cache.join("first"))?);
+        m.extend(deep_index(bp, base_bp, dest, repos, &cache.join("deep"))?);
         Ok(m)
     });
     let _ = std::fs::remove_dir_all(&cache);
