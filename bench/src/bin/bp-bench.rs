@@ -332,6 +332,40 @@ fn bp_index(bp: &Path, dir: &Path, rev: &str, cache: &Path) -> Result<(), Error>
     Ok(())
 }
 
+/// Whether `bp --help` offers `--level` up to 4: older builds do not.
+fn supports_level_4(bp: &Path) -> bool {
+    Command::new(bp)
+        .arg("--help")
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("1 to 4"))
+}
+
+fn spawn_l4<'a>(
+    bp: &'a Path,
+    dir: &'a Path,
+    rev: &'a str,
+) -> impl FnMut() -> Result<(), Error> + 'a {
+    move || {
+        let status = Command::new(bp)
+            .arg("model")
+            .arg(dir)
+            .args(["--rev", rev, "--level", "4", "--json"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{} model {} --level 4` failed: {status}",
+                bp.display(),
+                dir.display()
+            )
+            .into())
+        }
+    }
+}
+
 fn spawn_reopen<'a>(
     bp: &'a Path,
     dir: &'a Path,
@@ -440,6 +474,42 @@ fn measure(
     // once, then time `bp model --rev` reading it back, against the §4
     // "open a previously indexed repository" budget. Each build gets its own
     // cache. A base build without `bp index` is not compared.
+    // The full L1–L4 model of the pinned commit (#61): every Rust file
+    // parsed, held to the §4 "first index" budgets. `bp model --level 4`
+    // stands in for `bp index` until the index stores L3–L4 (#63). A base
+    // build without level 4 is not compared.
+    for r in repos {
+        let dir = repos::checkout_dir(dest, r);
+        let samples = if r.name == "large" { 1 } else { 3 };
+        let base_bp = base_bp.filter(|b| supports_level_4(b));
+        let mut head = spawn_l4(bp, &dir, &r.commit);
+        let mut base = base_bp.map(|b| spawn_l4(b, &dir, &r.commit));
+        let (value, base) = best_ms(
+            samples,
+            1,
+            &mut head,
+            base.as_mut()
+                .map(|b| b as &mut dyn FnMut() -> Result<(), Error>),
+        )?;
+        out.push(Measurement {
+            name: "model_l4".into(),
+            repo: Some(r.name.clone()),
+            value,
+            base,
+            unit: "ms".into(),
+            budget: match r.name.as_str() {
+                "medium" => Some("index_medium".into()),
+                "large" => Some("index_large".into()),
+                _ => None,
+            },
+            samples,
+            note: Some(format!(
+                "`bp model <checkout> --rev <pinned> --level 4 --json`, fastest of {samples}; warm OS cache"
+            )),
+            gated: true,
+        });
+    }
+
     let cache = std::env::temp_dir().join(format!("bp-bench-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
     let reopened = open_indexed(bp, base_bp, dest, repos, &cache).and_then(|mut m| {
