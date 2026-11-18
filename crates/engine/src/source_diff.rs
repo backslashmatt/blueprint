@@ -48,6 +48,9 @@ fn text(bytes: &[u8], analyser: Option<&dyn LanguageAnalyser>) -> FileText {
         let end = start + line.len();
         let body = line.strip_suffix(b"\n").unwrap_or(line);
         let body = body.strip_suffix(b"\r").unwrap_or(body);
+        // The line as text, and where each byte of it went: invalid UTF-8
+        // becomes U+FFFD, three bytes for however many it replaced.
+        let (text, offset) = lossy(body);
         let mut here = Vec::new();
         // Tokens that end before this line are done; a token across lines
         // (a block comment) colours its part of each.
@@ -64,11 +67,12 @@ fn text(bytes: &[u8], analyser: Option<&dyn LanguageAnalyser>) -> FileText {
                 break;
             }
             let (s, e) = (s.max(start) - start, e.min(start + body.len()) - start);
+            let (s, e) = (offset(s), offset(e));
             if e > s {
                 here.push(span(s, e, h));
             }
         }
-        lines.push(String::from_utf8_lossy(body).into_owned());
+        lines.push(text);
         spans.push(here);
         start = end;
     }
@@ -76,6 +80,42 @@ fn text(bytes: &[u8], analyser: Option<&dyn LanguageAnalyser>) -> FileText {
         lines,
         highlights: spans,
     }
+}
+
+/// `bytes` as text with invalid UTF-8 replaced, and a function from each
+/// byte offset in `bytes` to the matching offset in the text. An offset
+/// inside an invalid sequence maps to the end of its replacement, so every
+/// mapped offset is on a character boundary.
+fn lossy(bytes: &[u8]) -> (String, impl Fn(usize) -> usize) {
+    let mut text = String::with_capacity(bytes.len());
+    // (offset in bytes, offset in text) at the start of each invalid run.
+    let mut marks: Vec<(usize, usize, usize)> = Vec::new();
+    let mut at = 0;
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        at += chunk.valid().len();
+        let bad = chunk.invalid().len();
+        if bad > 0 {
+            marks.push((at, text.len(), bad));
+            text.push('\u{FFFD}');
+            at += bad;
+        }
+    }
+    let map = move |o: usize| {
+        // Shift by what each invalid run before `o` grew or shrank by.
+        let mut shift: isize = 0;
+        for &(b, t, bad) in &marks {
+            if o <= b {
+                break;
+            }
+            if o < b + bad {
+                return t + 3;
+            }
+            shift = (t + 3) as isize - (b + bad) as isize;
+        }
+        o.saturating_add_signed(shift)
+    };
+    (text, map)
 }
 
 fn span(start: usize, end: usize, h: &Highlight) -> LineSpan {
@@ -163,6 +203,29 @@ mod tests {
         assert_eq!(d.rows[4].head, Some(4));
         assert_eq!(d.base.lines.len(), 4);
         assert!(d.head.highlights.iter().all(Vec::is_empty), "no analyser");
+    }
+
+    #[test]
+    fn spans_stay_on_the_text_when_invalid_utf8_is_replaced() {
+        let d = file_diff(
+            &path("src/lib.rs"),
+            None,
+            Some(b"// \xff\xfe x\nfn f() { \"\xff\" }\n"),
+            true,
+        );
+        for (line, spans) in d.head.lines.iter().zip(&d.head.highlights) {
+            for s in spans {
+                assert!(
+                    line.get(s.start as usize..s.end as usize).is_some(),
+                    "{line:?} {s:?}"
+                );
+            }
+        }
+        let comment = &d.head.highlights[0][0];
+        assert_eq!(
+            &d.head.lines[0][comment.start as usize..comment.end as usize],
+            "// \u{FFFD}\u{FFFD} x"
+        );
     }
 
     #[test]

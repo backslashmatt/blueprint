@@ -366,18 +366,20 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                 return Err(format!("{path}: in neither commit"));
             }
             // The plain diff first: highlighting parses both files whole.
-            for detail in [Detail::Coarse, Detail::Full] {
-                let highlighted = detail == Detail::Full;
-                let diff =
-                    crate::source_diff::file_diff(&file, b.as_deref(), h.as_deref(), highlighted);
-                sent(emit(Response::FileDiff {
-                    path: path.clone(),
-                    detail,
-                    diff: Arc::new(diff),
-                }))?;
-                check()?;
-            }
-            Ok(())
+            let answer = |detail: Detail| Response::FileDiff {
+                path: path.clone(),
+                detail,
+                diff: Arc::new(crate::source_diff::file_diff(
+                    &file,
+                    b.as_deref(),
+                    h.as_deref(),
+                    detail == Detail::Full,
+                )),
+            };
+            sent(emit(answer(Detail::Coarse)))?;
+            check()?;
+            // The last answer: no check after it, so it is the only final one.
+            sent(emit(answer(Detail::Full)))
         }
         Request::Source {
             rev,
