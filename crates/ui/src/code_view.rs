@@ -1,0 +1,174 @@
+//! The code view (REQUIREMENTS §5.4, view 4 at L4; #93): one file's
+//! side-by-side diff, opened from a node on the map and scrolled to the
+//! node's lines. View state only, so it is tested headlessly; `workspace`
+//! draws the rows on screen and nothing else.
+
+use std::sync::Arc;
+
+use blueprint_protocol::Detail;
+use blueprint_protocol::model::diff::{DiffRow, FileDiff, RowKind};
+
+/// Rows a page key moves.
+pub const PAGE: usize = 30;
+
+/// One file's diff on screen.
+#[derive(Debug, Clone)]
+pub struct CodeView {
+    /// The file, `/`-separated.
+    pub path: String,
+    /// What was opened, for the header: the node's name.
+    pub title: String,
+    /// The node's lines in head (or base), 1-based, to scroll to.
+    pub lines: Option<(u32, u32)>,
+    /// The diff once it has arrived: plain first, then highlighted.
+    pub diff: Option<Arc<FileDiff>>,
+    /// How much of it has arrived.
+    pub detail: Option<Detail>,
+    /// The row under the cursor.
+    pub cursor: usize,
+    /// Why the diff could not be had, if it could not.
+    pub error: Option<String>,
+}
+
+impl CodeView {
+    /// A view of `path`, waiting for its diff.
+    #[must_use]
+    pub fn new(path: String, title: String, lines: Option<(u32, u32)>) -> CodeView {
+        CodeView {
+            path,
+            title,
+            lines,
+            diff: None,
+            detail: None,
+            cursor: 0,
+            error: None,
+        }
+    }
+
+    /// Takes in a diff. The first one puts the cursor on the node's first
+    /// line (or the first change); a later one, the highlighted version of
+    /// the same diff, keeps it where it is.
+    pub fn receive(&mut self, detail: Detail, diff: Arc<FileDiff>) {
+        let first = self.diff.is_none();
+        if first {
+            self.cursor = focus(&diff.rows, self.lines);
+        }
+        self.diff = Some(diff);
+        self.detail = Some(detail);
+    }
+
+    /// The number of rows.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.diff.as_ref().map_or(0, |d| d.rows.len())
+    }
+
+    /// Moves the cursor for `key` (a GPUI key name). Returns whether it
+    /// moved.
+    pub fn key(&mut self, key: &str) -> bool {
+        let last = self.rows().saturating_sub(1);
+        let to = match key {
+            "up" => self.cursor.saturating_sub(1),
+            "down" => (self.cursor + 1).min(last),
+            "pageup" => self.cursor.saturating_sub(PAGE),
+            "pagedown" => (self.cursor + PAGE).min(last),
+            "home" => 0,
+            "end" => last,
+            "n" => self.next_change(true).unwrap_or(self.cursor),
+            "p" => self.next_change(false).unwrap_or(self.cursor),
+            _ => return false,
+        };
+        let moved = to != self.cursor;
+        self.cursor = to;
+        moved
+    }
+
+    /// The first row of the next (or previous) run of changed rows.
+    fn next_change(&self, forward: bool) -> Option<usize> {
+        let rows = &self.diff.as_ref()?.rows;
+        let changed = |i: usize| rows.get(i).is_some_and(|r| r.kind != RowKind::Same);
+        let starts = |i: usize| changed(i) && (i == 0 || !changed(i - 1));
+        if forward {
+            (self.cursor + 1..rows.len()).find(|&i| starts(i))
+        } else {
+            (0..self.cursor).rev().find(|&i| starts(i))
+        }
+    }
+}
+
+/// The row to open on: the first row of the node's lines in head (or in
+/// base, for a node only there), else the first changed row, else the top.
+fn focus(rows: &[DiffRow], lines: Option<(u32, u32)>) -> usize {
+    if let Some((first, _)) = lines {
+        let line = first.saturating_sub(1);
+        if let Some(i) = rows.iter().position(|r| r.head.is_some_and(|h| h >= line)) {
+            return i;
+        }
+        if let Some(i) = rows.iter().position(|r| r.base.is_some_and(|b| b >= line)) {
+            return i;
+        }
+    }
+    rows.iter()
+        .position(|r| r.kind != RowKind::Same)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(base: Option<u32>, head: Option<u32>, kind: RowKind) -> DiffRow {
+        DiffRow { base, head, kind }
+    }
+
+    fn diff() -> Arc<FileDiff> {
+        let rows = vec![
+            row(Some(0), Some(0), RowKind::Same),
+            row(Some(1), Some(1), RowKind::Changed),
+            row(Some(2), Some(2), RowKind::Same),
+            row(None, Some(3), RowKind::Added),
+            row(None, Some(4), RowKind::Added),
+            row(Some(3), Some(5), RowKind::Same),
+            row(Some(4), None, RowKind::Removed),
+        ];
+        Arc::new(FileDiff {
+            rows,
+            ..FileDiff::default()
+        })
+    }
+
+    #[test]
+    fn opens_on_the_nodes_lines_and_keeps_its_place_when_highlights_arrive() {
+        let mut v = CodeView::new("a.rs".into(), "f".into(), Some((5, 6)));
+        v.receive(Detail::Coarse, diff());
+        assert_eq!(v.cursor, 4, "head line 5 is row 4");
+        v.key("up");
+        v.receive(Detail::Full, diff());
+        assert_eq!(v.cursor, 3);
+        assert_eq!(v.detail, Some(Detail::Full));
+        let mut none = CodeView::new("a.rs".into(), "a".into(), None);
+        none.receive(Detail::Coarse, diff());
+        assert_eq!(none.cursor, 1, "without lines, the first change");
+    }
+
+    #[test]
+    fn keys_move_within_the_rows_and_jump_between_changes() {
+        let mut v = CodeView::new("a.rs".into(), "a".into(), None);
+        assert!(!v.key("down"), "nothing to move through yet");
+        v.receive(Detail::Coarse, diff());
+        assert!(v.key("n"));
+        assert_eq!(v.cursor, 3);
+        assert!(v.key("n"));
+        assert_eq!(v.cursor, 6);
+        assert!(!v.key("n"), "no change after the last");
+        assert!(v.key("p"));
+        assert_eq!(v.cursor, 3);
+        v.key("end");
+        assert_eq!(v.cursor, 6);
+        v.key("pagedown");
+        assert_eq!(v.cursor, 6);
+        v.key("pageup");
+        assert_eq!(v.cursor, 0);
+        assert!(!v.key("x"));
+    }
+}

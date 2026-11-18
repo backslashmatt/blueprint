@@ -60,6 +60,11 @@ pub struct MapNode {
     /// Whether it has children in base or head, so drilling into it shows
     /// something.
     pub has_children: bool,
+    /// The file or directory that defines it, `/`-separated.
+    pub source: String,
+    /// Its lines in that file, 1-based and inclusive, for code nodes (in
+    /// head, or in base for a removed node).
+    pub lines: Option<(u32, u32)>,
 }
 
 /// One rolled-up edge of a view, between two of its nodes.
@@ -336,6 +341,8 @@ fn view(
                 kind: node.map_or(NodeKind::Directory, |n| n.kind),
                 status: status.get(id).copied().unwrap_or(Status::Unchanged),
                 has_children,
+                source: node.map(|n| n.source.to_string()).unwrap_or_default(),
+                lines: node.and_then(|n| n.code).map(|c| c.lines),
             }
         })
         .collect();

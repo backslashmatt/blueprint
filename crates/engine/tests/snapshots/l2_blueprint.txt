@@ -70,6 +70,8 @@ nodes:
   L2:cargo:crates/store#segment  Module  "segment"  Exact  crates/store/src/segment.rs  Private
   L2:cargo:crates/store#store  Module  "store"  Exact  crates/store/src/store.rs  Private
   L2:cargo:crates/store#tests%2F  Directory  "tests/"  Unknown  crates/store/tests
+  L2:cargo:crates/ui#code_view  Module  "code_view"  Exact  crates/ui/src/code_view.rs  Public
+  L2:cargo:crates/ui#code_view/tests  Module  "code_view::tests"  Exact  crates/ui/src/code_view.rs  Private
   L2:cargo:crates/ui#examples%2F  Directory  "examples/"  Unknown  crates/ui/examples
   L2:cargo:crates/ui#layout  Module  "layout"  Exact  crates/ui/src/layout.rs  Public
   L2:cargo:crates/ui#layout/tests  Module  "layout::tests"  Exact  crates/ui/src/layout.rs  Private

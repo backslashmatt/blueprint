@@ -101,6 +101,7 @@ jobs:
           mkdir -p screenshots
           timeout 600 .github/scripts/screenshot.sh screenshots/map-systems.png 240 target/debug/blueprint . --script end,b,home,h,enter
           timeout 600 .github/scripts/screenshot.sh screenshots/map-drilled.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter
+          timeout 600 .github/scripts/screenshot.sh screenshots/code.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter,c
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
