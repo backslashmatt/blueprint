@@ -1,6 +1,7 @@
 //! `bp`: the headless Blueprint front end. Everything the app can show, this
 //! CLI can print (REQUIREMENTS §5.3). See docs/cli.md.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -308,19 +309,27 @@ fn model(path: &Path, rev: Option<&str>, level: Depth, json: bool) -> ExitCode {
             }
         },
     };
-    let model = up_to(&model, level);
-    let out = if json {
-        match serde_json::to_string_pretty(&model) {
-            Ok(s) => s + "\n",
-            Err(e) => {
-                eprintln!("bp: cannot serialise the model: {e}");
-                return ExitCode::from(EXIT_FAILURE);
-            }
-        }
+    // Level 4 is the whole model: no copy needed.
+    let model = if level == Depth::L4 {
+        model
     } else {
-        text(&model)
+        up_to(&model, level)
     };
-    print!("{out}");
+    // Written straight to stdout: the level-4 JSON of a large repository is
+    // over 100 MB, and building it as one string first doubles the memory.
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let written = if json {
+        serde_json::to_writer_pretty(&mut out, &model)
+            .map_err(std::io::Error::from)
+            .and_then(|()| out.write_all(b"\n"))
+    } else {
+        out.write_all(text(&model).as_bytes())
+    };
+    if let Err(e) = written.and_then(|()| out.flush()) {
+        eprintln!("bp: cannot write the model: {e}");
+        return ExitCode::from(EXIT_FAILURE);
+    }
     warn(&diags);
     ExitCode::SUCCESS
 }
