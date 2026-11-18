@@ -51,7 +51,12 @@ impl Resident {
         diags.sort();
         let shapes = shapes(&placed, &state, read);
         Resident {
-            paths: paths.to_vec(),
+            paths: {
+                let mut p = paths.to_vec();
+                p.sort();
+                p.dedup();
+                p
+            },
             model,
             diags,
             state,
@@ -71,17 +76,24 @@ impl Resident {
         &self.diags
     }
 
-    /// Applies a change to the file at `path`, which must be one of the
-    /// tree's files; `read` reads the tree as it now is. The model is then
-    /// what [`Resident::build`] would give for the new tree.
+    /// Applies a change to the file at `path`, which may have been edited,
+    /// created or deleted; `read` reads the tree as it now is, and returns
+    /// `None` for a deleted file. The model is then what
+    /// [`Resident::build`] would give for the new tree.
     pub fn update(&mut self, path: &RepoPath, read: Read<'_>) -> Update {
         if self.update_in_place(path, read) {
-            Update::InPlace
-        } else {
-            let paths = std::mem::take(&mut self.paths);
-            *self = Resident::build(&paths, read);
-            Update::Rebuilt
+            return Update::InPlace;
         }
+        let mut paths = std::mem::take(&mut self.paths);
+        match (paths.binary_search(path), read(path).is_some()) {
+            (Err(at), true) => paths.insert(at, path.clone()),
+            (Ok(at), false) => {
+                paths.remove(at);
+            }
+            _ => {}
+        }
+        *self = Resident::build(&paths, read);
+        Update::Rebuilt
     }
 
     fn update_in_place(&mut self, path: &RepoPath, read: Read<'_>) -> bool {

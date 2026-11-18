@@ -36,7 +36,18 @@ const FIXTURE: &[(&str, &str)] = &[
 fn change(r: &mut Resident, tree: &mut Files, path: &str, text: &str) -> Update {
     let path = RepoPath::parse(path).unwrap();
     tree.insert(path.clone(), text.as_bytes().to_vec());
-    let how = r.update(&path, &|p| tree.get(p).cloned());
+    check(r, tree, &path)
+}
+
+/// Deletes `path`, updates `r`, and checks it as [`change`] does.
+fn delete(r: &mut Resident, tree: &mut Files, path: &str) -> Update {
+    let path = RepoPath::parse(path).unwrap();
+    tree.remove(&path);
+    check(r, tree, &path)
+}
+
+fn check(r: &mut Resident, tree: &Files, path: &RepoPath) -> Update {
+    let how = r.update(path, &|p| tree.get(p).cloned());
     let paths: Vec<RepoPath> = tree.keys().cloned().collect();
     let (fresh, diags) = analyse_deep(&paths, &|p| tree.get(p).cloned());
     assert_eq!(*r.model(), fresh, "after changing {path} ({how:?})");
@@ -164,6 +175,36 @@ fn structural_edits_rebuild_and_match_a_fresh_build() {
             "core/tests/it.rs",
             "#[test]\nfn it2() {}\n"
         ),
+        Update::Rebuilt
+    );
+}
+
+#[test]
+fn created_and_deleted_files_rebuild_and_match_a_fresh_build() {
+    let mut tree = files(FIXTURE);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let lib = "pub mod graph;\nmod util;\nmod extra;\n\npub fn top() {}\n\nfn helper() {}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/lib.rs", lib),
+        Update::Rebuilt
+    );
+    let extra = "pub fn e() {}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/extra.rs", extra),
+        Update::Rebuilt
+    );
+    assert_eq!(
+        delete(&mut r, &mut tree, "core/src/util.rs"),
+        Update::Rebuilt
+    );
+    assert_eq!(
+        delete(&mut r, &mut tree, "core/src/extra.rs"),
+        Update::Rebuilt
+    );
+    // Deleting what is already gone changes nothing.
+    assert_eq!(
+        delete(&mut r, &mut tree, "core/src/extra.rs"),
         Update::Rebuilt
     );
 }
