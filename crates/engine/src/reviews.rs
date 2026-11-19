@@ -16,6 +16,17 @@ use serde::{Deserialize, Serialize};
 /// Overrides the data directory, for tests and for users who keep data elsewhere.
 pub const DATA_DIR_ENV: &str = "BLUEPRINT_DATA_DIR";
 
+static DATA_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Sets the data directory for the rest of the process, over
+/// `$BLUEPRINT_DATA_DIR`: for a front end with its own setting, and for
+/// tests, which cannot set the environment safely while other threads run.
+/// Returns `false`, changing nothing, if it was already set to another
+/// directory.
+pub fn set_data_root(dir: PathBuf) -> bool {
+    DATA_ROOT.get_or_init(|| dir.clone()) == &dir
+}
+
 /// The file's layout version.
 const FORMAT: u32 = 1;
 
@@ -39,6 +50,7 @@ pub struct Reviews {
 impl Reviews {
     /// Where the marks for the repository at `repo` live:
     /// `<data>/reviews/<hash of the canonical path>.json`, where `<data>` is
+    /// the directory given to [`set_data_root`] if any, else
     /// `$BLUEPRINT_DATA_DIR` if set, otherwise the platform data directory
     /// (`~/.local/share/blueprint` on Linux).
     ///
@@ -48,8 +60,9 @@ impl Reviews {
         let canonical = repo
             .canonicalize()
             .map_err(|e| format!("{}: {e}", repo.display()))?;
-        let root = match std::env::var_os(DATA_DIR_ENV) {
-            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        let root = match (DATA_ROOT.get(), std::env::var_os(DATA_DIR_ENV)) {
+            (Some(dir), _) => dir.clone(),
+            (None, Some(dir)) if !dir.is_empty() => PathBuf::from(dir),
             _ => directories::ProjectDirs::from("", "", "blueprint")
                 .map(|d| d.data_dir().to_path_buf())
                 .ok_or("no data directory: set BLUEPRINT_DATA_DIR")?,

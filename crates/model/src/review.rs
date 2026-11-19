@@ -220,6 +220,18 @@ impl ReviewState {
         self.keys.get(id).copied()
     }
 
+    /// Every changed node, and every ancestor of one, ordered by id.
+    pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
+        self.changed.iter()
+    }
+
+    /// Whether only `id`'s own mark can make it reviewed: it has no changed
+    /// children, or changed itself (see [`ReviewState`]).
+    #[must_use]
+    pub fn needs_own_mark(&self, id: &NodeId) -> bool {
+        self.own_mark.contains(id)
+    }
+
     /// Whether `id` changed, itself or below it.
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {

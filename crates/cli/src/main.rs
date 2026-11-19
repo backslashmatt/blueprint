@@ -19,6 +19,7 @@ const USAGE: &str = "\
 usage: bp model <dir> [--rev <rev>] [--level 1|2|3|4] [--json]
        bp index <repo> [--rev <rev>] [--level 2|4]
        bp diff <repo> <base> <head> [--json]
+       bp review <repo> <base> <head> [--mark <node> [--note <text>] | --unmark <node>] [--json]
        bp --version
        bp --help
 
@@ -32,8 +33,19 @@ commands:
                 Print the architectural diff of two commits: findings (new
                 dependencies and cycles), then changed nodes and edges
 
+  review <repo> <base> <head>
+                Print each changed node of the diff and whether it is reviewed
+                (docs/cli.md), after storing a mark if one is given
+
 options for diff:
   --json        Print the diff as JSON (docs/diff-json.md) instead of text
+
+options for review:
+  --mark <node> Mark the node (an id as `bp diff` prints it) reviewed
+  --note <text> With --mark, attach a note; with an empty text, remove it
+  --unmark <node>
+                Mark the node not reviewed, keeping its note
+  --json        Print the review as JSON instead of text
 
 options for index:
   --rev <rev>   The commit to index (default HEAD)
@@ -77,6 +89,22 @@ enum Command {
         level: Depth,
         json: bool,
     },
+    Review {
+        path: PathBuf,
+        base: String,
+        head: String,
+        change: Option<MarkChange>,
+        json: bool,
+    },
+}
+
+/// What `bp review` changes before printing.
+#[derive(Debug, PartialEq, Eq)]
+struct MarkChange {
+    node: String,
+    reviewed: bool,
+    /// `None` keeps the node's note; `Some("")` removes it.
+    note: Option<String>,
 }
 
 /// Parses the arguments after the program name. Hand-written rather than a
@@ -184,6 +212,54 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 rev: rev.unwrap_or_else(|| "HEAD".into()),
                 deep,
             })
+        }
+        "review" => {
+            let (mut json, mut mark, mut unmark, mut note) = (false, None, None, None);
+            let mut positional = Vec::new();
+            let mut it = rest.iter();
+            let value = |v: Option<&String>, flag: &str| -> Result<String, String> {
+                v.cloned().ok_or_else(|| format!("{flag} needs a value"))
+            };
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    "--mark" => mark = Some(value(it.next(), "--mark")?),
+                    "--unmark" => unmark = Some(value(it.next(), "--unmark")?),
+                    "--note" => note = Some(value(it.next(), "--note")?),
+                    "--help" | "-h" => return Ok(Command::Help),
+                    flag if flag.starts_with('-') && flag != "-" => {
+                        return Err(format!("unknown option `{flag}`"));
+                    }
+                    p => positional.push(p.to_owned()),
+                }
+            }
+            let change = match (mark, unmark) {
+                (Some(_), Some(_)) => return Err("give --mark or --unmark, not both".into()),
+                (Some(node), None) => Some(MarkChange {
+                    node,
+                    reviewed: true,
+                    note,
+                }),
+                (None, Some(node)) if note.is_none() => Some(MarkChange {
+                    node,
+                    reviewed: false,
+                    note: None,
+                }),
+                (None, _) if note.is_some() => return Err("--note goes with --mark".into()),
+                (None, _) => None,
+            };
+            match <[String; 3]>::try_from(positional) {
+                Ok([path, base, head]) => Ok(Command::Review {
+                    path: PathBuf::from(path),
+                    base,
+                    head,
+                    change,
+                    json,
+                }),
+                Err(_) => {
+                    Err("review needs a repository, a base revision and a head revision".into())
+                }
+            }
         }
         other => Err(format!("unknown command `{other}`")),
     }
@@ -301,6 +377,13 @@ fn main() -> ExitCode {
             level,
             json,
         } => model(&path, rev.as_deref(), level, json),
+        Command::Review {
+            path,
+            base,
+            head,
+            change,
+            json,
+        } => review(&path, &base, &head, change.as_ref(), json),
     };
     if std::env::var_os(PEAK_RSS_ENV).is_some() {
         report_peak_rss();
@@ -435,6 +518,117 @@ fn diff(path: &Path, base: &str, head: &str, json: bool) -> ExitCode {
     }
     // The models are large, and the process ends here: freeing them would
     // take longer than the diff (DR 0009).
+    std::mem::forget(d);
+    std::mem::forget(index);
+    ExitCode::SUCCESS
+}
+
+/// `bp review`: the diff's changed nodes and their review state, after
+/// storing `change` if given (DR 0011).
+fn review(
+    path: &Path,
+    base: &str,
+    head: &str,
+    change: Option<&MarkChange>,
+    json: bool,
+) -> ExitCode {
+    use blueprint_engine::reviews::Reviews;
+    use blueprint_model::NodeId;
+    use blueprint_model::review::{Mark, ReviewState};
+    let fail = |e: &dyn std::fmt::Display| {
+        eprintln!("bp: {}: {e}", path.display());
+        ExitCode::from(EXIT_FAILURE)
+    };
+    let (index, warnings) = commits::existing_index(path);
+    warn_index(&warnings);
+    let d = match commits::diff_commits(path, base, head, index.as_ref()) {
+        Ok(d) => d,
+        Err(e) => return fail(&e),
+    };
+    warn(&d.base.1);
+    warn(&d.head.1);
+    if let Some(e) = &d.weight_error {
+        // Without weights the keys cannot match marks made with them.
+        return fail(&format!(
+            "change weight not computed, so marks cannot be matched: {e}"
+        ));
+    }
+    let mut reviews = match Reviews::open(path) {
+        Ok(r) => r,
+        Err(e) => return fail(&e),
+    };
+    if let Some(w) = reviews.warning() {
+        eprintln!("warning: {w}");
+    }
+    let state = |r: &Reviews| ReviewState::new(&d.diff, &d.base.0, &d.head.0, r.marks());
+    let mut current = state(&reviews);
+    if let Some(change) = change {
+        let node = match NodeId::try_from(change.node.clone()) {
+            Ok(id) => id,
+            Err(_) => return fail(&format!("`{}` is not a node id", change.node)),
+        };
+        let Some(key) = current.key(&node) else {
+            return fail(&format!("{node} did not change between {base} and {head}"));
+        };
+        let old = current.mark(&node).and_then(|m| m.note.clone());
+        let note = match &change.note {
+            None => old,
+            Some(n) if n.is_empty() => None,
+            Some(n) => Some(n.clone()),
+        };
+        let mark = Mark {
+            node,
+            key,
+            reviewed: change.reviewed,
+            note,
+        };
+        if let Err(e) = reviews.set(mark) {
+            return fail(&e);
+        }
+        current = state(&reviews);
+    }
+    let (done, total) = current.progress();
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let written = if json {
+        let nodes: Vec<serde_json::Value> = current
+            .changed()
+            .map(|id| {
+                serde_json::json!({
+                    "node": id.to_string(),
+                    "reviewed": current.is_reviewed(id),
+                    "needs_own_mark": current.needs_own_mark(id),
+                    "note": current.mark(id).and_then(|m| m.note.clone()),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "progress": { "reviewed": done, "of": total },
+            "nodes": nodes,
+        });
+        serde_json::to_writer_pretty(&mut out, &doc)
+            .map_err(std::io::Error::from)
+            .and_then(|()| out.write_all(b"\n"))
+    } else {
+        let mut text = format!("reviewed {done} of {total}\n");
+        for id in current.changed() {
+            let status = if current.is_reviewed(id) {
+                "reviewed"
+            } else {
+                "open"
+            };
+            text.push_str(&format!("{status}\t{id}"));
+            if let Some(note) = current.mark(id).and_then(|m| m.note.as_deref()) {
+                text.push('\t');
+                text.push_str(&note.replace(['\n', '\t'], " "));
+            }
+            text.push('\n');
+        }
+        out.write_all(text.as_bytes())
+    };
+    if let Err(e) = written.and_then(|()| out.flush()) {
+        return fail(&format!("cannot write the review: {e}"));
+    }
     std::mem::forget(d);
     std::mem::forget(index);
     ExitCode::SUCCESS
@@ -625,8 +819,43 @@ mod tests {
                 json: true
             })
         );
+        assert_eq!(
+            parse(&args(&[
+                "review", "r", "a", "b", "--mark", "n", "--note", "ok"
+            ])),
+            Ok(Command::Review {
+                path: "r".into(),
+                base: "a".into(),
+                head: "b".into(),
+                change: Some(MarkChange {
+                    node: "n".into(),
+                    reviewed: true,
+                    note: Some("ok".into()),
+                }),
+                json: false
+            })
+        );
+        assert_eq!(
+            parse(&args(&["review", "r", "a", "b", "--unmark", "n", "--json"])),
+            Ok(Command::Review {
+                path: "r".into(),
+                base: "a".into(),
+                head: "b".into(),
+                change: Some(MarkChange {
+                    node: "n".into(),
+                    reviewed: false,
+                    note: None,
+                }),
+                json: true
+            })
+        );
         for bad in [
-            &["model"][..],
+            &["review", "r", "a"][..],
+            &["review", "r", "a", "b", "--mark"],
+            &["review", "r", "a", "b", "--mark", "n", "--unmark", "n"],
+            &["review", "r", "a", "b", "--note", "x"],
+            &["review", "r", "a", "b", "--unmark", "n", "--note", "x"],
+            &["model"],
             &["model", "d", "e"],
             &["model", "d", "--level"],
             &["model", "d", "--level", "5"],
