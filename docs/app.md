@@ -41,6 +41,7 @@ Names below L1 come after their system's, as in `blueprint-store › segment`. O
 | ↑ ↓ Home End | Choose a finding |
 | Enter | Show it on the map: drilled to its node (a dependency's dependent, a cycle's first node) and selected |
 | `r` | Mark the finding's node reviewed, or not (see Review state) |
+| `e` | Write a note on the finding's node |
 | `m` | The map, at the systems |
 | Esc | Back to the review list |
 
@@ -64,6 +65,7 @@ The **map** (#92), opened from the findings, shows the systems: one level at a t
 | Enter | Drill into the selected node, or open its code if nothing is inside it |
 | `c` | Open the selected node's code (its file's diff, at its lines) |
 | `r` | Mark the selected node reviewed, or not (see Review state) |
+| `e` | Write a note on the selected node |
 | Backspace | Up one level; the breadcrumb is in the header |
 | `f` | Back to the findings |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
@@ -94,7 +96,7 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 - **Where marks live.** They are kept on this computer, per repository (`bp review` reads and writes the same ones: [cli.md](cli.md)).
 - **Rebases.** A mark applies wherever the node changed exactly as it did when marked, so it survives a rebase that leaves that change alone, and is dropped, never misapplied, when the change differs.
 
-Notes on nodes are stored with marks and shown by `bp review`; writing them in the app comes next (#115).
+`e` writes a note on the same node `r` would mark: a one-line editor opens with the node's note, Enter saves it (keeping whether the node is reviewed), Esc cancels, and saving an empty note removes it. The note of the node under the cursor is shown under the header, and `bp review` prints notes too.
 
 ## Command palette
 

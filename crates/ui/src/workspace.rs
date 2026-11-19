@@ -63,6 +63,19 @@ pub struct Review {
     code_request: Option<RequestId>,
 }
 
+/// The one-line editor for a node's review note (#115).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteEditor {
+    /// The node, and the key its mark is stored under.
+    pub node: NodeId,
+    /// [`ReviewState::key`] of the node.
+    pub key: u64,
+    /// The node's name, for the prompt.
+    pub name: String,
+    /// The text so far.
+    pub text: String,
+}
+
 /// One timed `--script` key (#95).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyTiming {
@@ -131,6 +144,8 @@ pub struct Workspace {
     findings_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
+    /// The note being written, when the note editor is open (#115).
+    pub note: Option<NoteEditor>,
     /// Whether `--script` keys are timed (#95): pressed one at a time, each
     /// once the last one's effect is on screen.
     timed: bool,
@@ -189,6 +204,7 @@ impl Workspace {
             code_scroll: UniformListScrollHandle::new(),
             findings_scroll: UniformListScrollHandle::new(),
             palette: None,
+            note: None,
             notice: None,
             timed: false,
             pending: None,
@@ -699,6 +715,15 @@ impl Workspace {
     /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
         self.notice = None;
+        if self.note.is_some() {
+            let typed = match key {
+                "space" => Some(" ".to_owned()),
+                k if k.chars().count() == 1 => Some(k.to_owned()),
+                _ => None,
+            };
+            self.note_key(key, typed.as_deref());
+            return;
+        }
         // Opening a repository works over the palette too.
         if actions::for_key(&[Scope::Global], key).is_some_and(|a| a.id == "global.open") {
             self.run("global.open", cx);
@@ -741,6 +766,7 @@ impl Workspace {
             Scope::Findings => self.run_findings(id, cx),
             Scope::Map => self.run_map(id, cx),
             Scope::Review if id == "review.reviewed" => self.toggle_reviewed(),
+            Scope::Review if id == "review.note" => self.open_note(),
             Scope::Review => self.back_to_list(),
         }
     }
@@ -801,13 +827,8 @@ impl Workspace {
             reviewed: !marked,
             note: own.and_then(|m| m.note.clone()),
         };
-        self.marks
-            .retain(|m| !(m.node == mark.node && m.key == mark.key));
-        self.marks.push(mark.clone());
-        self.refresh_reviewed();
         let node = mark.node.clone();
-        let id = self.request(Request::Mark { mark: mark.clone() });
-        self.mark_requests.insert(id, mark);
+        self.store_mark(mark);
         if marked
             && let Screen::Review(r) = &self.screen
             && r.reviewed.as_ref().is_some_and(|st| st.is_reviewed(&node))
@@ -817,6 +838,89 @@ impl Workspace {
                     .into(),
             );
         }
+    }
+
+    /// Opens the note editor on the node `r` would mark, with its note.
+    fn open_note(&mut self) {
+        let target = self.review_target();
+        let Screen::Review(r) = &self.screen else {
+            return;
+        };
+        let (Some(state), Some(node)) = (r.reviewed.as_ref(), target) else {
+            self.notice = Some("Notes are available once the whole diff has loaded.".into());
+            return;
+        };
+        if self.marks_request.is_some() {
+            self.notice = Some("Review marks are still loading.".into());
+            return;
+        }
+        let Some(key) = state.key(&node) else {
+            self.notice = Some("That node did not change in this review.".into());
+            return;
+        };
+        let text = state
+            .mark(&node)
+            .and_then(|m| m.note.clone())
+            .unwrap_or_default();
+        let name = r
+            .map
+            .as_ref()
+            .map_or_else(|| node.to_string(), |m| m.name(&node));
+        self.note = Some(NoteEditor {
+            node,
+            key,
+            name,
+            text,
+        });
+    }
+
+    /// One key in the note editor: `typed` is the character it types, if
+    /// any.
+    fn note_key(&mut self, key: &str, typed: Option<&str>) {
+        let Some(editor) = self.note.as_mut() else {
+            return;
+        };
+        match key {
+            "escape" => self.note = None,
+            "enter" => {
+                let Some(editor) = self.note.take() else {
+                    return;
+                };
+                let reviewed = match &self.screen {
+                    Screen::Review(r) => r
+                        .reviewed
+                        .as_ref()
+                        .and_then(|st| st.mark(&editor.node))
+                        .is_some_and(|m| m.reviewed),
+                    _ => false,
+                };
+                let text = editor.text.trim();
+                self.store_mark(Mark {
+                    node: editor.node,
+                    key: editor.key,
+                    reviewed,
+                    note: (!text.is_empty()).then(|| text.to_owned()),
+                });
+            }
+            "backspace" => {
+                editor.text.pop();
+            }
+            _ => {
+                if let Some(t) = typed.filter(|t| !t.chars().any(char::is_control)) {
+                    editor.text.push_str(t);
+                }
+            }
+        }
+    }
+
+    /// Applies `mark` at once and sends it to the engine to store.
+    fn store_mark(&mut self, mark: Mark) {
+        self.marks
+            .retain(|m| !(m.node == mark.node && m.key == mark.key));
+        self.marks.push(mark.clone());
+        self.refresh_reviewed();
+        let id = self.request(Request::Mark { mark: mark.clone() });
+        self.mark_requests.insert(id, mark);
     }
 
     /// Recomputes the review state from the marks: cheap, as the basis is
@@ -1105,7 +1209,15 @@ impl Workspace {
             .id("workspace")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                this.key(&key_name(&ev.keystroke), cx);
+                let k = &ev.keystroke;
+                let m = &k.modifiers;
+                if this.note.is_some() && !(m.control || m.alt || m.platform) {
+                    // The character typed, shift and layout applied.
+                    this.notice = None;
+                    this.note_key(&key_name(k), k.key_char.as_deref());
+                } else {
+                    this.key(&key_name(k), cx);
+                }
                 cx.notify();
             }))
             .size_full()
@@ -1121,6 +1233,21 @@ impl Workspace {
         };
         let root = match &self.palette {
             Some(p) => root.child(palette_view(p, theme)),
+            None => root,
+        };
+        let root = match &self.note {
+            Some(n) => root.child(
+                div()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(theme.muted))
+                    .child(format!("Note on {}: {}▏", n.name, n.text))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.muted))
+                            .child("Enter saves, Esc cancels; an empty note removes it."),
+                    ),
+            ),
             None => root,
         };
         match &self.screen {
@@ -1203,12 +1330,25 @@ impl Workspace {
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, e note, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, m the map, Esc back to the list, F1 all actions.".to_owned()
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, e note, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
+                // The note on the node `r` and `e` act on, if it has one.
+                let note = self.review_target().and_then(|t| {
+                    let st = r.reviewed.as_ref()?;
+                    st.mark(&t)?.note.clone()
+                });
+                let root = match note {
+                    Some(n) => root.child(
+                        div()
+                            .text_color(rgb(theme.muted))
+                            .child(format!("Note: {n}")),
+                    ),
+                    None => root,
+                };
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
                 }
@@ -1684,7 +1824,9 @@ mod tests {
                         | "findings.show"
                         | "findings.map"
                 ),
-                Scope::Review => matches!(a.id, "review.back" | "review.reviewed"),
+                Scope::Review => {
+                    matches!(a.id, "review.back" | "review.reviewed" | "review.note")
+                }
                 Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };
             assert!(handled, "{} has no handler", a.id);
