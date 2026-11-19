@@ -17,10 +17,11 @@ use gpui::{
 };
 
 use crate::Theme;
+use crate::actions::{self, Palette, PaletteEffect, Scope};
 use crate::code_view::CodeView;
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
 use crate::map::{EdgeStatus, Map, Status, nearest_towards};
-use crate::review_list::{Effect, ReviewList, action_for_key, short};
+use crate::review_list::{self, Effect, ReviewList, short};
 
 /// Sends one request to the engine.
 pub type Send = Rc<dyn Fn(RequestId, Request)>;
@@ -77,6 +78,8 @@ pub struct Workspace {
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     code_scroll: UniformListScrollHandle,
+    /// The command palette, when open (#94).
+    pub palette: Option<Palette>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Bumped for every layout asked for; only the newest is kept.
@@ -104,6 +107,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
+            palette: None,
             seeds: HashMap::new(),
             layout_generation: 0,
         };
@@ -303,131 +307,192 @@ impl Workspace {
         .detach();
     }
 
-    /// Applies one key, by its GPUI name.
+    /// The action scopes of what is on screen, narrowest first.
+    #[must_use]
+    pub fn scopes(&self) -> Vec<Scope> {
+        match &self.screen {
+            Screen::Opening => vec![Scope::Global],
+            Screen::List(_) => vec![Scope::List, Scope::Global],
+            Screen::Review(r) if r.code.is_some() => {
+                vec![Scope::Code, Scope::Review, Scope::Global]
+            }
+            Screen::Review(r) if r.map.is_some() => vec![Scope::Map, Scope::Review, Scope::Global],
+            // Back to the list only when there is a list to go back to.
+            Screen::Review(_) | Screen::Failed(_) if self.list.is_some() => {
+                vec![Scope::Review, Scope::Global]
+            }
+            Screen::Review(_) | Screen::Failed(_) => vec![Scope::Global],
+        }
+    }
+
+    /// Applies one key, by its GPUI name (modifiers first, as in
+    /// `ctrl-shift-p`): to the palette when it is open, else the action
+    /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
-        match &mut self.screen {
-            Screen::List(list) => {
-                let Some(action) = action_for_key(key) else {
-                    return;
-                };
-                let before = list.cursor;
-                let effect = list.apply(action);
-                if list.cursor != before {
-                    self.scroll
-                        .scroll_to_item(list.cursor, ScrollStrategy::Nearest);
-                }
-                if let Effect::Review { base, head } = effect {
-                    self.list = Some(list.clone());
-                    let id = self.request(Request::Diff {
-                        base: base.clone(),
-                        head: head.clone(),
-                    });
-                    self.waiting = Some(id);
-                    self.screen = Screen::Review(Box::new(Review {
-                        base,
-                        head,
-                        detail: None,
-                        findings: 0,
-                        changed: 0,
-                        map: None,
-                        mapped: None,
-                        layout: None,
-                        code: None,
-                        code_request: None,
-                    }));
+        let scopes = self.scopes();
+        if let Some(palette) = self.palette.as_mut() {
+            palette.rescope(scopes);
+            match palette.key(key) {
+                PaletteEffect::Stay => {}
+                PaletteEffect::Close => self.palette = None,
+                PaletteEffect::Run(action) => {
+                    self.palette = None;
+                    self.run(action.id, cx);
                 }
             }
-            Screen::Review(review) if review.code.is_some() => {
-                if matches!(key, "backspace" | "escape") {
-                    review.code = None;
-                    review.code_request = None;
-                } else if let Some(code) = review.code.as_mut()
-                    && code.key(key)
-                {
-                    self.code_scroll
-                        .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
-                }
+            return;
+        }
+        if let Some(action) = actions::for_key(&self.scopes(), key) {
+            self.run(action.id, cx);
+        }
+    }
+
+    /// Runs the action with this registry id, if it applies on this screen.
+    pub fn run(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(def) = actions::by_id(id) else {
+            return;
+        };
+        if !self.scopes().contains(&def.scope) {
+            return;
+        }
+        match def.scope {
+            Scope::Global => self.palette = Some(Palette::new(self.scopes())),
+            Scope::List => self.run_list(id),
+            Scope::Code => self.run_code(id),
+            Scope::Map => self.run_map(id, cx),
+            Scope::Review => self.back_to_list(),
+        }
+    }
+
+    fn run_list(&mut self, id: &str) {
+        let Screen::List(list) = &mut self.screen else {
+            return;
+        };
+        let Some(action) = review_list::Action::from_id(id) else {
+            return;
+        };
+        let before = list.cursor;
+        let effect = list.apply(action);
+        if list.cursor != before {
+            self.scroll
+                .scroll_to_item(list.cursor, ScrollStrategy::Nearest);
+        }
+        if let Effect::Review { base, head } = effect {
+            self.list = Some(list.clone());
+            let id = self.request(Request::Diff {
+                base: base.clone(),
+                head: head.clone(),
+            });
+            self.waiting = Some(id);
+            self.screen = Screen::Review(Box::new(Review {
+                base,
+                head,
+                detail: None,
+                findings: 0,
+                changed: 0,
+                map: None,
+                mapped: None,
+                layout: None,
+                code: None,
+                code_request: None,
+            }));
+        }
+    }
+
+    fn run_code(&mut self, id: &str) {
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        if id == "code.close" {
+            review.code = None;
+            review.code_request = None;
+            return;
+        }
+        let Some(key) = code_key(id) else {
+            return;
+        };
+        if let Some(code) = review.code.as_mut()
+            && code.key(key)
+        {
+            self.code_scroll
+                .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
+        }
+    }
+
+    fn run_map(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        // Enter on a node with nothing inside, or `c` on any node, opens
+        // its code.
+        let leaf = review
+            .map
+            .as_ref()
+            .and_then(|m| m.selected.and_then(|i| m.view.nodes.get(i)))
+            .map(|n| (n.clone(), !n.has_children));
+        if let Some((node, is_leaf)) = leaf
+            && ((id == "map.drill_down" && is_leaf) || id == "map.code")
+            && !node.source.is_empty()
+        {
+            let (base, head) = (review.base.clone(), review.head.clone());
+            review.code = Some(CodeView::new(
+                node.source.clone(),
+                node.name.clone(),
+                node.lines,
+                node.lines_in_base,
+            ));
+            self.next_id += 1;
+            let id = self.next_id;
+            (self.send)(
+                id,
+                Request::FileDiff {
+                    base,
+                    head,
+                    path: node.source,
+                },
+            );
+            if let Screen::Review(review) = &mut self.screen {
+                review.code_request = Some(id);
             }
-            Screen::Review(review) if key != "escape" && review.map.is_some() => {
-                // Enter on a node with nothing inside, or `c` on any node,
-                // opens its code.
-                let leaf = review
-                    .map
-                    .as_ref()
-                    .and_then(|m| m.selected.and_then(|i| m.view.nodes.get(i)))
-                    .map(|n| (n.clone(), !n.has_children));
-                if let Some((node, is_leaf)) = leaf
-                    && ((key == "enter" && is_leaf) || key == "c")
-                    && !node.source.is_empty()
-                {
-                    let (base, head) = (review.base.clone(), review.head.clone());
-                    review.code = Some(CodeView::new(
-                        node.source.clone(),
-                        node.name.clone(),
-                        node.lines,
-                        node.lines_in_base,
-                    ));
-                    self.next_id += 1;
-                    let id = self.next_id;
-                    (self.send)(
-                        id,
-                        Request::FileDiff {
-                            base,
-                            head,
-                            path: node.source,
-                        },
-                    );
-                    if let Screen::Review(review) = &mut self.screen {
-                        review.code_request = Some(id);
+            return;
+        }
+        let Review { map, layout, .. } = &mut **review;
+        let Some(map) = map.as_mut() else {
+            return;
+        };
+        let moved = match map_op(id) {
+            Some(MapOp::DrillDown) => map.drill_down(),
+            Some(MapOp::DrillUp) => map.drill_up(),
+            Some(MapOp::Next) => {
+                map.cycle(true);
+                false
+            }
+            Some(MapOp::Towards(dx, dy)) => {
+                if let (Some(l), Some(from)) = (layout.as_ref(), map.selected) {
+                    let pts: Vec<(f32, f32)> = l.nodes.iter().map(|p| (p.x, p.y)).collect();
+                    if let Some(i) = nearest_towards(&pts, from, dx, dy) {
+                        map.selected = Some(i);
                     }
-                    return;
                 }
-                let Screen::Review(review) = &mut self.screen else {
-                    return;
-                };
-                let Review { map, layout, .. } = &mut **review;
-                let Some(map) = map.as_mut() else {
-                    return;
-                };
-                let moved = match key {
-                    "enter" => map.drill_down(),
-                    "backspace" => map.drill_up(),
-                    "tab" => {
-                        map.cycle(true);
-                        false
-                    }
-                    "left" | "right" | "up" | "down" => {
-                        let (dx, dy) = match key {
-                            "left" => (-1.0, 0.0),
-                            "right" => (1.0, 0.0),
-                            "up" => (0.0, -1.0),
-                            _ => (0.0, 1.0),
-                        };
-                        if let (Some(l), Some(from)) = (layout.as_ref(), map.selected) {
-                            let pts: Vec<(f32, f32)> = l.nodes.iter().map(|p| (p.x, p.y)).collect();
-                            if let Some(i) = nearest_towards(&pts, from, dx, dy) {
-                                map.selected = Some(i);
-                            }
-                        }
-                        false
-                    }
-                    _ => false,
-                };
-                if moved {
-                    *layout = None;
-                    self.lay_out(cx);
-                }
+                false
             }
-            Screen::Review(_) | Screen::Failed(_) if key == "escape" => {
-                if let Some(list) = self.list.take() {
-                    self.waiting = None;
-                    // Layouts still running belong to the review left.
-                    self.layout_generation += 1;
-                    self.seeds.clear();
-                    self.screen = Screen::List(list);
-                }
-            }
-            _ => {}
+            // `map.code` was handled above; on a node without source it
+            // does nothing.
+            Some(MapOp::Code) | None => false,
+        };
+        if moved {
+            *layout = None;
+            self.lay_out(cx);
+        }
+    }
+
+    fn back_to_list(&mut self) {
+        if let Some(list) = self.list.take() {
+            self.waiting = None;
+            // Layouts still running belong to the review left.
+            self.layout_generation += 1;
+            self.seeds.clear();
+            self.screen = Screen::List(list);
         }
     }
 }
@@ -436,11 +501,15 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_appearance(window.appearance());
         let dark = theme == Theme::DARK;
+        let scopes = self.scopes();
+        if let Some(p) = self.palette.as_mut() {
+            p.rescope(scopes);
+        }
         let root = div()
             .id("workspace")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                this.key(&ev.keystroke.key, cx);
+                this.key(&key_name(&ev.keystroke), cx);
                 cx.notify();
             }))
             .size_full()
@@ -450,6 +519,10 @@ impl Render for Workspace {
             .p_6()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
+        let root = match &self.palette {
+            Some(p) => root.child(palette_view(p, theme)),
+            None => root,
+        };
         match &self.screen {
             Screen::Opening => root.child("Opening the repository…"),
             Screen::Failed(e) => root
@@ -465,7 +538,7 @@ impl Render for Workspace {
                 ),
             Screen::List(list) => {
                 let header = format!(
-                    "On {}. ↑↓ Home End move, b base, h head, s swap, Enter review.",
+                    "On {}. ↑↓ Home End move, b base, h head, s swap, Enter review, F1 all actions.",
                     list.current.as_deref().unwrap_or("a detached HEAD")
                 );
                 let lines: Vec<String> = list
@@ -520,7 +593,7 @@ impl Render for Workspace {
                         r.changed
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, Esc back to the list."
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, Esc back to the list, F1 all actions."
                     )));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
@@ -540,6 +613,107 @@ impl Render for Workspace {
             }
         }
     }
+}
+
+/// The code view key an action stands for.
+fn code_key(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "code.up" => "up",
+        "code.down" => "down",
+        "code.page_up" => "pageup",
+        "code.page_down" => "pagedown",
+        "code.first" => "home",
+        "code.last" => "end",
+        "code.next_change" => "n",
+        "code.previous_change" => "p",
+        "code.scroll_left" => "left",
+        "code.scroll_right" => "right",
+        _ => return None,
+    })
+}
+
+/// What a map action does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MapOp {
+    DrillDown,
+    DrillUp,
+    Code,
+    Next,
+    /// Select the nearest node in this direction.
+    Towards(f32, f32),
+}
+
+fn map_op(id: &str) -> Option<MapOp> {
+    Some(match id {
+        "map.drill_down" => MapOp::DrillDown,
+        "map.drill_up" => MapOp::DrillUp,
+        "map.code" => MapOp::Code,
+        "map.next" => MapOp::Next,
+        "map.left" => MapOp::Towards(-1.0, 0.0),
+        "map.right" => MapOp::Towards(1.0, 0.0),
+        "map.up" => MapOp::Towards(0.0, -1.0),
+        "map.down" => MapOp::Towards(0.0, 1.0),
+        _ => return None,
+    })
+}
+
+/// The command palette: what was typed, then the matching actions with
+/// their keys, the highlighted one marked.
+fn palette_view(p: &Palette, theme: Theme) -> gpui::Div {
+    const SHOWN: usize = 12;
+    let start = p.cursor.saturating_sub(SHOWN - 1);
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .p_2()
+        .mb_2()
+        .border_1()
+        .border_color(rgb(theme.muted))
+        .child(format!("› {}▏", p.query));
+    if p.matches.is_empty() {
+        list = list.child(
+            div()
+                .text_color(rgb(theme.muted))
+                .child("No matching action"),
+        );
+    }
+    for (i, a) in p.matches.iter().enumerate().skip(start).take(SHOWN) {
+        let mark = if i == p.cursor { "›" } else { " " };
+        list = list.child(
+            div()
+                .flex()
+                .justify_between()
+                .child(format!("{mark} {}", a.title))
+                .child(div().text_color(rgb(theme.muted)).child(a.keys.join("  "))),
+        );
+    }
+    list.child(
+        div()
+            .text_color(rgb(theme.muted))
+            .child("Type to search, ↑↓ choose, Enter run, Esc close"),
+    )
+}
+
+/// A keystroke's name as the action registry spells it: `ctrl-`, `alt-`
+/// and `cmd-` first, then `shift-` only alongside one of them (a shifted
+/// letter alone is the letter), then the key.
+fn key_name(k: &gpui::Keystroke) -> String {
+    let m = &k.modifiers;
+    let mut name = String::new();
+    if m.control {
+        name.push_str("ctrl-");
+    }
+    if m.alt {
+        name.push_str("alt-");
+    }
+    if m.platform {
+        name.push_str("cmd-");
+    }
+    if m.shift && (m.control || m.alt || m.platform) {
+        name.push_str("shift-");
+    }
+    name.push_str(&k.key);
+    name
 }
 
 /// A node's fill for its status: the diff overlay (§5.4).
@@ -785,4 +959,23 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     .track_scroll(scroll)
     .flex_1();
     div().flex().flex_col().flex_1().child(header).child(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_action_is_handled() {
+        for a in actions::ACTIONS {
+            let handled = match a.scope {
+                Scope::List => review_list::Action::from_id(a.id).is_some(),
+                Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
+                Scope::Map => map_op(a.id).is_some(),
+                Scope::Review => a.id == "review.back",
+                Scope::Global => a.id == "global.palette",
+            };
+            assert!(handled, "{} has no handler", a.id);
+        }
+    }
 }

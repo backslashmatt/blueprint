@@ -55,7 +55,7 @@ pub fn short(id: &str) -> &str {
 }
 
 /// Something the reviewer does in the list. Each has a key (see
-/// [`ACTIONS`]) and a command palette entry (#94).
+/// the registry in `crate::actions`) and a command palette entry (#94).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Move the cursor up one row.
@@ -76,29 +76,28 @@ pub enum Action {
     Open,
 }
 
-/// Every review list action: its name in the command palette and its key.
-pub const ACTIONS: &[(Action, &str, &str)] = &[
-    (Action::Up, "Review list: previous row", "up"),
-    (Action::Down, "Review list: next row", "down"),
-    (Action::First, "Review list: first row", "home"),
-    (Action::Last, "Review list: last row", "end"),
-    (Action::PickBase, "Review list: use as base", "b"),
-    (Action::PickHead, "Review list: use as head", "h"),
-    (Action::Swap, "Review list: swap base and head", "s"),
-    (
-        Action::Open,
-        "Review list: review base against head",
-        "enter",
-    ),
-];
+impl Action {
+    /// The list action with this registry id (`crate::actions`), if any.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Action> {
+        Some(match id {
+            "list.up" => Action::Up,
+            "list.down" => Action::Down,
+            "list.first" => Action::First,
+            "list.last" => Action::Last,
+            "list.base" => Action::PickBase,
+            "list.head" => Action::PickHead,
+            "list.swap" => Action::Swap,
+            "list.open" => Action::Open,
+            _ => return None,
+        })
+    }
+}
 
-/// The action bound to `key` (a GPUI key name), if any.
+/// The list action bound to `key` (a GPUI key name), if any.
 #[must_use]
 pub fn action_for_key(key: &str) -> Option<Action> {
-    ACTIONS
-        .iter()
-        .find(|(_, _, k)| *k == key)
-        .map(|(a, _, _)| *a)
+    crate::actions::for_key(&[crate::actions::Scope::List], key).and_then(|a| Action::from_id(a.id))
 }
 
 /// What the app should do after an action.
@@ -290,10 +289,16 @@ mod tests {
     }
 
     #[test]
-    fn every_action_has_a_distinct_key() {
-        let mut keys: Vec<&str> = ACTIONS.iter().map(|(_, _, k)| *k).collect();
-        keys.sort_unstable();
-        keys.dedup();
-        assert_eq!(keys.len(), ACTIONS.len());
+    fn every_list_action_is_registered() {
+        let registered: Vec<_> = crate::actions::ACTIONS
+            .iter()
+            .filter(|a| a.scope == crate::actions::Scope::List)
+            .filter_map(|a| Action::from_id(a.id))
+            .collect();
+        assert_eq!(
+            registered.len(),
+            8,
+            "every list action has a registry entry"
+        );
     }
 }
