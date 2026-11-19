@@ -12,6 +12,8 @@
 pub enum Scope {
     /// The review list.
     List,
+    /// The findings list of a review (#114).
+    Findings,
     /// The map of a review.
     Map,
     /// The code diff of one file.
@@ -86,6 +88,48 @@ pub const ACTIONS: &[ActionDef] = &[
         "Review list: review base against head",
         Scope::List,
         &["enter"],
+    ),
+    a(
+        "findings.up",
+        "Findings: previous finding",
+        Scope::Findings,
+        &["up"],
+    ),
+    a(
+        "findings.down",
+        "Findings: next finding",
+        Scope::Findings,
+        &["down"],
+    ),
+    a(
+        "findings.first",
+        "Findings: first finding",
+        Scope::Findings,
+        &["home"],
+    ),
+    a(
+        "findings.last",
+        "Findings: last finding",
+        Scope::Findings,
+        &["end"],
+    ),
+    a(
+        "findings.show",
+        "Findings: show the finding on the map",
+        Scope::Findings,
+        &["enter"],
+    ),
+    a(
+        "findings.map",
+        "Findings: open the map at the systems",
+        Scope::Findings,
+        &["m"],
+    ),
+    a(
+        "map.findings",
+        "Map: back to the findings",
+        Scope::Map,
+        &["f"],
     ),
     a(
         "map.drill_down",
@@ -499,7 +543,10 @@ mod tests {
         let map = [Scope::Map, Scope::Review, Scope::Global];
         let ids: Vec<_> = search(&map, "code").iter().map(|a| a.id).collect();
         assert_eq!(&ids[..2], ["map.drill_down", "map.code"]);
-        let ids: Vec<_> = search(&map, "back to").iter().map(|a| a.id).collect();
+        let ids: Vec<_> = search(&map, "back to the list")
+            .iter()
+            .map(|a| a.id)
+            .collect();
         assert_eq!(ids.first(), Some(&"review.back"));
     }
 }

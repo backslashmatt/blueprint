@@ -25,9 +25,29 @@ Everything is done from the keyboard:
 | Enter | Review base against head |
 | Esc | Back to the list, from a review or a failed one |
 
+## Findings
+
+A review opens on its **findings** (#114, §5.4 view 3), the reviewer's starting point, in the §3.3 order:
+
+1. new dependencies between systems or modules, one row per pair;
+2. new dependency cycles;
+3. public surface changes;
+4. the ten modules or deeper nodes with the most changed lines (change concentration).
+
+Names below L1 come after their system's, as in `blueprint-store › segment`. Only the rows on screen are drawn.
+
+| Key | Action |
+|---|---|
+| ↑ ↓ Home End | Choose a finding |
+| Enter | Show it on the map: drilled to its node (a dependency's dependent, a cycle's first node) and selected |
+| `m` | The map, at the systems |
+| Esc | Back to the review list |
+
+On the map, `f` goes back to the findings, where the highlighted row stays.
+
 ## Map
 
-Reviewing opens the **map** (#92) at the systems: one level at a time, base and head drawn together, with the diff overlaid. It first shows the systems and modules (L1–L2), then the full diff once the code levels are ready, keeping your place.
+The **map** (#92), opened from the findings, shows the systems: one level at a time, base and head drawn together, with the diff overlaid. It first shows the systems and modules (L1–L2), then the full diff once the code levels are ready, keeping your place.
 
 - **Nodes** are filled by how they changed: green added, red removed, orange public surface, purple moved or renamed, yellow changed, grey contained or unchanged. An orange outline means something inside changed. `›` means the node has children to drill into.
 - **Edges** are rolled up from the code (§3.2). A dependent is drawn above what it depends on. Green edges are new, red ones are gone, and grey ones are in both.
@@ -43,6 +63,7 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 | Enter | Drill into the selected node, or open its code if nothing is inside it |
 | `c` | Open the selected node's code (its file's diff, at its lines) |
 | Backspace | Up one level; the breadcrumb is in the header |
+| `f` | Back to the findings |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
 | `=` or `+`, `-` (also with Ctrl or ⌘, and the keypad + −) | Zoom in or out a step of 25%, about the middle of the view, from 26% to 381% |
 | `0` | Back to the selection at 100% |
@@ -87,4 +108,4 @@ then press ↓ and ↑ alternately, 60 times in all, in the review list; the app
 | `--timings <file>` | With `--review-report`: presses the `--script` keys one at a time, each once the last one's effect is painted, and writes `{"keys": [{"key", "action", "opened_code", "first_frame_ms", "settled_ms"}]}` with the report. `first_frame_ms` runs from the key to the end of the paint of the next frame; `settled_ms` to the end of the paint of the first frame drawn once the key's effect is complete (a drill's view laid out, a code view's diff arrived). Presenting the frame waits for the display and is not included. bp-bench turns these into the `drill`, `input_latency`, `frame_time` and `frame_time_120hz` rows (#95). |
 | `--stay-open` | With `--review-report`: does not quit after writing it, so that a screenshot can be taken. |
 
-CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. It then repeats the review through the command palette alone, opening the code of the node it drills to, and fails if no code is shown. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, of a code view and of the palette, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).
+CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. It then repeats the review through the command palette alone, opening the code of the node it drills to, and fails if no code is shown. On Ubuntu it also uploads screenshots of the findings, of the map, at the systems and drilled one level, of a code view and of the palette, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).

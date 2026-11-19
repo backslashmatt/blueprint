@@ -20,6 +20,7 @@ use gpui::{
 use crate::Theme;
 use crate::actions::{self, Palette, PaletteEffect, Scope};
 use crate::code_view::CodeView;
+use crate::findings::{self, Findings, Item};
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
 use crate::map::{Camera, EdgeStatus, Map, Status, nearest_towards};
 use crate::review_list::{self, Effect, ReviewList, short};
@@ -50,6 +51,10 @@ pub struct Review {
     pub code: Option<CodeView>,
     /// How the map is looked at: pan and zoom (#92).
     pub camera: Camera,
+    /// The findings list (#114), once the diff has arrived.
+    pub list: Option<Findings>,
+    /// Whether the map is on screen; a review opens on its findings.
+    pub on_map: bool,
     /// The file diff request the code view waits for.
     code_request: Option<RequestId>,
 }
@@ -119,6 +124,7 @@ pub struct Workspace {
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     code_scroll: UniformListScrollHandle,
+    findings_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
     /// Whether `--script` keys are timed (#95): pressed one at a time, each
@@ -170,6 +176,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
+            findings_scroll: UniformListScrollHandle::new(),
             palette: None,
             notice: None,
             timed: false,
@@ -199,6 +206,7 @@ impl Workspace {
         // The new list starts at its top, and its code views at theirs.
         self.scroll = UniformListScrollHandle::new();
         self.code_scroll = UniformListScrollHandle::new();
+        self.findings_scroll = UniformListScrollHandle::new();
         self.screen = Screen::Opening;
         self.request(Request::Open { path: path.into() });
         let refs = self.request(Request::Refs { limit: 200 });
@@ -313,6 +321,11 @@ impl Workspace {
                 review.detail = Some(*detail);
                 review.findings = diff.findings.len();
                 review.changed = diff.nodes.len();
+                // The full answer keeps the place the coarse one had reached.
+                let cursor = review.list.as_ref().map_or(0, |l| l.cursor);
+                let mut list = Findings::new(diff);
+                list.cursor = cursor.min(list.items.len().saturating_sub(1));
+                review.list = Some(list);
                 // Building the map rolls up every edge once: off the UI
                 // thread (§4).
                 let (base, head, diff) = (base_model.clone(), head_model.clone(), diff.clone());
@@ -554,7 +567,12 @@ impl Workspace {
             Screen::Review(r) if r.code.is_some() => {
                 vec![Scope::Code, Scope::Review, Scope::Global]
             }
-            Screen::Review(r) if r.map.is_some() => vec![Scope::Map, Scope::Review, Scope::Global],
+            Screen::Review(r) if r.map.is_some() && r.on_map => {
+                vec![Scope::Map, Scope::Review, Scope::Global]
+            }
+            Screen::Review(r) if r.map.is_some() && r.list.is_some() => {
+                vec![Scope::Findings, Scope::Review, Scope::Global]
+            }
             // Back to the list only when there is a list to go back to.
             Screen::Review(_) | Screen::Failed(_) if self.list.is_some() => {
                 vec![Scope::Review, Scope::Global]
@@ -607,8 +625,59 @@ impl Workspace {
             Scope::Global => self.palette = Some(Palette::new(self.scopes())),
             Scope::List => self.run_list(id),
             Scope::Code => self.run_code(id),
+            Scope::Findings => self.run_findings(id, cx),
             Scope::Map => self.run_map(id, cx),
             Scope::Review => self.back_to_list(),
+        }
+    }
+
+    fn run_findings(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        let Review {
+            list,
+            map,
+            camera,
+            layout,
+            on_map,
+            ..
+        } = &mut **review;
+        let (Some(list), Some(map)) = (list.as_mut(), map.as_mut()) else {
+            return;
+        };
+        let before = list.cursor;
+        let mut relayout = false;
+        match id {
+            "findings.up" => list.move_by(-1),
+            "findings.down" => list.move_by(1),
+            "findings.first" => list.to_end(false),
+            "findings.last" => list.to_end(true),
+            "findings.show" | "findings.map" => {
+                let path = map.path.clone();
+                if id == "findings.show" {
+                    if let Some(target) = list.current().and_then(Item::target).cloned() {
+                        map.reveal(&target);
+                    }
+                } else {
+                    while map.drill_up() {}
+                }
+                *on_map = true;
+                *camera = Camera::default();
+                if map.path != path || layout.is_none() {
+                    *layout = None;
+                    relayout = true;
+                }
+            }
+            _ => {}
+        }
+        let after = list.cursor;
+        if after != before {
+            self.findings_scroll
+                .scroll_to_item(after, ScrollStrategy::Nearest);
+        }
+        if relayout {
+            self.lay_out(cx);
         }
     }
 
@@ -644,6 +713,8 @@ impl Workspace {
                 code: None,
                 code_request: None,
                 camera: Camera::default(),
+                list: None,
+                on_map: false,
             }));
         }
     }
@@ -672,6 +743,10 @@ impl Workspace {
         let Screen::Review(review) = &mut self.screen else {
             return;
         };
+        if id == "map.findings" {
+            review.on_map = false;
+            return;
+        }
         // Enter on a node with nothing inside, or `c` on any node, opens
         // its code.
         let leaf = review
@@ -917,12 +992,21 @@ impl Workspace {
                         r.findings,
                         r.changed
                     ))
-                    .child(div().text_color(rgb(theme.muted)).child(format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, Esc back to the list, F1 all actions.",
+                    .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() {
+                        format!(
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
-                    )));
+                        )
+                    } else {
+                        format!("{} findings. ↑↓ Home End choose, Enter show on the map, m the map, Esc back to the list, F1 all actions.", r.list.as_ref().map_or(0, |l| l.items.len()))
+                    }));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
+                }
+                if !r.on_map
+                    && let (Some(list), Some(map)) = (&r.list, &r.map)
+                {
+                    return root.child(findings_view(list, map, &self.findings_scroll, theme));
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
@@ -940,6 +1024,40 @@ impl Workspace {
             }
         }
     }
+}
+
+/// The findings list (#114): one row per finding, the highlighted one
+/// marked. Only the rows on screen are built.
+fn findings_view(
+    list: &Findings,
+    map: &Map,
+    scroll: &UniformListScrollHandle,
+    theme: Theme,
+) -> gpui::Div {
+    if list.items.is_empty() {
+        return div().child(
+            "No findings: nothing crosses a boundary, closes a cycle or changes a public surface. Press m for the map.",
+        );
+    }
+    let rows: Vec<String> = list
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mark = if i == list.cursor { "›" } else { " " };
+            format!("{mark} {}", findings::label(item, map))
+        })
+        .collect();
+    let _ = theme;
+    div().flex_1().size_full().child(
+        uniform_list("findings", rows.len(), move |range, _, _| {
+            range
+                .map(|i| div().h(px(24.0)).child(rows[i].clone()))
+                .collect()
+        })
+        .track_scroll(scroll)
+        .size_full(),
+    )
 }
 
 /// The code view key an action stands for.
@@ -1320,7 +1438,16 @@ mod tests {
             let handled = match a.scope {
                 Scope::List => review_list::Action::from_id(a.id).is_some(),
                 Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
-                Scope::Map => map_op(a.id).is_some(),
+                Scope::Map => a.id == "map.findings" || map_op(a.id).is_some(),
+                Scope::Findings => matches!(
+                    a.id,
+                    "findings.up"
+                        | "findings.down"
+                        | "findings.first"
+                        | "findings.last"
+                        | "findings.show"
+                        | "findings.map"
+                ),
                 Scope::Review => a.id == "review.back",
                 Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };

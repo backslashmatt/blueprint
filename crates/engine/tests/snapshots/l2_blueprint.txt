@@ -75,6 +75,8 @@ nodes:
   L2:cargo:crates/ui#code_view  Module  "code_view"  Exact  crates/ui/src/code_view.rs  Public
   L2:cargo:crates/ui#code_view/tests  Module  "code_view::tests"  Exact  crates/ui/src/code_view.rs  Private
   L2:cargo:crates/ui#examples%2F  Directory  "examples/"  Unknown  crates/ui/examples
+  L2:cargo:crates/ui#findings  Module  "findings"  Exact  crates/ui/src/findings.rs  Public
+  L2:cargo:crates/ui#findings/tests  Module  "findings::tests"  Exact  crates/ui/src/findings.rs  Private
   L2:cargo:crates/ui#layout  Module  "layout"  Exact  crates/ui/src/layout.rs  Public
   L2:cargo:crates/ui#layout/tests  Module  "layout::tests"  Exact  crates/ui/src/layout.rs  Private
   L2:cargo:crates/ui#map  Module  "map"  Exact  crates/ui/src/map.rs  Public
