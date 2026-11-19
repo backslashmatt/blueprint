@@ -586,6 +586,15 @@ fn review(
             return fail(&e);
         }
         current = state(&reviews);
+        let still = NodeId::try_from(change.node.clone())
+            .ok()
+            .is_some_and(|id| current.is_reviewed(&id));
+        if !change.reviewed && still {
+            eprintln!(
+                "note: {} is still reviewed: every changed node under it is",
+                change.node
+            );
+        }
     }
     let (done, total) = current.progress();
     let stdout = std::io::stdout();
@@ -620,7 +629,7 @@ fn review(
             text.push_str(&format!("{status}\t{id}"));
             if let Some(note) = current.mark(id).and_then(|m| m.note.as_deref()) {
                 text.push('\t');
-                text.push_str(&note.replace(['\n', '\t'], " "));
+                text.push_str(&note.replace(['\n', '\r', '\t'], " "));
             }
             text.push('\n');
         }

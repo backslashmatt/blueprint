@@ -192,8 +192,15 @@ fn work(shared: &Shared, lane: Lane, rx: &Receiver<Job>) {
         // A mark is the reviewer's work: it is written and answered even
         // when superseded.
         if let Request::Mark { mark } = &job.request {
-            let response = match store_mark(job.repo.as_deref(), mark.clone()) {
-                Ok(()) => Response::Marked { mark: mark.clone() },
+            let stored = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                store_mark(job.repo.as_deref(), mark.clone())
+            }))
+            .unwrap_or_else(|_| Err("the engine failed storing this mark".into()));
+            let response = match stored {
+                Ok(warning) => Response::Marked {
+                    mark: mark.clone(),
+                    warning,
+                },
                 Err(error) => Response::Failed { error },
             };
             shared.send(job.id, response);
@@ -418,14 +425,22 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                 warning: reviews.warning().map(str::to_string),
             }))
         }
-        Request::Mark { mark } => store_mark(job.repo.as_deref(), mark.clone()),
+        // Answered by `work`; never reaches here.
+        Request::Mark { mark } => store_mark(job.repo.as_deref(), mark.clone()).map(|_| ()),
     }
 }
 
-/// Stores `mark` with the marks of the repository at `repo`.
-fn store_mark(repo: Option<&Path>, mark: Mark) -> Result<(), String> {
+/// Stores `mark` with the marks of the git repository at `repo`, and
+/// returns why earlier marks were lost while loading them, if they were.
+fn store_mark(repo: Option<&Path>, mark: Mark) -> Result<Option<String>, String> {
     let repo = repo.ok_or("no repository is open")?;
-    Reviews::open(repo)?.set(mark)
+    // Only for a repository that opens: never a file for a path an Open
+    // failed on.
+    Repo::open(repo).map_err(|e| e.to_string())?;
+    let mut reviews = Reviews::open(repo)?;
+    let warning = reviews.warning().map(str::to_string);
+    reviews.set(mark)?;
+    Ok(warning)
 }
 
 /// The L1–L2 model of `rev`, stored in the index as by `bp index`; if the

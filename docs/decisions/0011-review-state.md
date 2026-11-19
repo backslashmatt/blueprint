@@ -62,5 +62,5 @@ Nothing on a hot path yet. Fingerprinting is one pass over each model, run when 
 ## Revisit when
 
 - The file grows large. Marks for old changes are never pruned. At about 100 bytes a mark, 10,000 marks is about 1 MB rewritten per change. Pruning marks whose nodes no longer exist in any recent commit would bound it.
-- Two windows on one repository both write marks. The last write wins, and the other window's marks made since it loaded are lost.
+- Two writers on one repository: two app windows, or the app and `bp review` at once. Each write reloads the file first, so a mark is lost only when two writes race, and then the last rename wins. A lock file would close the gap.
 - Reviewers want a mark to carry over a change to its node that is only cosmetic. Fingerprints already ignore whitespace and comments through the code hashes (DR 0008), so this would have to be something more.

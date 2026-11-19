@@ -249,6 +249,9 @@ pub enum Response {
     Marked {
         /// The mark, as sent.
         mark: Mark,
+        /// Why stored marks were lost when they were loaded to add this
+        /// one, if they were (a damaged file, moved aside).
+        warning: Option<String>,
     },
     /// A newer request in the same lane replaced this one before it finished.
     Superseded,
