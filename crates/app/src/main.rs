@@ -228,7 +228,11 @@ fn report_review(
         let (Some(map), Some(_)) = (&r.map, &r.layout) else {
             return;
         };
-        if r.mapped != Some(Detail::Full) || w.script_pending() || w.marks_pending() {
+        if r.mapped != Some(Detail::Full)
+            || r.reviewed.is_none()
+            || w.script_pending()
+            || w.marks_pending()
+        {
             return;
         }
         // A code view opened by the script must have its highlighted diff.

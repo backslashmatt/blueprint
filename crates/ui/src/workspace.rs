@@ -155,7 +155,7 @@ pub struct Workspace {
     /// The request for the stored marks, while it is unanswered.
     marks_request: Option<RequestId>,
     /// Marks sent to be stored and not yet answered.
-    mark_requests: std::collections::HashSet<RequestId>,
+    mark_requests: HashMap<RequestId, Mark>,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -200,7 +200,7 @@ impl Workspace {
             layout_generation: 0,
             marks: Vec::new(),
             marks_request: None,
-            mark_requests: std::collections::HashSet::new(),
+            mark_requests: HashMap::new(),
         };
         if let Some(path) = path {
             w.open(path);
@@ -289,6 +289,12 @@ impl Workspace {
             Response::Marks { marks, warning } if self.marks_request == Some(reply.id) => {
                 self.marks_request = None;
                 self.marks.clone_from(marks);
+                // Marks still being stored are newer than what was loaded.
+                let unsaved: Vec<Mark> = self.mark_requests.values().cloned().collect();
+                for m in unsaved {
+                    self.marks.retain(|o| !(o.node == m.node && o.key == m.key));
+                    self.marks.push(m);
+                }
                 if let Some(w) = warning {
                     self.notice = Some(w.clone());
                 }
@@ -306,7 +312,7 @@ impl Workspace {
                 cx.notify();
                 return;
             }
-            Response::Failed { error } if self.mark_requests.remove(&reply.id) => {
+            Response::Failed { error } if self.mark_requests.remove(&reply.id).is_some() => {
                 self.notice = Some(format!("The review mark was not saved: {error}"));
                 cx.notify();
                 return;
@@ -314,6 +320,8 @@ impl Workspace {
             Response::Failed { error } if self.marks_request == Some(reply.id) => {
                 self.marks_request = None;
                 self.notice = Some(format!("Review marks could not be loaded: {error}"));
+                // Scripts wait for the load to end, either way.
+                self.replay(cx);
                 cx.notify();
                 return;
             }
@@ -382,21 +390,28 @@ impl Workspace {
                 let (base, head, diff) = (base_model.clone(), head_model.clone(), diff.clone());
                 let detail = *detail;
                 let request = reply.id;
+                // Review state needs the change weights, which only the full
+                // diff has; it reads both models, beside the map (#115).
+                if detail == Detail::Full {
+                    let (base, head, diff) = (base.clone(), head.clone(), diff.clone());
+                    let task = cx.background_executor().spawn(async move {
+                        std::sync::Arc::new(ReviewBasis::new(&diff, &base, &head))
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let basis = task.await;
+                        let _ = this.update(cx, |w, cx| w.basis_ready(request, basis, cx));
+                    })
+                    .detach();
+                }
                 let task = cx.background_executor().spawn(async move {
-                    // Review state needs the change weights, which only the
-                    // full diff has; it reads both models.
-                    let basis = (detail == Detail::Full)
-                        .then(|| std::sync::Arc::new(ReviewBasis::new(&diff, &base, &head)));
                     let map = Map::new(base, head, &diff);
                     // The list with the map it is labelled and shown on.
                     let list = Findings::new(&diff, &map);
-                    (map, list, basis)
+                    (map, list)
                 });
                 cx.spawn(async move |this, cx| {
-                    let (map, list, basis) = task.await;
-                    let _ = this.update(cx, |w, cx| {
-                        w.map_ready(request, detail, map, list, basis, cx);
-                    });
+                    let (map, list) = task.await;
+                    let _ = this.update(cx, |w, cx| w.map_ready(request, detail, map, list, cx));
                 })
                 .detach();
             }
@@ -413,7 +428,6 @@ impl Workspace {
         detail: Detail,
         mut map: Map,
         mut list: Findings,
-        basis: Option<std::sync::Arc<ReviewBasis>>,
         cx: &mut Context<Self>,
     ) {
         if self.waiting != Some(request) {
@@ -422,6 +436,11 @@ impl Workspace {
         let Screen::Review(review) = &mut self.screen else {
             return;
         };
+        // The coarse map, built in its own task, can finish after the full
+        // one: it never replaces it.
+        if detail == Detail::Coarse && review.mapped == Some(Detail::Full) {
+            return;
+        }
         if let Some(old) = &review.map {
             for id in &old.path {
                 map.selected = map.view.nodes.iter().position(|n| &n.id == id);
@@ -459,13 +478,28 @@ impl Workspace {
         review.list = Some(list);
         review.map = Some(map);
         review.mapped = Some(detail);
-        if let Some(basis) = basis {
-            review.reviewed = Some(basis.state(&self.marks));
-        }
+
         // The old layout belongs to the old map.
         review.layout = None;
         self.lay_out(cx);
         cx.notify();
+    }
+
+    /// Takes in the review basis of the full diff (#115).
+    fn basis_ready(
+        &mut self,
+        request: RequestId,
+        basis: std::sync::Arc<ReviewBasis>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.waiting != Some(request) {
+            return;
+        }
+        if let Screen::Review(r) = &mut self.screen {
+            r.reviewed = Some(basis.state(&self.marks));
+            self.replay(cx);
+            cx.notify();
+        }
     }
 
     /// Whether the stored review marks, or a mark being stored, are still
@@ -489,6 +523,7 @@ impl Workspace {
             Screen::Review(r) => {
                 r.mapped == Some(Detail::Full)
                     && r.layout.is_some()
+                    && r.reviewed.is_some()
                     && self.marks_request.is_none()
                     && r.code
                         .as_ref()
@@ -739,6 +774,12 @@ impl Workspace {
             self.notice = Some("Review marks are available once the whole diff has loaded.".into());
             return;
         };
+        if self.marks_request.is_some() {
+            // A mark made now would not know the stored note, and the load
+            // would hide it.
+            self.notice = Some("Review marks are still loading.".into());
+            return;
+        }
         let Some(node) = target else {
             self.notice = Some("Nothing is selected to mark.".into());
             return;
@@ -764,8 +805,18 @@ impl Workspace {
             .retain(|m| !(m.node == mark.node && m.key == mark.key));
         self.marks.push(mark.clone());
         self.refresh_reviewed();
-        let id = self.request(Request::Mark { mark });
-        self.mark_requests.insert(id);
+        let node = mark.node.clone();
+        let id = self.request(Request::Mark { mark: mark.clone() });
+        self.mark_requests.insert(id, mark);
+        if marked
+            && let Screen::Review(r) = &self.screen
+            && r.reviewed.as_ref().is_some_and(|st| st.is_reviewed(&node))
+        {
+            self.notice = Some(
+                "Unmarked, but still reviewed: a mark above it, or on every change under it, covers it."
+                    .into(),
+            );
+        }
     }
 
     /// Recomputes the review state from the marks: cheap, as the basis is
@@ -1212,9 +1263,11 @@ fn findings_view<E: ParentElement>(
         .enumerate()
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
-            let done = item
-                .target()
-                .is_some_and(|t| reviewed.is_some_and(|r| r.is_reviewed(t)));
+            let done = reviewed.is_some_and(|r| match item {
+                // A cycle is reviewed when every node on it is.
+                Item::Cycle { nodes, .. } => nodes.iter().all(|n| r.is_reviewed(n)),
+                _ => item.target().is_some_and(|t| r.is_reviewed(t)),
+            });
             let check = if done { "✓" } else { " " };
             format!("{mark} {check} {}", findings::label(item, map))
         })
