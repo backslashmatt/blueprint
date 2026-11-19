@@ -82,6 +82,9 @@ pub struct Workspace {
     code_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
+    /// A message about the last action that went wrong outside the engine
+    /// (the folder dialog), shown above the screen until the next key.
+    pub notice: Option<String>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Bumped for every layout asked for; only the newest is kept.
@@ -116,6 +119,7 @@ impl Workspace {
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
             palette: None,
+            notice: None,
             seeds: HashMap::new(),
             layout_generation: 0,
         };
@@ -133,6 +137,10 @@ impl Workspace {
         // Layouts still running belong to the repository left.
         self.layout_generation += 1;
         self.seeds.clear();
+        self.notice = None;
+        // The new list starts at its top, and its code views at theirs.
+        self.scroll = UniformListScrollHandle::new();
+        self.code_scroll = UniformListScrollHandle::new();
         self.screen = Screen::Opening;
         self.request(Request::Open { path: path.into() });
         let refs = self.request(Request::Refs { limit: 200 });
@@ -151,8 +159,9 @@ impl Workspace {
             let path = match chosen.await {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Err(e)) => {
+                    // What was on screen stays: only the dialog failed.
                     let _ = this.update(cx, |w, cx| {
-                        w.screen = Screen::Failed(format!("cannot show the folder dialog: {e}"));
+                        w.notice = Some(format!("Cannot show the folder dialog: {e}"));
                         cx.notify();
                     });
                     None
@@ -161,7 +170,17 @@ impl Workspace {
             };
             if let Some(path) = path {
                 let _ = this.update(cx, |w, cx| {
-                    w.open(&path.to_string_lossy());
+                    let Some(path) = path.to_str() else {
+                        w.notice = Some(format!(
+                            "{} is not a UTF-8 path, which the engine cannot open",
+                            path.display()
+                        ));
+                        cx.notify();
+                        return;
+                    };
+                    // Test keys belong to the repository they were given for.
+                    w.script.clear();
+                    w.open(path);
                     cx.notify();
                 });
             }
@@ -381,6 +400,12 @@ impl Workspace {
     /// `ctrl-shift-p`): to the palette when it is open, else the action
     /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.notice = None;
+        // Opening a repository works over the palette too.
+        if actions::for_key(&[Scope::Global], key).is_some_and(|a| a.id == "global.open") {
+            self.run("global.open", cx);
+            return;
+        }
         let scopes = self.scopes();
         if let Some(palette) = self.palette.as_mut() {
             palette.rescope(scopes);
@@ -575,6 +600,10 @@ impl Render for Workspace {
             .p_6()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
+        let root = match &self.notice {
+            Some(n) => root.child(div().text_color(rgb(theme.muted)).child(n.clone())),
+            None => root,
+        };
         let root = match &self.palette {
             Some(p) => root.child(palette_view(p, theme)),
             None => root,

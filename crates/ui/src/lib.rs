@@ -2,9 +2,7 @@
 //! the UI toolkit (GPUI, DR 0003) only: views render the engine's model and
 //! never compute architecture themselves (§2.6).
 
-use gpui::{
-    Context, IntoElement, ParentElement, Render, Styled, Window, WindowAppearance, div, rgb,
-};
+use gpui::WindowAppearance;
 
 pub mod actions;
 pub mod code_view;
@@ -45,35 +43,6 @@ impl Theme {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme::DARK,
             WindowAppearance::Light | WindowAppearance::VibrantLight => Theme::LIGHT,
         }
-    }
-}
-
-/// The application shell: the window's root view. M3 fills it in with the
-/// review list, map and code diff (#90, #92, #93).
-#[derive(Debug, Default)]
-pub struct Shell;
-
-impl Render for Shell {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(window.appearance());
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_6()
-            .bg(rgb(theme.background))
-            .child(
-                div()
-                    .text_xl()
-                    .text_color(rgb(theme.text))
-                    .child("Blueprint"),
-            )
-            .child(
-                div()
-                    .text_color(rgb(theme.muted))
-                    .child("Open a repository to review a change."),
-            )
     }
 }
 
