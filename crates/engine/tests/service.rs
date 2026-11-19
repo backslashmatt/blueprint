@@ -347,7 +347,11 @@ fn a_newer_request_supersedes_an_older_one_in_its_lane() {
         })
     ));
 
-    // Opening a repository supersedes everything sent before it.
+    // Opening a repository supersedes everything sent before it that has
+    // not finished. main~1's model is stored by now (the diffs above built
+    // it), so request 5 may well finish before the Open arrives: then it
+    // keeps its answer. Either way it gets exactly one final reply, and no
+    // answer follows a supersession.
     service.send(
         5,
         Request::Model {
@@ -361,10 +365,23 @@ fn a_newer_request_supersedes_an_older_one_in_its_lane() {
         },
     );
     let model = until_last(&rx, 5, &mut others);
-    assert!(
-        matches!(model.last(), Some(Response::Superseded)),
-        "{model:?}"
-    );
+    match model.last() {
+        Some(Response::Superseded) => assert!(
+            model.iter().all(|r| !matches!(
+                r,
+                Response::Model {
+                    detail: Detail::Full,
+                    ..
+                }
+            )),
+            "a superseded model never sends its full answer: {model:?}"
+        ),
+        Some(Response::Model {
+            detail: Detail::Full,
+            ..
+        }) => {}
+        other => panic!("request 5 ended with {other:?}"),
+    }
     until_last(&rx, 6, &mut others);
 }
 
