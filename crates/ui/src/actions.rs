@@ -126,6 +126,38 @@ pub const ACTIONS: &[ActionDef] = &[
         &["down"],
     ),
     a(
+        "map.pan_left",
+        "Map: pan left",
+        Scope::Map,
+        &["ctrl-left", "cmd-left"],
+    ),
+    a(
+        "map.pan_right",
+        "Map: pan right",
+        Scope::Map,
+        &["ctrl-right", "cmd-right"],
+    ),
+    a(
+        "map.pan_up",
+        "Map: pan up",
+        Scope::Map,
+        &["ctrl-up", "cmd-up"],
+    ),
+    a(
+        "map.pan_down",
+        "Map: pan down",
+        Scope::Map,
+        &["ctrl-down", "cmd-down"],
+    ),
+    a("map.zoom_in", "Map: zoom in", Scope::Map, &["=", "+"]),
+    a("map.zoom_out", "Map: zoom out", Scope::Map, &["-"]),
+    a(
+        "map.zoom_reset",
+        "Map: reset zoom and pan to the selection",
+        Scope::Map,
+        &["0"],
+    ),
+    a(
         "code.close",
         "Code: back to the map",
         Scope::Code,
