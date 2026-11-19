@@ -153,15 +153,42 @@ jobs:
         run: cargo build --release --locked -p blueprint-app
       - name: timed session
         shell: bash
+        run: .github/scripts/ui-timings.sh
+
+  # The same session under a headless Wayland compositor (#95, #37): cage on wlroots' headless
+  # backend, with software rendering. DISPLAY is cleared for the app so it cannot fall back to
+  # Xwayland.
+  ui-timings-wayland:
+    name: ui timings (wayland, ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Install the app's libraries and a headless compositor
         run: |
-          # Open the review, drill three levels and back, open code and scroll it, then move
-          # about the map, pan and zoom.
-          keys=end,b,home,h,enter,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace
-          # One unmeasured session indexes the repository first.
-          timeout 300 target/release/blueprint . --script end,b,home,h,enter --review-report warm.json
-          timeout 300 target/release/blueprint . --script $keys --review-report review.json --timings timings.json
-          cat timings.json
-          python .github/scripts/check_ui_timings.py timings.json "$(echo $keys | tr ',' '\n' | wc -l)"
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers cage
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-app
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build the app (release)
+        run: cargo build --release --locked -p blueprint-app
+      - name: timed session
+        env:
+          WLR_BACKENDS: headless
+          WLR_RENDERER: pixman
+          WLR_LIBINPUT_NO_DEVICES: "1"
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          .github/scripts/ui-timings.sh cage -- env -u DISPLAY
+
   fedora:
     name: test (fedora-45)
     runs-on: ubuntu-24.04
