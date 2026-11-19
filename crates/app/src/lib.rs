@@ -21,7 +21,9 @@ pub fn first_paint(window: &mut Window, cx: &mut App, start: Instant, path: Stri
 
 /// Once `samples` frames have answered input, writes GPUI's input-to-present
 /// latency histogram (#32) to `path` as JSON and quits: `{"samples",
-/// "p50_ms", "p95_ms", "p99_ms", "max_ms", "mid_draw_events_dropped"}`. Each
+/// "p50_ms", "p95_ms", "p99_ms", "max_ms", "mid_draw_events_dropped",
+/// "draw_p50_ms", "draw_p95_ms", "dirty_to_present_p50_ms",
+/// "dirty_to_present_p95_ms"}`, the last four from GPUI's frame timings. Each
 /// sample runs from the dispatch of the first input event a frame answers to
 /// the end of presenting that frame.
 #[cfg(feature = "latency")]

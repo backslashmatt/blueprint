@@ -69,7 +69,8 @@ jobs:
       - name: app smoke run
         shell: bash
         run: |
-          cargo build --locked -p blueprint-app
+          # The same features as clippy and test, so the app reuses their build of gpui.
+          cargo build --locked -p blueprint-app --all-features
           if [ "$RUNNER_OS" = Linux ]; then
             timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
           else
@@ -195,6 +196,8 @@ jobs:
   input-latency:
     name: input latency (x11, ubuntu-24.04, informational)
     runs-on: ubuntu-24.04
+    # Reported, never failing the run.
+    continue-on-error: true
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -216,9 +219,13 @@ jobs:
         run: cargo build --release --locked -p blueprint-app --features latency
       - name: real key events to presented frames
         run: |
-          timeout 300 .github/scripts/input-latency.sh target/release/blueprint latency.json 60
-          echo "### Input to present (Xvfb, lavapipe; not gated)" >> "$GITHUB_STEP_SUMMARY"
-          cat latency.json >> "$GITHUB_STEP_SUMMARY"
+          timeout 300 .github/scripts/input-latency.sh target/release/blueprint latency.json 60 || true
+          {
+            echo "### Input to present (Xvfb, lavapipe; not gated)"
+            echo '```json'
+            cat latency.json 2>/dev/null || echo '{"result": "none: the app did not report"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   fedora:
     name: test (fedora-45)
@@ -248,7 +255,8 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: app smoke run
         run: |
-          cargo build --locked -p blueprint-app
+          # The same features as clippy and test, so the app reuses their build of gpui.
+          cargo build --locked -p blueprint-app --all-features
           timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
           cat cold-start.json
       - name: app review by keyboard

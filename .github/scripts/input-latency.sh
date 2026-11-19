@@ -7,7 +7,8 @@ set -u
 app=$1; out=$2; n=${3:-60}
 APID=""; WPID=""; XPID=""
 cleanup() { kill $APID $WPID $XPID 2>/dev/null; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 1' INT TERM
 if [ -z "${VK_ICD_FILENAMES:-}" ]; then
   for f in /usr/share/vulkan/icd.d/lvp_icd.json /usr/share/vulkan/icd.d/lvp_icd.x86_64.json; do
     [ -f "$f" ] && export VK_ICD_FILENAMES=$f && break
@@ -34,6 +35,7 @@ done
 sleep 3 # the review list loads
 xdotool windowactivate --sync "$win" 2>/dev/null
 xdotool windowfocus --sync "$win" 2>/dev/null
+[ "$(xdotool getwindowfocus 2>/dev/null)" = "$win" ] || echo "warning: the app window does not have the focus"
 # Half the keys move down, half back up, a key every 100 ms: each answered by one frame.
 for _ in $(seq 1 $(( (n + 1) / 2 + 5 ))); do
   kill -0 "$APID" 2>/dev/null || break
@@ -41,5 +43,7 @@ for _ in $(seq 1 $(( (n + 1) / 2 + 5 ))); do
   xdotool key Up; sleep 0.1
 done
 wait "$APID"
+status=$?
 APID=""
+[ -f "$out" ] || { echo "the app wrote no report (exit $status)"; exit 1; }
 cat "$out"

@@ -74,6 +74,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             extra => return Err(format!("unexpected argument {extra}")),
         }
     }
+    if out.latency_samples > 0 && out.latency_report.is_none() {
+        return Err("--latency-samples needs --latency-report".into());
+    }
     if out.timings.is_some() && out.review_report.is_none() {
         return Err("--timings needs --review-report".into());
     }
