@@ -577,4 +577,41 @@ fn marks_are_stored_per_repository_and_never_superseded() {
         panic!("{r:?}");
     };
     assert_eq!(marks, &[mark(1), mark(2)]);
+
+    // A damaged file: the first Mark says the earlier marks were lost.
+    let file = blueprint_engine::reviews::Reviews::location(&two).unwrap();
+    std::fs::write(&file, b"{ damaged").unwrap();
+    service.send(
+        8,
+        Request::Open {
+            path: two.display().to_string(),
+        },
+    );
+    service.send(9, Request::Mark { mark: mark(3) });
+    let r = until_last(&rx, 9, &mut others);
+    let [
+        Response::Marked {
+            warning: Some(w), ..
+        },
+    ] = &r[..]
+    else {
+        panic!("{r:?}");
+    };
+    assert!(w.contains("damaged"), "{w}");
+
+    // No file is written for a path that is not a repository.
+    let not_repo = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("service-not-a-repo-{}", std::process::id()));
+    std::fs::create_dir_all(&not_repo).unwrap();
+    service.send(
+        10,
+        Request::Open {
+            path: not_repo.display().to_string(),
+        },
+    );
+    service.send(11, Request::Mark { mark: mark(4) });
+    let r = until_last(&rx, 11, &mut others);
+    assert!(failed(&r[0]).is_some(), "{r:?}");
+    let stray = blueprint_engine::reviews::Reviews::location(&not_repo).unwrap();
+    assert!(!stray.exists());
 }

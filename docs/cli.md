@@ -34,7 +34,7 @@ The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set
 `bp review <repo> <base> <head>` prints the review state of the diff (DR 0011). The first line is `reviewed <n> of <m>`, counting the changed nodes that only their own mark can make reviewed. Then there is one line per changed node and each ancestor of one, ordered by id: `reviewed` or `open`, the id, and the note if there is one, tab-separated.
 - **Roll-up:** a node with changed children is reviewed when all of them are and nothing of its own changed.
 - **`--mark <node>`:** marks a node reviewed before printing, with `<node>` an id as `bp diff` prints it. `--note <text>` sets its note, and `--note ""` removes it.
-- **`--unmark <node>`:** marks it not reviewed and keeps its note.
+- **`--unmark <node>`:** removes the node's own reviewed mark and keeps its note. A node whose changed children are all reviewed, with no change of its own, still shows as reviewed by roll-up, and `bp review` says so on stderr.
 - **Where marks live:** `~/.local/share/blueprint/reviews/` on Linux (`BLUEPRINT_DATA_DIR` overrides it), one file per repository. Unlike the index, this is the reviewer's work: it is never deleted, and a damaged file is moved aside, not overwritten.
 - **Which marks apply:** a mark applies wherever the node changed exactly as it did when marked, so it survives a rebase that leaves the node's change alone.
 - **Errors:** marking a node that did not change exits with code 1, and so does a diff whose change weight could not be computed, because marks are matched by it.
