@@ -18,5 +18,11 @@ blueprint-protocol.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 
+[features]
+# An instrumented build for input-to-present latency (#32): GPUI's profiler
+# records, for every frame that answers input, the time from the input's
+# dispatch to the end of presenting that frame. Enables --latency-report.
+latency = ["gpui/profiler"]
+
 [lints]
 workspace = true

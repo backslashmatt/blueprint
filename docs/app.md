@@ -65,6 +65,18 @@ Every action has a key and an entry in the **command palette** (#94, §2.4). F1 
 
 The actions, their titles, where they apply and their keys are one registry (`crates/ui/src/actions.rs`). The workspace runs keys through it, so a key without an action, or an action without a key or palette entry, cannot be added; a test checks every entry.
 
+## Latency
+
+An instrumented build, `cargo build --release -p blueprint-app --features latency`, turns on GPUI's profiler. With `--latency-report <file> [--latency-samples <n>]` it records, for each frame that answers input, the time from the dispatch of the first input event to the end of presenting that frame (#32), and once `n` frames have (60 by default) writes `{"samples", "p50_ms", "p95_ms", "p99_ms", "max_ms", "mid_draw_events_dropped", "draw_p50_ms", "draw_p95_ms", "dirty_to_present_p50_ms", "dirty_to_present_p95_ms"}` and quits. It is a lower bound on input to photons: it leaves out the time an event waits before the app dispatches it, and the compositor and display after presenting.
+
+`.github/scripts/input-latency.sh` drives it with real X11 key events (xdotool under Xvfb), and CI reports the result without gating on it. CI runners have no GPU: presenting means lavapipe rasterizing the whole window on the CPU, about 11 ms of the 12 ms median, while building the frame (`draw`) takes under 1 ms. The §4 budget of 16 ms from input to painted frame is checked on real hardware (#96):
+
+```
+cargo run --release -p blueprint-app --features latency -- <repo> --latency-report latency.json --latency-samples 60
+```
+
+then press ↓ and ↑ alternately, 60 times in all, in the review list; the app quits once it has the samples.
+
 ## Options for tests and benchmarks
 
 | Option | What it does |

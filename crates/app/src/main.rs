@@ -27,7 +27,7 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
 static START: OnceLock<Instant> = OnceLock::new();
 
-const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]]";
+const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]] [--latency-report <file> [--latency-samples <n>]]";
 
 #[derive(Default)]
 struct Args {
@@ -37,6 +37,8 @@ struct Args {
     review_report: Option<String>,
     stay_open: bool,
     timings: Option<String>,
+    latency_report: Option<String>,
+    latency_samples: u64,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -56,10 +58,24 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--review-report" => out.review_report = Some(value()?),
             "--stay-open" => out.stay_open = true,
             "--timings" => out.timings = Some(value()?),
+            "--latency-report" if cfg!(feature = "latency") => {
+                out.latency_report = Some(value()?);
+            }
+            "--latency-report" => {
+                return Err("--latency-report needs a build with the `latency` feature".into());
+            }
+            "--latency-samples" => {
+                out.latency_samples = value()?
+                    .parse()
+                    .map_err(|_| "--latency-samples needs a number".to_owned())?;
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             repo if out.repo.is_none() => out.repo = Some(repo.to_owned()),
             extra => return Err(format!("unexpected argument {extra}")),
         }
+    }
+    if out.latency_samples > 0 && out.latency_report.is_none() {
+        return Err("--latency-samples needs --latency-report".into());
     }
     if out.timings.is_some() && out.review_report.is_none() {
         return Err("--timings needs --review-report".into());
@@ -100,6 +116,16 @@ fn main() {
         let review_report = args.review_report.clone();
         let stay_open = args.stay_open;
         let timings = args.timings.clone();
+        let latency = args.latency_report.clone().map(|path| {
+            (
+                path,
+                if args.latency_samples == 0 {
+                    60
+                } else {
+                    args.latency_samples
+                },
+            )
+        });
         let opened = cx
             .open_window(options, |window, cx| {
                 if let Some(path) = report.clone() {
@@ -123,13 +149,23 @@ fn main() {
                 }
                 ws
             })
-            .map(|_| ());
+            .map(|handle| {
+                #[cfg(feature = "latency")]
+                if let Some((path, samples)) = latency {
+                    blueprint_app::latency_report(handle.into(), path, samples, cx);
+                }
+                #[cfg(not(feature = "latency"))]
+                let _ = (handle, latency);
+            });
         if let Err(e) = opened {
             eprintln!("blueprint: cannot open a window: {e}");
             std::process::exit(1);
         }
         cx.activate(true);
-        if report.is_some() || (args.review_report.is_some() && !args.stay_open) {
+        if report.is_some()
+            || args.latency_report.is_some()
+            || (args.review_report.is_some() && !args.stay_open)
+        {
             // Never hang a benchmark or a test.
             cx.spawn(async move |cx| {
                 cx.background_executor()
@@ -289,6 +325,12 @@ mod tests {
         assert!(parse(&args(&["a", "b"])).is_err());
         assert!(parse(&args(&["--script"])).is_err());
         assert!(parse(&args(&["r", "--timings", "t"])).is_err());
+        assert!(parse(&args(&["--latency-samples", "x"])).is_err());
+        assert_eq!(
+            parse(&args(&["--latency-report", "l"])).is_ok(),
+            cfg!(feature = "latency"),
+            "--latency-report only in the instrumented build"
+        );
         assert_eq!(json_escape("a\"b\\c\n'é"), "a\\\"b\\\\c\\u000a'é");
     }
 }

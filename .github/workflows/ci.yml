@@ -69,7 +69,8 @@ jobs:
       - name: app smoke run
         shell: bash
         run: |
-          cargo build --locked -p blueprint-app
+          # The same features as clippy and test, so the app reuses their build of gpui.
+          cargo build --locked -p blueprint-app --all-features
           if [ "$RUNNER_OS" = Linux ]; then
             timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
           else
@@ -189,6 +190,43 @@ jobs:
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
           .github/scripts/ui-timings.sh cage -- env -u DISPLAY
 
+  # Input-to-present latency from real key events (#32), reported but not gated: these runners
+  # have no GPU, so presenting means lavapipe rasterizing the window on the CPU, which is most
+  # of the number (docs/app.md, Latency). The §4 check needs real hardware (#96).
+  input-latency:
+    name: input latency (x11, ubuntu-24.04, informational)
+    runs-on: ubuntu-24.04
+    # Reported, never failing the run.
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Install the app's libraries, a headless display and xdotool
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox \
+            xdotool
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-app-latency
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build the instrumented app (release, latency feature)
+        run: cargo build --release --locked -p blueprint-app --features latency
+      - name: real key events to presented frames
+        run: |
+          timeout 300 .github/scripts/input-latency.sh target/release/blueprint latency.json 60 || true
+          {
+            echo "### Input to present (Xvfb, lavapipe; not gated)"
+            echo '```json'
+            cat latency.json 2>/dev/null || echo '{"result": "none: the app did not report"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   fedora:
     name: test (fedora-45)
     runs-on: ubuntu-24.04
@@ -217,7 +255,8 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: app smoke run
         run: |
-          cargo build --locked -p blueprint-app
+          # The same features as clippy and test, so the app reuses their build of gpui.
+          cargo build --locked -p blueprint-app --all-features
           timeout 120 spikes/gpui/xvfb-run.sh target/debug/blueprint --cold-start-report cold-start.json
           cat cold-start.json
       - name: app review by keyboard
