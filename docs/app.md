@@ -40,9 +40,21 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 |---|---|
 | ← → ↑ ↓ | Select the nearest node in that direction |
 | Tab | Select the next node |
-| Enter | Drill into the selected node |
+| Enter | Drill into the selected node, or open its code if nothing is inside it |
+| `c` | Open the selected node's code (its file's diff, at its lines) |
 | Backspace | Up one level; the breadcrumb is in the header |
 | Esc | Back to the review list |
+
+## Code
+
+Opening a node's code (#93) shows its file's diff side by side, base on the left and head on the right, scrolled to the node's lines (base's, for a node that is only in base). Removed lines are tinted red and added ones green; a changed line is tinted on both sides. The plain diff comes first, and the colours follow once the engine has highlighted the file (`open_50k_file`: 8 ms at 50,000 lines before highlighting). Only the rows on screen are drawn.
+
+| Key | Action |
+|---|---|
+| ↑ ↓ PgUp PgDn Home End | Move |
+| ← → | Scroll both sides sideways, for lines wider than their half |
+| `n` `p` | Next or previous change |
+| Backspace, Esc | Back to the map |
 
 ## Options for tests and benchmarks
 
@@ -50,7 +62,7 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 |---|---|
 | `--cold-start-report <file>` | Writes `{"cold_start_ms": …}` when the first frame is painted, then quits. bp-bench measures this as the `cold_start` budget. |
 | `--script <keys>` | Presses comma-separated keys (GPUI key names such as `down`, `b`, `enter`) once the review list has loaded. Keys after the one that opens a review wait for its full map, and each waits for the view it acts on to be laid out. |
-| `--review-report <file>` | Once the review's full map is laid out and every `--script` key has been pressed, writes `{"base", "head", "findings", "changed", "map_nodes"}` and quits. |
+| `--review-report <file>` | Once the review's full map is laid out and every `--script` key has been pressed, writes `{"base", "head", "findings", "changed", "map_nodes", "code_rows"}` and quits; with a code view open, it first waits for its highlighted diff. |
 | `--stay-open` | With `--review-report`: does not quit after writing it, so that a screenshot can be taken. |
 
-CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).
+CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, and of a code view, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).

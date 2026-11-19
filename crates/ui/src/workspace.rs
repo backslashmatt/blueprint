@@ -7,13 +7,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use blueprint_protocol::model::NodeId;
+use blueprint_protocol::model::diff::{FileText, RowKind};
+use blueprint_protocol::model::lang::TokenClass;
 use blueprint_protocol::{Detail, Reply, Request, RequestId, Response};
 use gpui::{
-    Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
-    ScrollStrategy, Styled, UniformListScrollHandle, Window, div, px, rgb, uniform_list,
+    Context, FocusHandle, HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
+    div, px, rgb, uniform_list,
 };
 
 use crate::Theme;
+use crate::code_view::CodeView;
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
 use crate::map::{EdgeStatus, Map, Status, nearest_towards};
 use crate::review_list::{Effect, ReviewList, action_for_key, short};
@@ -40,6 +44,10 @@ pub struct Review {
     pub mapped: Option<Detail>,
     /// The current view's layout, once computed.
     pub layout: Option<Layout>,
+    /// The code view, when one is open over the map (#93).
+    pub code: Option<CodeView>,
+    /// The file diff request the code view waits for.
+    code_request: Option<RequestId>,
 }
 
 /// What the workspace shows.
@@ -68,6 +76,7 @@ pub struct Workspace {
     script: Vec<String>,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
+    code_scroll: UniformListScrollHandle,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Bumped for every layout asked for; only the newest is kept.
@@ -94,6 +103,7 @@ impl Workspace {
             script,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
+            code_scroll: UniformListScrollHandle::new(),
             seeds: HashMap::new(),
             layout_generation: 0,
         };
@@ -117,6 +127,25 @@ impl Workspace {
 
     /// Takes in one engine reply.
     pub fn receive(&mut self, reply: Reply, cx: &mut Context<Self>) {
+        if let Screen::Review(review) = &mut self.screen
+            && review.code_request == Some(reply.id)
+        {
+            match (&reply.response, review.code.as_mut()) {
+                (Response::FileDiff { detail, diff, .. }, Some(code)) => {
+                    let first = code.diff.is_none();
+                    code.receive(*detail, diff.clone());
+                    if first {
+                        self.code_scroll
+                            .scroll_to_item(code.cursor, ScrollStrategy::Center);
+                    }
+                }
+                (Response::Failed { error }, Some(code)) => code.error = Some(error.clone()),
+                _ => {}
+            }
+            self.replay(cx);
+            cx.notify();
+            return;
+        }
         if let Response::Failed { error } = &reply.response {
             // An Open that fails is reported by the Refs request after it,
             // whose reply is the one awaited.
@@ -221,7 +250,9 @@ impl Workspace {
         loop {
             let ready = matches!(
                 &self.screen,
-                Screen::Review(r) if r.mapped == Some(Detail::Full) && r.layout.is_some()
+                Screen::Review(r) if r.mapped == Some(Detail::Full)
+                    && r.layout.is_some()
+                    && r.code.as_ref().is_none_or(|c| c.detail == Some(Detail::Full) || c.error.is_some())
             );
             if !ready || self.script.is_empty() {
                 return;
@@ -301,10 +332,59 @@ impl Workspace {
                         map: None,
                         mapped: None,
                         layout: None,
+                        code: None,
+                        code_request: None,
                     }));
                 }
             }
+            Screen::Review(review) if review.code.is_some() => {
+                if matches!(key, "backspace" | "escape") {
+                    review.code = None;
+                    review.code_request = None;
+                } else if let Some(code) = review.code.as_mut()
+                    && code.key(key)
+                {
+                    self.code_scroll
+                        .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
+                }
+            }
             Screen::Review(review) if key != "escape" && review.map.is_some() => {
+                // Enter on a node with nothing inside, or `c` on any node,
+                // opens its code.
+                let leaf = review
+                    .map
+                    .as_ref()
+                    .and_then(|m| m.selected.and_then(|i| m.view.nodes.get(i)))
+                    .map(|n| (n.clone(), !n.has_children));
+                if let Some((node, is_leaf)) = leaf
+                    && ((key == "enter" && is_leaf) || key == "c")
+                    && !node.source.is_empty()
+                {
+                    let (base, head) = (review.base.clone(), review.head.clone());
+                    review.code = Some(CodeView::new(
+                        node.source.clone(),
+                        node.name.clone(),
+                        node.lines,
+                        node.lines_in_base,
+                    ));
+                    self.next_id += 1;
+                    let id = self.next_id;
+                    (self.send)(
+                        id,
+                        Request::FileDiff {
+                            base,
+                            head,
+                            path: node.source,
+                        },
+                    );
+                    if let Screen::Review(review) = &mut self.screen {
+                        review.code_request = Some(id);
+                    }
+                    return;
+                }
+                let Screen::Review(review) = &mut self.screen else {
+                    return;
+                };
                 let Review { map, layout, .. } = &mut **review;
                 let Some(map) = map.as_mut() else {
                     return;
@@ -440,8 +520,11 @@ impl Render for Workspace {
                         r.changed
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(format!(
-                        "{place}. Arrows or Tab select, Enter drill down, Backspace up, Esc back to the list."
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, Esc back to the list."
                     )));
+                if let Some(code) = &r.code {
+                    return root.child(code_view(code, &self.code_scroll, dark));
+                }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
                         let size = window.viewport_size();
@@ -560,4 +643,146 @@ fn canvas(map: &Map, l: &Layout, viewport: (f32, f32), dark: bool) -> gpui::Div 
         );
     }
     c
+}
+
+/// A monospace family that every platform has (DR 0003: the generic
+/// `monospace` does not resolve in GPUI).
+fn mono_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "DejaVu Sans Mono"
+    }
+}
+
+fn token_colour(class: TokenClass, dark: bool) -> u32 {
+    match (class, dark) {
+        (TokenClass::Keyword, false) => 0x8250df,
+        (TokenClass::Keyword, true) => 0xd2a8ff,
+        (TokenClass::Type, false) => 0x0a7a7a,
+        (TokenClass::Type, true) => 0x56d4dd,
+        (TokenClass::Function, false) => 0x0550ae,
+        (TokenClass::Function, true) => 0x79c0ff,
+        (TokenClass::String, false) => 0x116329,
+        (TokenClass::String, true) => 0xa5d6a7,
+        (TokenClass::Number, false) => 0x953800,
+        (TokenClass::Number, true) => 0xffa657,
+        (TokenClass::Comment, false) => 0x6e7781,
+        (TokenClass::Comment, true) => 0x8b949e,
+    }
+}
+
+/// One side of a row: its line number and its highlighted text.
+fn side(
+    text: &FileText,
+    line: Option<u32>,
+    tint: Option<u32>,
+    column: usize,
+    dark: bool,
+) -> gpui::Div {
+    let mut cell = div()
+        .w_1_2()
+        .flex()
+        .flex_row()
+        .overflow_hidden()
+        .whitespace_nowrap();
+    if let Some(t) = tint {
+        cell = cell.bg(rgb(t));
+    }
+    let Some(i) = line.map(|l| l as usize) else {
+        return cell;
+    };
+    let full = text.lines.get(i).map(String::as_str).unwrap_or_default();
+    // Scrolled sideways by whole characters.
+    let skip = full
+        .char_indices()
+        .nth(column)
+        .map_or(full.len(), |(b, _)| b);
+    let body = full[skip..].to_owned();
+    let spans: Vec<(std::ops::Range<usize>, HighlightStyle)> = text
+        .highlights
+        .get(i)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            let (a, b) = (
+                (s.start as usize).max(skip) - skip,
+                (s.end as usize).saturating_sub(skip),
+            );
+            (b > a && body.get(a..b).is_some()).then_some((a, b, s.class))
+        })
+        .map(|(a, b, class)| {
+            (
+                a..b,
+                HighlightStyle {
+                    color: Some(rgb(token_colour(class, dark)).into()),
+                    ..HighlightStyle::default()
+                },
+            )
+        })
+        .collect();
+    cell.child(
+        div()
+            .w(px(48.0))
+            .flex_none()
+            .text_color(rgb(if dark { 0x6e7681 } else { 0x8c959f }))
+            .child(format!("{:>5} ", i + 1)),
+    )
+    .child(StyledText::new(body).with_highlights(spans))
+}
+
+/// The code view: a header, then the rows, of which only those on screen
+/// are built (§4).
+fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> gpui::Div {
+    let state = match (&code.error, code.detail) {
+        (Some(e), _) => format!("cannot open: {e}"),
+        (None, None) => "loading…".to_string(),
+        (None, Some(Detail::Coarse)) => "highlighting…".to_string(),
+        (None, Some(Detail::Full)) => format!("{} rows", code.rows()),
+    };
+    let header = div().child(format!(
+        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, Backspace back to the map.",
+        code.path, code.title
+    ));
+    let Some(diff) = code.diff.clone() else {
+        return div().flex().flex_col().flex_1().child(header);
+    };
+    let cursor = code.cursor;
+    let column = code.column;
+    let (removed, added, cursor_bg) = if dark {
+        (0x3d1d1d, 0x1d3d24, 0x2d333b)
+    } else {
+        (0xffebe9, 0xe6ffec, 0xeaeef2)
+    };
+    let list = uniform_list("code-rows", diff.rows.len(), move |range, _, _| {
+        range
+            .filter_map(|i| Some((i, *diff.rows.get(i)?)))
+            .map(|(i, r)| {
+                let (left, right) = match r.kind {
+                    RowKind::Same => (None, None),
+                    RowKind::Changed => (Some(removed), Some(added)),
+                    RowKind::Removed => (Some(removed), None),
+                    RowKind::Added => (None, Some(added)),
+                };
+                let mut row = div()
+                    .w_full()
+                    .h(px(18.0))
+                    .flex()
+                    .flex_row()
+                    .text_size(px(13.0))
+                    .font_family(mono_font())
+                    .child(side(&diff.base, r.base, left, column, dark))
+                    .child(side(&diff.head, r.head, right, column, dark));
+                if i == cursor {
+                    row = row.bg(rgb(cursor_bg));
+                }
+                row
+            })
+            .collect()
+    })
+    .track_scroll(scroll)
+    .flex_1();
+    div().flex().flex_col().flex_1().child(header).child(list)
 }

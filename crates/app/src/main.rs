@@ -184,8 +184,16 @@ fn report_review(ws: &gpui::Entity<Workspace>, path: String, stay_open: bool, cx
         if r.mapped != Some(Detail::Full) || w.script_pending() {
             return;
         }
+        // A code view opened by the script must have its highlighted diff.
+        if let Some(code) = &r.code
+            && code.detail != Some(Detail::Full)
+            && code.error.is_none()
+        {
+            return;
+        }
+        let code_rows = r.code.as_ref().map_or(0, |c| c.rows());
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}}}\n",
             r.base,
             r.head,
             r.findings,
