@@ -321,22 +321,20 @@ impl Workspace {
                 review.detail = Some(*detail);
                 review.findings = diff.findings.len();
                 review.changed = diff.nodes.len();
-                // The full answer keeps the place the coarse one had reached.
-                let cursor = review.list.as_ref().map_or(0, |l| l.cursor);
-                let mut list = Findings::new(diff);
-                list.cursor = cursor.min(list.items.len().saturating_sub(1));
-                review.list = Some(list);
                 // Building the map rolls up every edge once: off the UI
                 // thread (§4).
                 let (base, head, diff) = (base_model.clone(), head_model.clone(), diff.clone());
                 let detail = *detail;
                 let request = reply.id;
-                let task = cx
-                    .background_executor()
-                    .spawn(async move { Map::new(base, head, &diff) });
+                let task = cx.background_executor().spawn(async move {
+                    let map = Map::new(base, head, &diff);
+                    // The list with the map it is labelled and shown on.
+                    let list = Findings::new(&diff, &map);
+                    (map, list)
+                });
                 cx.spawn(async move |this, cx| {
-                    let map = task.await;
-                    let _ = this.update(cx, |w, cx| w.map_ready(request, detail, map, cx));
+                    let (map, list) = task.await;
+                    let _ = this.update(cx, |w, cx| w.map_ready(request, detail, map, list, cx));
                 })
                 .detach();
             }
@@ -352,6 +350,7 @@ impl Workspace {
         request: RequestId,
         detail: Detail,
         mut map: Map,
+        mut list: Findings,
         cx: &mut Context<Self>,
     ) {
         if self.waiting != Some(request) {
@@ -390,6 +389,11 @@ impl Workspace {
             }
             _ => review.camera = Camera::default(),
         }
+        // The full list keeps the finding the coarse one had highlighted.
+        if let Some(old) = &review.list {
+            list.keep(old.current(), old.cursor);
+        }
+        review.list = Some(list);
         review.map = Some(map);
         review.mapped = Some(detail);
         // The old layout belongs to the old map.
@@ -656,8 +660,10 @@ impl Workspace {
             "findings.show" | "findings.map" => {
                 let path = map.path.clone();
                 if id == "findings.show" {
-                    if let Some(target) = list.current().and_then(Item::target).cloned() {
-                        map.reveal(&target);
+                    let target = list.current().and_then(Item::target).cloned();
+                    if !target.is_some_and(|t| map.reveal(&t)) {
+                        self.notice = Some("That finding's node is not on the map.".into());
+                        return;
                     }
                 } else {
                     while map.drill_up() {}
@@ -701,6 +707,7 @@ impl Workspace {
                 head: head.clone(),
             });
             self.waiting = Some(id);
+            self.findings_scroll = UniformListScrollHandle::new();
             self.screen = Screen::Review(Box::new(Review {
                 base,
                 head,
@@ -992,13 +999,13 @@ impl Workspace {
                         r.findings,
                         r.changed
                     ))
-                    .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() {
+                    .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
                         "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        format!("{} findings. ↑↓ Home End choose, Enter show on the map, m the map, Esc back to the list, F1 all actions.", r.list.as_ref().map_or(0, |l| l.items.len()))
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
@@ -1006,7 +1013,7 @@ impl Workspace {
                 if !r.on_map
                     && let (Some(list), Some(map)) = (&r.list, &r.map)
                 {
-                    return root.child(findings_view(list, map, &self.findings_scroll, theme));
+                    return findings_view(root, list, map, &self.findings_scroll);
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
@@ -1026,16 +1033,17 @@ impl Workspace {
     }
 }
 
-/// The findings list (#114): one row per finding, the highlighted one
-/// marked. Only the rows on screen are built.
-fn findings_view(
+/// The findings list (#114) under the header: one row per finding, the
+/// highlighted one marked. The labels are made for every row; only the
+/// rows on screen are laid out.
+fn findings_view<E: ParentElement>(
+    root: E,
     list: &Findings,
     map: &Map,
     scroll: &UniformListScrollHandle,
-    theme: Theme,
-) -> gpui::Div {
+) -> E {
     if list.items.is_empty() {
-        return div().child(
+        return root.child(
             "No findings: nothing crosses a boundary, closes a cycle or changes a public surface. Press m for the map.",
         );
     }
@@ -1048,15 +1056,14 @@ fn findings_view(
             format!("{mark} {}", findings::label(item, map))
         })
         .collect();
-    let _ = theme;
-    div().flex_1().size_full().child(
+    root.child(
         uniform_list("findings", rows.len(), move |range, _, _| {
             range
                 .map(|i| div().h(px(24.0)).child(rows[i].clone()))
                 .collect()
         })
         .track_scroll(scroll)
-        .size_full(),
+        .flex_1(),
     )
 }
 

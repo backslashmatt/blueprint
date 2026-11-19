@@ -33,11 +33,11 @@ pub enum Item {
         /// The node.
         id: NodeId,
     },
-    /// One of the most changed modules or below.
+    /// One of the nodes whose own lines changed most.
     Concentration {
         /// The node.
         id: NodeId,
-        /// Its changed lines, its descendants' included.
+        /// Its own changed lines: its rolled-up weight less its children's.
         lines: Lines,
     },
 }
@@ -65,9 +65,10 @@ pub struct Findings {
 }
 
 impl Findings {
-    /// The findings of `diff`, in the §3.3 order.
+    /// The findings of `diff`, in the §3.3 order; `map` is the map of the
+    /// same diff, for each node's parent.
     #[must_use]
-    pub fn new(diff: &Diff) -> Findings {
+    pub fn new(diff: &Diff, map: &Map) -> Findings {
         let mut deps = Vec::new();
         let mut cycles = Vec::new();
         // One row per pair of nodes, whatever kinds of edge join them.
@@ -92,26 +93,35 @@ impl Findings {
             NodeChange::Surface { id } => Some(Item::Surface { id: id.clone() }),
             _ => None,
         });
-        // Concentration: modules and below, most changed lines first; the
-        // systems would always win, as their weights hold everything.
-        let mut heavy: Vec<_> = diff
+        // Concentration: weights roll up into every ancestor, so ranking
+        // them would list one change at each level. Rank each node by its
+        // own lines (its weight less its children's) instead, below L1.
+        let mut own: std::collections::BTreeMap<NodeId, (u32, u32)> = diff
             .weights
             .iter()
-            .filter(|w| w.id.level() != Level::System && !w.lines.is_zero())
+            .map(|w| (w.id.clone(), (w.lines.signature, w.lines.body)))
+            .collect();
+        for w in &diff.weights {
+            if let Some(p) = map.parent(&w.id)
+                && let Some(o) = own.get_mut(&p)
+            {
+                o.0 = o.0.saturating_sub(w.lines.signature);
+                o.1 = o.1.saturating_sub(w.lines.body);
+            }
+        }
+        let mut heavy: Vec<(NodeId, Lines)> = own
+            .into_iter()
+            .filter(|(id, (s, b))| id.level() != Level::System && s + b > 0)
+            .map(|(id, (signature, body))| (id, Lines { signature, body }))
             .collect();
         heavy.sort_by(|a, b| {
             let total = |l: Lines| l.signature + l.body;
-            total(b.lines)
-                .cmp(&total(a.lines))
-                .then_with(|| a.id.cmp(&b.id))
+            total(b.1).cmp(&total(a.1)).then_with(|| a.0.cmp(&b.0))
         });
         let concentration = heavy
             .into_iter()
             .take(CONCENTRATION)
-            .map(|w| Item::Concentration {
-                id: w.id.clone(),
-                lines: w.lines,
-            });
+            .map(|(id, lines)| Item::Concentration { id, lines });
         let items = deps
             .into_iter()
             .chain(cycles)
@@ -119,6 +129,14 @@ impl Findings {
             .chain(concentration)
             .collect();
         Findings { items, cursor: 0 }
+    }
+
+    /// Highlights `item` if the list has it, else the row at `cursor`,
+    /// within the list: keeping a place across a rebuilt list.
+    pub fn keep(&mut self, item: Option<&Item>, cursor: usize) {
+        self.cursor = item
+            .and_then(|it| self.items.iter().position(|i| i == it))
+            .unwrap_or_else(|| cursor.min(self.items.len().saturating_sub(1)));
     }
 
     /// The highlighted finding.
@@ -245,8 +263,9 @@ mod tests {
             })
             .collect();
         blueprint_engine::diff::weigh(&mut diff, &base, &head, &files);
-        let f = Findings::new(&diff);
-        (Map::new(Arc::new(base), Arc::new(head), &diff), f)
+        let map = Map::new(Arc::new(base), Arc::new(head), &diff);
+        let f = Findings::new(&diff, &map);
+        (map, f)
     }
 
     #[test]
@@ -292,6 +311,41 @@ mod tests {
                 .map(|n| &n.id);
             assert_eq!(shown, Some(target));
         }
+    }
+
+    #[test]
+    fn concentration_counts_each_line_once() {
+        let (map, f) = review();
+        let rows: Vec<String> = f
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Concentration { .. }))
+            .map(|i| label(i, &map))
+            .collect();
+        // g's body grew by two lines: only g carries them, not x above it.
+        assert!(rows.iter().any(|r| r.contains("› g:")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("› x:")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_rebuilt_list_keeps_the_highlighted_finding() {
+        let (_, mut f) = review();
+        f.to_end(true);
+        let last = f.current().cloned();
+        let mut again = f.clone();
+        again.items.insert(
+            0,
+            Item::Surface {
+                id: NodeId::system(
+                    last.as_ref()
+                        .and_then(Item::target)
+                        .map(|t| t.system_key().clone())
+                        .unwrap_or_else(|| panic!("a target")),
+                ),
+            },
+        );
+        again.keep(last.as_ref(), 0);
+        assert_eq!(again.current(), last.as_ref());
     }
 
     #[test]

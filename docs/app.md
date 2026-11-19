@@ -31,8 +31,8 @@ A review opens on its **findings** (#114, §5.4 view 3), the reviewer's starting
 
 1. new dependencies between systems or modules, one row per pair;
 2. new dependency cycles;
-3. public surface changes;
-4. the ten modules or deeper nodes with the most changed lines (change concentration).
+3. public surface changes: visible nodes whose signature or visibility changed (added and removed nodes are on the map, coloured);
+4. change concentration: the ten nodes below the systems with the most changed lines of their own, so a change counts once, where it is, not again in every module above it.
 
 Names below L1 come after their system's, as in `blueprint-store › segment`. Only the rows on screen are drawn.
 

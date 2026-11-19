@@ -239,6 +239,15 @@ impl Map {
         self.selected.is_some()
     }
 
+    /// A node's parent, from head or else base.
+    #[must_use]
+    pub fn parent(&self, id: &NodeId) -> Option<NodeId> {
+        self.head
+            .node(id)
+            .or_else(|| self.base.node(id))
+            .and_then(|n| n.parent.clone())
+    }
+
     /// A node's name, from head or else base; its id if neither has it.
     #[must_use]
     pub fn name(&self, id: &NodeId) -> String {
