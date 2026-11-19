@@ -1014,7 +1014,7 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
     let report = dir.join(format!("bp-bench-ui-review-{}.json", std::process::id()));
     let timings = dir.join(format!("bp-bench-ui-timings-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&timings);
-    let status = Command::new(app)
+    let out = Command::new(app)
         .arg(checkout)
         .args(["--script", UI_SCRIPT, "--review-report"])
         .arg(&report)
@@ -1022,15 +1022,28 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
         .arg(&timings)
         .env("BLUEPRINT_CACHE_DIR", cache)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(format!("`{} --timings` failed: {status}", app.display()).into());
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+    let _ = std::fs::remove_file(&report);
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&timings);
+        return Err(format!(
+            "`{} --timings` failed: {}: {}",
+            app.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
     }
     let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&timings)?)?;
-    let _ = std::fs::remove_file(&report);
     let _ = std::fs::remove_file(&timings);
     let keys = json["keys"].as_array().ok_or("timings have no `keys`")?;
+    // Every scripted key must have been pressed and timed, or the session
+    // went off script and its rows would mean nothing.
+    let expected = UI_SCRIPT.split(',').count();
+    if keys.len() != expected {
+        return Err(format!("the UI session timed {} of {expected} keys", keys.len()).into());
+    }
     keys.iter()
         .map(|k| {
             Ok((
@@ -1072,15 +1085,22 @@ fn scrolls(action: &str) -> bool {
 
 /// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on the
 /// medium checkout: each row is the worst key of its kind in a session, and
-/// the best session is kept (DR 0002). Times run from the key to the end of
-/// the paint of the frame that shows it; presenting waits for the display.
+/// the lowest of those over the sessions is kept (DR 0002). Times end with
+/// the paint of the frame that shows the key: the scene is built, and the
+/// renderer's rasterizing and presenting are not included.
 fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
     let cache = std::env::temp_dir().join(format!("bp-bench-ui-cache-{}", std::process::id()));
-    ui_run(app, checkout, &cache)?;
+    let result = ui_sessions(app, checkout, &cache);
+    let _ = std::fs::remove_dir_all(&cache);
+    result
+}
+
+fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurement>, Error> {
+    ui_run(app, checkout, cache)?;
     let mut best: [f64; 3] = [f64::INFINITY; 3];
     let mut drills = 0;
     for _ in 0..UI_SESSIONS {
-        let keys = ui_run(app, checkout, &cache)?;
+        let keys = ui_run(app, checkout, cache)?;
         let worst = |pick: &dyn Fn(&KeyTime) -> Option<f64>| {
             keys.iter().filter_map(pick).fold(0.0_f64, f64::max)
         };
@@ -1089,15 +1109,22 @@ fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
         });
         let input = worst(&|k| Some(k.2));
         let frame = worst(&|k| scrolls(&k.0).then_some(k.2));
-        drills = keys
+        let session_drills = keys
             .iter()
             .filter(|k| matches!(k.0.as_str(), "map.drill_down" | "map.drill_up") && !k.1)
             .count();
+        if session_drills == 0 || !keys.iter().any(|k| scrolls(&k.0)) {
+            return Err("the UI session drilled or scrolled nothing: off script".into());
+        }
+        drills = if drills == 0 {
+            session_drills
+        } else {
+            drills.min(session_drills)
+        };
         for (b, v) in best.iter_mut().zip([drill, input, frame]) {
             *b = b.min(v);
         }
     }
-    let _ = std::fs::remove_dir_all(&cache);
     let row = |name: &str, value: f64, note: String| Measurement {
         name: name.into(),
         repo: Some("medium".into()),
@@ -1114,12 +1141,16 @@ fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
         row(
             "drill",
             best[0],
-            format!("slowest of {drills} drills, key to the laid-out view painted; {session}"),
+            format!(
+                "slowest of at least {drills} drills, from the key to the view laid out, plus the paint of the frame showing it; {session}"
+            ),
         ),
         row(
             "input_latency",
             best[1],
-            format!("slowest key of the session to its first painted frame; {session}"),
+            format!(
+                "slowest key of the session to the end of the paint of its first frame (scene built; rasterizing and presenting are the renderer's); {session}"
+            ),
         ),
         row(
             "frame_time",

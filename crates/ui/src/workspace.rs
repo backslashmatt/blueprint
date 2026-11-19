@@ -65,9 +65,9 @@ pub struct KeyTiming {
     /// From the key to the end of the next frame's paint: its input
     /// latency, and for a scroll its frame time.
     pub first_frame_ms: f64,
-    /// From the key to the end of the paint of the first frame drawn once
-    /// its effect is complete (a drill's view laid out, a code view's diff
-    /// arrived).
+    /// From the key to when its effect was complete (a drill's view laid
+    /// out, a code view's diff arrived), plus the paint of the frame that
+    /// shows it; not the wait for the display's tick in between.
     pub settled_ms: f64,
 }
 
@@ -77,6 +77,10 @@ struct Pending {
     action: Option<&'static str>,
     opened_code: bool,
     start: std::time::Instant,
+    /// When its effect was complete.
+    settled_at: Option<std::time::Instant>,
+    /// When the frame the frame callback was registered in began.
+    frame_started: std::time::Instant,
     first_frame_ms: Option<f64>,
     /// A frame callback is registered.
     armed: bool,
@@ -122,6 +126,10 @@ pub struct Workspace {
     pending: Option<Pending>,
     /// The timed keys so far, in order.
     pub timings: Vec<KeyTiming>,
+    /// The next timed key waits for the start of a frame.
+    press_wanted: bool,
+    /// When the frame being drawn began.
+    frame_started: std::time::Instant,
     /// When the last frame finished painting, while keys are timed.
     painted: Rc<std::cell::Cell<Option<std::time::Instant>>>,
     /// A message about the last action that went wrong outside the engine
@@ -166,6 +174,8 @@ impl Workspace {
             pending: None,
             timings: Vec::new(),
             painted: Rc::default(),
+            press_wanted: false,
+            frame_started: std::time::Instant::now(),
             seeds: HashMap::new(),
             layout_generation: 0,
         };
@@ -380,33 +390,57 @@ impl Workspace {
 
     /// Presses waiting `--script` keys, each once the screen it acts on has
     /// settled: list keys at once, the keys after the one that opens a
-    /// review once its full map is laid out, and so on. Timed, one key per
-    /// settled frame.
+    /// review once its full map is laid out, and so on. Timed keys are
+    /// pressed one at a time, at the start of a frame (`press_timed`), so
+    /// that none waits for the display's next tick before it is drawn.
     fn replay(&mut self, cx: &mut Context<Self>) {
-        while !self.script.is_empty() && self.pending.is_none() && self.settled() {
-            let key = self.script.remove(0);
-            let action = match &self.palette {
-                Some(_) => Some("palette.key"),
-                None => actions::for_key(&self.scopes(), &key).map(|a| a.id),
-            };
-            let had_code = matches!(&self.screen, Screen::Review(r) if r.code.is_some());
-            let start = std::time::Instant::now();
-            self.key(&key, cx);
-            if self.timed {
-                let opened_code =
-                    !had_code && matches!(&self.screen, Screen::Review(r) if r.code.is_some());
-                self.pending = Some(Pending {
-                    key,
-                    action,
-                    opened_code,
-                    start,
-                    first_frame_ms: None,
-                    armed: false,
-                    armed_settled: false,
-                });
+        if self.timed {
+            let settled = self.settled();
+            if let Some(p) = self.pending.as_mut() {
+                if settled && p.settled_at.is_none() {
+                    p.settled_at = Some(std::time::Instant::now());
+                }
+            } else if settled && !self.script.is_empty() {
+                self.press_wanted = true;
                 cx.notify();
             }
+            return;
         }
+        while !self.script.is_empty() && self.settled() {
+            let key = self.script.remove(0);
+            self.key(&key, cx);
+        }
+    }
+
+    /// Presses the next timed key, from a next-frame callback: the frame it
+    /// changes is drawn straight after.
+    fn press_timed(&mut self, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.script.is_empty() || !self.settled() {
+            return;
+        }
+        let key = self.script.remove(0);
+        let action = match &self.palette {
+            Some(_) => Some("palette.key"),
+            None => actions::for_key(&self.scopes(), &key).map(|a| a.id),
+        };
+        let had_code = matches!(&self.screen, Screen::Review(r) if r.code.is_some());
+        let start = std::time::Instant::now();
+        self.key(&key, cx);
+        let opened_code =
+            !had_code && matches!(&self.screen, Screen::Review(r) if r.code.is_some());
+        let settled_at = self.settled().then(std::time::Instant::now);
+        self.pending = Some(Pending {
+            key,
+            action,
+            opened_code,
+            start,
+            settled_at,
+            first_frame_ms: None,
+            armed: false,
+            armed_settled: false,
+            frame_started: start,
+        });
+        cx.notify();
     }
 
     /// After a frame is painted with a timed key in flight: its first frame,
@@ -415,25 +449,30 @@ impl Workspace {
         let Some(p) = self.pending.as_mut() else {
             return;
         };
-        // Up to the end of the frame's paint; presenting it is the
-        // platform's and waits for the display.
+        // The end of the frame's paint; presenting it is the platform's.
         let end = self
             .painted
             .get()
-            .filter(|t| *t >= p.start)
+            .filter(|t| *t >= p.frame_started)
             .unwrap_or_else(std::time::Instant::now);
-        let ms = end.duration_since(p.start).as_secs_f64() * 1000.0;
-        let first = *p.first_frame_ms.get_or_insert(ms);
+        let ms = |from: std::time::Instant, to: std::time::Instant| {
+            to.saturating_duration_since(from).as_secs_f64() * 1000.0
+        };
+        let first = *p.first_frame_ms.get_or_insert(ms(p.start, end));
         p.armed = false;
         if p.armed_settled {
-            let p = self.pending.take();
-            if let Some(p) = p {
+            // Up to when the effect was complete (a layout or a reply
+            // arrived), plus the paint of the frame showing it: the wait
+            // for the display's next tick in between is not the app's.
+            let settled_at = p.settled_at.unwrap_or(p.frame_started);
+            let settled = ms(p.start, settled_at) + ms(p.frame_started, end);
+            if let Some(p) = self.pending.take() {
                 self.timings.push(KeyTiming {
                     key: p.key,
                     action: p.action,
                     opened_code: p.opened_code,
                     first_frame_ms: first,
-                    settled_ms: ms,
+                    settled_ms: settled.max(first),
                 });
             }
             self.replay(cx);
@@ -689,6 +728,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.frame_started = std::time::Instant::now();
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -726,9 +766,16 @@ impl Workspace {
         {
             p.armed = true;
             p.armed_settled = settled;
+            p.frame_started = self.frame_started;
             let ws = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = ws.update(cx, |w, cx| w.frame_painted(cx));
+            });
+        } else if self.press_wanted && self.pending.is_none() {
+            self.press_wanted = false;
+            let ws = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = ws.update(cx, |w, cx| w.press_timed(cx));
             });
         }
         let root = div()

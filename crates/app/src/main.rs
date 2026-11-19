@@ -61,6 +61,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             extra => return Err(format!("unexpected argument {extra}")),
         }
     }
+    if out.timings.is_some() && out.review_report.is_none() {
+        return Err("--timings needs --review-report".into());
+    }
     Ok(out)
 }
 
@@ -226,6 +229,20 @@ fn report_review(
     .detach();
 }
 
+/// `s` as the inside of a JSON string.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The timed keys as JSON: `{"keys": [{"key", "action", "opened_code",
 /// "first_frame_ms", "settled_ms"}, …]}`.
 fn timings_json(t: &[blueprint_ui::workspace::KeyTiming]) -> String {
@@ -234,7 +251,7 @@ fn timings_json(t: &[blueprint_ui::workspace::KeyTiming]) -> String {
         .map(|k| {
             format!(
                 "{{\"key\": \"{}\", \"action\": {}, \"opened_code\": {}, \"first_frame_ms\": {:.2}, \"settled_ms\": {:.2}}}",
-                k.key.escape_default(),
+                json_escape(&k.key),
                 k.action.map_or("null".to_owned(), |a| format!("\"{a}\"")),
                 k.opened_code,
                 k.first_frame_ms,
@@ -271,5 +288,7 @@ mod tests {
         assert!(parse(&args(&["--bogus"])).is_err());
         assert!(parse(&args(&["a", "b"])).is_err());
         assert!(parse(&args(&["--script"])).is_err());
+        assert!(parse(&args(&["r", "--timings", "t"])).is_err());
+        assert_eq!(json_escape("a\"b\\c\n'é"), "a\\\"b\\\\c\\u000a'é");
     }
 }
