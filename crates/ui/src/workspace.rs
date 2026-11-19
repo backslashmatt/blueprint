@@ -54,6 +54,8 @@ pub struct Review {
 /// What the workspace shows.
 #[derive(Debug, Clone)]
 pub enum Screen {
+    /// No repository open yet: the app was started without one.
+    Empty,
     /// Waiting for the repository's refs.
     Opening,
     /// Choosing base and head.
@@ -80,6 +82,9 @@ pub struct Workspace {
     code_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
+    /// A message about the last action that went wrong outside the engine
+    /// (the folder dialog), shown above the screen until the next key.
+    pub notice: Option<String>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Bumped for every layout asked for; only the newest is kept.
@@ -95,10 +100,16 @@ impl std::fmt::Debug for Workspace {
 }
 
 impl Workspace {
-    /// Opens the repository at `path` and asks for its refs.
-    pub fn new(path: &str, send: Send, script: Vec<String>, cx: &mut Context<Self>) -> Self {
+    /// A workspace on the repository at `path`, asking for its refs, or an
+    /// empty one without a path.
+    pub fn new(
+        path: Option<&str>,
+        send: Send,
+        script: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut w = Workspace {
-            screen: Screen::Opening,
+            screen: Screen::Empty,
             list: None,
             send,
             next_id: 0,
@@ -108,13 +119,73 @@ impl Workspace {
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
             palette: None,
+            notice: None,
             seeds: HashMap::new(),
             layout_generation: 0,
         };
-        w.request(Request::Open { path: path.into() });
-        let refs = w.request(Request::Refs { limit: 200 });
-        w.waiting = Some(refs);
+        if let Some(path) = path {
+            w.open(path);
+        }
         w
+    }
+
+    /// Opens the repository at `path` in place of whatever was open, and
+    /// asks for its refs. The engine drops its work on the previous one.
+    pub fn open(&mut self, path: &str) {
+        self.list = None;
+        self.palette = None;
+        // Layouts still running belong to the repository left.
+        self.layout_generation += 1;
+        self.seeds.clear();
+        self.notice = None;
+        // The new list starts at its top, and its code views at theirs.
+        self.scroll = UniformListScrollHandle::new();
+        self.code_scroll = UniformListScrollHandle::new();
+        self.screen = Screen::Opening;
+        self.request(Request::Open { path: path.into() });
+        let refs = self.request(Request::Refs { limit: 200 });
+        self.waiting = Some(refs);
+    }
+
+    /// Asks for a folder with the platform's dialog and opens it.
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open repository".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(e)) => {
+                    // What was on screen stays: only the dialog failed.
+                    let _ = this.update(cx, |w, cx| {
+                        w.notice = Some(format!("Cannot show the folder dialog: {e}"));
+                        cx.notify();
+                    });
+                    None
+                }
+                _ => None,
+            };
+            if let Some(path) = path {
+                let _ = this.update(cx, |w, cx| {
+                    let Some(path) = path.to_str() else {
+                        w.notice = Some(format!(
+                            "{} is not a UTF-8 path, which the engine cannot open",
+                            path.display()
+                        ));
+                        cx.notify();
+                        return;
+                    };
+                    // Test keys belong to the repository they were given for.
+                    w.script.clear();
+                    w.open(path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// The focus handle keys arrive through; the app focuses it.
@@ -311,7 +382,7 @@ impl Workspace {
     #[must_use]
     pub fn scopes(&self) -> Vec<Scope> {
         match &self.screen {
-            Screen::Opening => vec![Scope::Global],
+            Screen::Empty | Screen::Opening => vec![Scope::Global],
             Screen::List(_) => vec![Scope::List, Scope::Global],
             Screen::Review(r) if r.code.is_some() => {
                 vec![Scope::Code, Scope::Review, Scope::Global]
@@ -329,6 +400,12 @@ impl Workspace {
     /// `ctrl-shift-p`): to the palette when it is open, else the action
     /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.notice = None;
+        // Opening a repository works over the palette too.
+        if actions::for_key(&[Scope::Global], key).is_some_and(|a| a.id == "global.open") {
+            self.run("global.open", cx);
+            return;
+        }
         let scopes = self.scopes();
         if let Some(palette) = self.palette.as_mut() {
             palette.rescope(scopes);
@@ -356,6 +433,10 @@ impl Workspace {
             return;
         }
         match def.scope {
+            Scope::Global if id == "global.open" => {
+                self.palette = None;
+                self.choose_folder(cx);
+            }
             Scope::Global => self.palette = Some(Palette::new(self.scopes())),
             Scope::List => self.run_list(id),
             Scope::Code => self.run_code(id),
@@ -519,11 +600,20 @@ impl Render for Workspace {
             .p_6()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
+        let root = match &self.notice {
+            Some(n) => root.child(div().text_color(rgb(theme.muted)).child(n.clone())),
+            None => root,
+        };
         let root = match &self.palette {
             Some(p) => root.child(palette_view(p, theme)),
             None => root,
         };
         match &self.screen {
+            Screen::Empty => root.child("No repository is open.").child(
+                div()
+                    .text_color(rgb(theme.muted))
+                    .child("Ctrl+O (⌘O on macOS) opens one; F1 lists every action."),
+            ),
             Screen::Opening => root.child("Opening the repository…"),
             Screen::Failed(e) => root
                 .child(format!("The engine could not answer: {e}"))
@@ -531,9 +621,9 @@ impl Render for Workspace {
                     div()
                         .text_color(rgb(theme.muted))
                         .child(if self.list.is_some() {
-                            "Esc: back to the list"
+                            "Esc: back to the list; Ctrl+O (⌘O) opens another repository."
                         } else {
-                            ""
+                            "Ctrl+O (⌘O on macOS) opens another repository."
                         }),
                 ),
             Screen::List(list) => {
@@ -973,7 +1063,7 @@ mod tests {
                 Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
                 Scope::Map => map_op(a.id).is_some(),
                 Scope::Review => a.id == "review.back",
-                Scope::Global => a.id == "global.palette",
+                Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };
             assert!(handled, "{} has no handler", a.id);
         }

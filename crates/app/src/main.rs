@@ -1,6 +1,6 @@
 //! `blueprint`: the desktop app (REQUIREMENTS §5.3). Opens one window: the
-//! review list of the repository given on the command line, or the empty
-//! shell without one.
+//! review list of the repository given on the command line, or without one
+//! an empty window that opens a repository from a folder dialog (Ctrl+O).
 //!
 //! ```text
 //! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open]]
@@ -80,45 +80,37 @@ fn main() {
             ..Default::default()
         };
         let report = args.cold_start_report.clone();
-        let opened = match args.repo.clone() {
-            None => cx
-                .open_window(options, |window, cx| {
-                    if let Some(path) = report.clone() {
-                        first_paint(window, cx, start, path);
-                    }
-                    cx.new(|_| blueprint_ui::Shell)
-                })
-                .map(|_| ()),
-            Some(repo) => {
-                let (service, replies) = match Service::start() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("blueprint: cannot start the engine: {e}");
-                        std::process::exit(1);
-                    }
-                };
-                let service = Arc::new(service);
-                let script = args.script.clone();
-                let review_report = args.review_report.clone();
-                let stay_open = args.stay_open;
-                let opened = cx.open_window(options, |window, cx| {
-                    if let Some(path) = report.clone() {
-                        first_paint(window, cx, start, path);
-                    }
-                    let to_engine = Arc::clone(&service);
-                    let send = Rc::new(move |id, request| to_engine.send(id, request));
-                    let ws = cx.new(|cx| Workspace::new(&repo, send, script, cx));
-                    let focus = ws.read(cx).focus_handle().clone();
-                    window.focus(&focus, cx);
-                    pump(ws.clone(), replies, Arc::clone(&service), cx);
-                    if let Some(path) = review_report {
-                        report_review(&ws, path, stay_open, cx);
-                    }
-                    ws
-                });
-                opened.map(|_| ())
+        // The engine starts with the window, with or without a repository,
+        // so that one can be opened from the window (Ctrl+O).
+        let (service, replies) = match Service::start() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("blueprint: cannot start the engine: {e}");
+                std::process::exit(1);
             }
         };
+        let service = Arc::new(service);
+        let repo = args.repo.clone();
+        let script = args.script.clone();
+        let review_report = args.review_report.clone();
+        let stay_open = args.stay_open;
+        let opened = cx
+            .open_window(options, |window, cx| {
+                if let Some(path) = report.clone() {
+                    first_paint(window, cx, start, path);
+                }
+                let to_engine = Arc::clone(&service);
+                let send = Rc::new(move |id, request| to_engine.send(id, request));
+                let ws = cx.new(|cx| Workspace::new(repo.as_deref(), send, script, cx));
+                let focus = ws.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                pump(ws.clone(), replies, Arc::clone(&service), cx);
+                if let Some(path) = review_report {
+                    report_review(&ws, path, stay_open, cx);
+                }
+                ws
+            })
+            .map(|_| ());
         if let Err(e) = opened {
             eprintln!("blueprint: cannot open a window: {e}");
             std::process::exit(1);
