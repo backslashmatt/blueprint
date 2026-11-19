@@ -254,6 +254,41 @@ fn open_refs_diff_and_source() {
         panic!("no source");
     };
     assert_eq!(text, "    a::f();\n}");
+    service.send(
+        7,
+        Request::FileDiff {
+            base: "main~1".into(),
+            head: "main".into(),
+            path: "b/src/lib.rs".into(),
+        },
+    );
+    let r = until_last(&rx, 7, &mut others);
+    let details: Vec<Detail> = r
+        .iter()
+        .map(|r| match r {
+            Response::FileDiff { detail, .. } => *detail,
+            other => panic!("not a file diff: {other:?}"),
+        })
+        .collect();
+    assert_eq!(details, vec![Detail::Coarse, Detail::Full], "plain first");
+    let Response::FileDiff { diff, .. } = &r[1] else {
+        unreachable!()
+    };
+    assert_eq!(diff.base.lines, vec!["pub fn g() {}"]);
+    assert_eq!(diff.head.lines.len(), 3);
+    assert!(
+        diff.head.highlights.iter().any(|l| !l.is_empty()),
+        "highlighted in the second answer"
+    );
+    service.send(
+        8,
+        Request::FileDiff {
+            base: "main~1".into(),
+            head: "main".into(),
+            path: "no/such/file.rs".into(),
+        },
+    );
+    assert!(failed(&until_last(&rx, 8, &mut others)[0]).is_some());
     assert!(others.is_empty(), "no stray replies: {others:?}");
 }
 

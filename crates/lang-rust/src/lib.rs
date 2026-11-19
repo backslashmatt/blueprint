@@ -16,6 +16,7 @@
 //! - a method's signature includes its `impl` header, so changing the impl's
 //!   generics or `where` clause changes every method's surface.
 
+pub mod highlight;
 use std::collections::{HashMap, HashSet};
 
 use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser, Reference};
@@ -45,6 +46,10 @@ impl LanguageAnalyser for Rust {
 
     fn analyse(&self, _path: &RepoPath, bytes: &[u8]) -> FileFacts {
         analyse(bytes)
+    }
+
+    fn highlight(&self, bytes: &[u8]) -> Vec<blueprint_model::lang::Highlight> {
+        highlight::highlight(bytes)
     }
 }
 

@@ -51,7 +51,11 @@ nodes:
   L2:cargo:crates/engine#resident  Module  "resident"  Exact  crates/engine/src/resident.rs  Public
   L2:cargo:crates/engine#service  Module  "service"  Exact  crates/engine/src/service.rs  Public
   L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
+  L2:cargo:crates/engine#source_diff  Module  "source_diff"  Exact  crates/engine/src/source_diff.rs  Public
+  L2:cargo:crates/engine#source_diff/tests  Module  "source_diff::tests"  Exact  crates/engine/src/source_diff.rs  Private
   L2:cargo:crates/engine#tests%2F  Directory  "tests/"  Unknown  crates/engine/tests
+  L2:cargo:crates/lang-rust#highlight  Module  "highlight"  Exact  crates/lang-rust/src/highlight.rs  Public
+  L2:cargo:crates/lang-rust#highlight/tests  Module  "highlight::tests"  Exact  crates/lang-rust/src/highlight.rs  Private
   L2:cargo:crates/lang-rust#tests%2F  Directory  "tests/"  Unknown  crates/lang-rust/tests
   L2:cargo:crates/model#codec  Module  "codec"  Exact  crates/model/src/codec.rs  Public
   L2:cargo:crates/model#codec/tests  Module  "codec::tests"  Exact  crates/model/src/codec.rs  Private

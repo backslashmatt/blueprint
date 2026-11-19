@@ -29,6 +29,43 @@ pub trait LanguageAnalyser: Sync {
     /// The facts must depend on the bytes alone, not on `path`: the engine
     /// stores them by blob id, so two files with the same content share them.
     fn analyse(&self, path: &RepoPath, bytes: &[u8]) -> FileFacts;
+
+    /// The tokens of one file to colour in the code view (§5.4, L4), sorted
+    /// by start and not overlapping. Must never panic, whatever the bytes;
+    /// the default colours nothing.
+    fn highlight(&self, bytes: &[u8]) -> Vec<Highlight> {
+        let _ = bytes;
+        Vec::new()
+    }
+}
+
+/// What kind of token a [`Highlight`] is, for colouring code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TokenClass {
+    /// A keyword, such as `fn` or `pub`.
+    Keyword,
+    /// A type name, including primitive types.
+    Type,
+    /// The name of a function or macro where it is defined or called.
+    Function,
+    /// A string or character literal.
+    String,
+    /// A number or boolean literal.
+    Number,
+    /// A comment.
+    Comment,
+}
+
+/// One coloured token: a byte range of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Highlight {
+    /// First byte.
+    pub start: u32,
+    /// One past the last byte.
+    pub end: u32,
+    /// What it is.
+    pub class: TokenClass,
 }
 
 /// What one file defines and refers to.

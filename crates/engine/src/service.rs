@@ -352,6 +352,35 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                 warnings,
             }))
         }
+        Request::FileDiff { base, head, path } => {
+            let repo_path = repo()?;
+            let file = RepoPath::parse(path).map_err(|e| format!("{path}: {e}"))?;
+            let repo = Repo::open(&repo_path).map_err(|e| e.to_string())?;
+            let read = |rev: &str| -> Result<Option<Vec<u8>>, String> {
+                let commit = repo.resolve(rev).map_err(|e| e.to_string())?;
+                repo.blob_at(commit, file.segments())
+                    .map_err(|e| e.to_string())
+            };
+            let (b, h) = (read(base)?, read(head)?);
+            if b.is_none() && h.is_none() {
+                return Err(format!("{path}: in neither commit"));
+            }
+            // The plain diff first: highlighting parses both files whole.
+            let answer = |detail: Detail| Response::FileDiff {
+                path: path.clone(),
+                detail,
+                diff: Arc::new(crate::source_diff::file_diff(
+                    &file,
+                    b.as_deref(),
+                    h.as_deref(),
+                    detail == Detail::Full,
+                )),
+            };
+            sent(emit(answer(Detail::Coarse)))?;
+            check()?;
+            // The last answer: no check after it, so it is the only final one.
+            sent(emit(answer(Detail::Full)))
+        }
         Request::Source {
             rev,
             path: file,

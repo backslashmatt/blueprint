@@ -12,6 +12,7 @@ pub mod l34;
 pub mod resident;
 pub mod service;
 pub mod source;
+pub mod source_diff;
 
 use blueprint_model::{Model, RepoPath};
 
