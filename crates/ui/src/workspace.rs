@@ -10,6 +10,7 @@ use blueprint_protocol::model::NodeId;
 use blueprint_protocol::model::diff::{FileText, RowKind};
 use blueprint_protocol::model::lang::TokenClass;
 use blueprint_protocol::{Detail, Reply, Request, RequestId, Response};
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, FocusHandle, HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
@@ -51,6 +52,38 @@ pub struct Review {
     code_request: Option<RequestId>,
 }
 
+/// One timed `--script` key (#95).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyTiming {
+    /// The key, by its GPUI name.
+    pub key: String,
+    /// The action it ran (`crate::actions` id), or `palette.key` for a key
+    /// typed into the palette.
+    pub action: Option<&'static str>,
+    /// Whether it opened a code view (a drill on a leaf, or `c`).
+    pub opened_code: bool,
+    /// From the key to the end of the next frame's paint: its input
+    /// latency, and for a scroll its frame time.
+    pub first_frame_ms: f64,
+    /// From the key to the end of the paint of the first frame drawn once
+    /// its effect is complete (a drill's view laid out, a code view's diff
+    /// arrived).
+    pub settled_ms: f64,
+}
+
+#[derive(Debug)]
+struct Pending {
+    key: String,
+    action: Option<&'static str>,
+    opened_code: bool,
+    start: std::time::Instant,
+    first_frame_ms: Option<f64>,
+    /// A frame callback is registered.
+    armed: bool,
+    /// The screen had settled when it was registered.
+    armed_settled: bool,
+}
+
 /// What the workspace shows.
 #[derive(Debug, Clone)]
 pub enum Screen {
@@ -82,6 +115,15 @@ pub struct Workspace {
     code_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
+    /// Whether `--script` keys are timed (#95): pressed one at a time, each
+    /// once the last one's effect is on screen.
+    timed: bool,
+    /// The timed key in flight.
+    pending: Option<Pending>,
+    /// The timed keys so far, in order.
+    pub timings: Vec<KeyTiming>,
+    /// When the last frame finished painting, while keys are timed.
+    painted: Rc<std::cell::Cell<Option<std::time::Instant>>>,
     /// A message about the last action that went wrong outside the engine
     /// (the folder dialog), shown above the screen until the next key.
     pub notice: Option<String>,
@@ -120,6 +162,10 @@ impl Workspace {
             code_scroll: UniformListScrollHandle::new(),
             palette: None,
             notice: None,
+            timed: false,
+            pending: None,
+            timings: Vec::new(),
+            painted: Rc::default(),
             seeds: HashMap::new(),
             layout_generation: 0,
         };
@@ -238,11 +284,8 @@ impl Workspace {
                 if let Some(list) = ReviewList::from_response(r) {
                     self.screen = Screen::List(list);
                     // Keys up to the one that opens a review; the rest wait
-                    // for its map.
-                    while !self.script.is_empty() && matches!(self.screen, Screen::List(_)) {
-                        let key = self.script.remove(0);
-                        self.key(&key, cx);
-                    }
+                    // for its map (`replay`).
+                    self.replay(cx);
                 }
             }
             (
@@ -316,25 +359,91 @@ impl Workspace {
     /// Whether `--script` keys are still waiting to be pressed.
     #[must_use]
     pub fn script_pending(&self) -> bool {
-        !self.script.is_empty()
+        !self.script.is_empty() || self.pending.is_some()
     }
 
-    /// Presses waiting `--script` keys on the full map, each once the view
-    /// it acts on is laid out.
-    fn replay(&mut self, cx: &mut Context<Self>) {
-        loop {
-            let ready = matches!(
-                &self.screen,
-                Screen::Review(r) if r.mapped == Some(Detail::Full)
+    /// Whether the screen is settled: the list, or a review whose full map
+    /// is laid out and whose code view, if open, has its full diff.
+    fn settled(&self) -> bool {
+        match &self.screen {
+            Screen::List(_) => true,
+            Screen::Review(r) => {
+                r.mapped == Some(Detail::Full)
                     && r.layout.is_some()
-                    && r.code.as_ref().is_none_or(|c| c.detail == Some(Detail::Full) || c.error.is_some())
-            );
-            if !ready || self.script.is_empty() {
-                return;
+                    && r.code
+                        .as_ref()
+                        .is_none_or(|c| c.detail == Some(Detail::Full) || c.error.is_some())
             }
-            let key = self.script.remove(0);
-            self.key(&key, cx);
+            _ => false,
         }
+    }
+
+    /// Presses waiting `--script` keys, each once the screen it acts on has
+    /// settled: list keys at once, the keys after the one that opens a
+    /// review once its full map is laid out, and so on. Timed, one key per
+    /// settled frame.
+    fn replay(&mut self, cx: &mut Context<Self>) {
+        while !self.script.is_empty() && self.pending.is_none() && self.settled() {
+            let key = self.script.remove(0);
+            let action = match &self.palette {
+                Some(_) => Some("palette.key"),
+                None => actions::for_key(&self.scopes(), &key).map(|a| a.id),
+            };
+            let had_code = matches!(&self.screen, Screen::Review(r) if r.code.is_some());
+            let start = std::time::Instant::now();
+            self.key(&key, cx);
+            if self.timed {
+                let opened_code =
+                    !had_code && matches!(&self.screen, Screen::Review(r) if r.code.is_some());
+                self.pending = Some(Pending {
+                    key,
+                    action,
+                    opened_code,
+                    start,
+                    first_frame_ms: None,
+                    armed: false,
+                    armed_settled: false,
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    /// After a frame is painted with a timed key in flight: its first frame,
+    /// and if the screen had settled for that frame, the key is done.
+    fn frame_painted(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.pending.as_mut() else {
+            return;
+        };
+        // Up to the end of the frame's paint; presenting it is the
+        // platform's and waits for the display.
+        let end = self
+            .painted
+            .get()
+            .filter(|t| *t >= p.start)
+            .unwrap_or_else(std::time::Instant::now);
+        let ms = end.duration_since(p.start).as_secs_f64() * 1000.0;
+        let first = *p.first_frame_ms.get_or_insert(ms);
+        p.armed = false;
+        if p.armed_settled {
+            let p = self.pending.take();
+            if let Some(p) = p {
+                self.timings.push(KeyTiming {
+                    key: p.key,
+                    action: p.action,
+                    opened_code: p.opened_code,
+                    first_frame_ms: first,
+                    settled_ms: ms,
+                });
+            }
+            self.replay(cx);
+        }
+        cx.notify();
+    }
+
+    /// Times `--script` keys from now on (#95).
+    pub fn time_keys(&mut self) {
+        self.timed = true;
     }
 
     /// Lays out the current view on a background thread, seeded from its
@@ -580,11 +689,47 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let timed = self.timed;
+        let painted = Rc::clone(&self.painted);
+        let screen = self.render_screen(window, cx);
+        // Timed keys (#95): an empty canvas painted last marks when this
+        // frame's paint is done.
+        div().size_full().child(screen).when(timed, |d| {
+            d.child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, (), _, _| {
+                        painted.set(Some(std::time::Instant::now()));
+                    },
+                )
+                .size_0(),
+            )
+        })
+    }
+}
+
+impl Workspace {
+    fn render_screen(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = Theme::for_appearance(window.appearance());
         let dark = theme == Theme::DARK;
         let scopes = self.scopes();
         if let Some(p) = self.palette.as_mut() {
             p.rescope(scopes);
+        }
+        let settled = self.settled();
+        if let Some(p) = self.pending.as_mut()
+            && !p.armed
+        {
+            p.armed = true;
+            p.armed_settled = settled;
+            let ws = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = ws.update(cx, |w, cx| w.frame_painted(cx));
+            });
         }
         let root = div()
             .id("workspace")

@@ -755,6 +755,9 @@ fn measure(
 
     if let Some(app) = app {
         out.push(cold_start(app, base_app)?);
+        if let Some(medium) = repos.iter().find(|r| r.name == "medium") {
+            out.extend(ui_session(app, &repos::checkout_dir(dest, medium))?);
+        }
     }
 
     // 40 spawns per sample keep one sample around 50 ms, so a 5% change is
@@ -989,6 +992,146 @@ fn cold_start(app: &Path, base_app: Option<&Path>) -> Result<Measurement, Error>
         )),
         gated: true,
     })
+}
+
+/// The scripted UI session (#95): open the review the app suggests on the
+/// checkout, drill down three levels and back, open a node's code, scroll
+/// it and move about the map, each key pressed once the last one's effect
+/// is painted.
+const UI_SCRIPT: &str = "down,up,enter,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,backspace";
+
+/// Sessions measured, after one unmeasured session that indexes the
+/// checkout.
+const UI_SESSIONS: usize = 3;
+
+/// One timed key: its action, whether it opened a code view, and the
+/// milliseconds to its first painted frame and to its settled one.
+type KeyTime = (String, bool, f64, f64);
+
+/// One timed session: its `--timings` keys.
+fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Error> {
+    let dir = std::env::temp_dir();
+    let report = dir.join(format!("bp-bench-ui-review-{}.json", std::process::id()));
+    let timings = dir.join(format!("bp-bench-ui-timings-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&timings);
+    let status = Command::new(app)
+        .arg(checkout)
+        .args(["--script", UI_SCRIPT, "--review-report"])
+        .arg(&report)
+        .arg("--timings")
+        .arg(&timings)
+        .env("BLUEPRINT_CACHE_DIR", cache)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(format!("`{} --timings` failed: {status}", app.display()).into());
+    }
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&timings)?)?;
+    let _ = std::fs::remove_file(&report);
+    let _ = std::fs::remove_file(&timings);
+    let keys = json["keys"].as_array().ok_or("timings have no `keys`")?;
+    keys.iter()
+        .map(|k| {
+            Ok((
+                k["action"].as_str().unwrap_or("").to_owned(),
+                k["opened_code"].as_bool().unwrap_or(false),
+                k["first_frame_ms"].as_f64().ok_or("no first_frame_ms")?,
+                k["settled_ms"].as_f64().ok_or("no settled_ms")?,
+            ))
+        })
+        .collect()
+}
+
+/// Actions that scroll or move about without new data: their first frame
+/// is a frame time (§4 scrolling and pan budgets).
+fn scrolls(action: &str) -> bool {
+    matches!(
+        action,
+        "list.up"
+            | "list.down"
+            | "list.first"
+            | "list.last"
+            | "map.left"
+            | "map.right"
+            | "map.up"
+            | "map.down"
+            | "map.next"
+            | "code.up"
+            | "code.down"
+            | "code.page_up"
+            | "code.page_down"
+            | "code.first"
+            | "code.last"
+            | "code.next_change"
+            | "code.previous_change"
+            | "code.scroll_left"
+            | "code.scroll_right"
+    )
+}
+
+/// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on the
+/// medium checkout: each row is the worst key of its kind in a session, and
+/// the best session is kept (DR 0002). Times run from the key to the end of
+/// the paint of the frame that shows it; presenting waits for the display.
+fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
+    let cache = std::env::temp_dir().join(format!("bp-bench-ui-cache-{}", std::process::id()));
+    ui_run(app, checkout, &cache)?;
+    let mut best: [f64; 3] = [f64::INFINITY; 3];
+    let mut drills = 0;
+    for _ in 0..UI_SESSIONS {
+        let keys = ui_run(app, checkout, &cache)?;
+        let worst = |pick: &dyn Fn(&KeyTime) -> Option<f64>| {
+            keys.iter().filter_map(pick).fold(0.0_f64, f64::max)
+        };
+        let drill = worst(&|k| {
+            (matches!(k.0.as_str(), "map.drill_down" | "map.drill_up") && !k.1).then_some(k.3)
+        });
+        let input = worst(&|k| Some(k.2));
+        let frame = worst(&|k| scrolls(&k.0).then_some(k.2));
+        drills = keys
+            .iter()
+            .filter(|k| matches!(k.0.as_str(), "map.drill_down" | "map.drill_up") && !k.1)
+            .count();
+        for (b, v) in best.iter_mut().zip([drill, input, frame]) {
+            *b = b.min(v);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&cache);
+    let row = |name: &str, value: f64, note: String| Measurement {
+        name: name.into(),
+        repo: Some("medium".into()),
+        value,
+        base: None,
+        unit: "ms".into(),
+        budget: Some(name.into()),
+        samples: UI_SESSIONS,
+        note: Some(note),
+        gated: false,
+    };
+    let session = format!("best of {UI_SESSIONS} scripted sessions (`blueprint --timings`)");
+    Ok(vec![
+        row(
+            "drill",
+            best[0],
+            format!("slowest of {drills} drills, key to the laid-out view painted; {session}"),
+        ),
+        row(
+            "input_latency",
+            best[1],
+            format!("slowest key of the session to its first painted frame; {session}"),
+        ),
+        row(
+            "frame_time",
+            best[2],
+            format!("slowest scroll or move key to its painted frame; {session}"),
+        ),
+        row(
+            "frame_time_120hz",
+            best[2],
+            format!("the frame_time row against the 120 Hz budget; {session}"),
+        ),
+    ])
 }
 
 /// A Rust file of `lines` lines, the same every run: functions of ten lines
