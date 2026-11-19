@@ -9,6 +9,7 @@ use std::rc::Rc;
 use blueprint_protocol::model::NodeId;
 use blueprint_protocol::model::diff::{FileText, RowKind};
 use blueprint_protocol::model::lang::TokenClass;
+use blueprint_protocol::model::review::{Mark, ReviewBasis, ReviewState};
 use blueprint_protocol::{Detail, Reply, Request, RequestId, Response};
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -55,6 +56,9 @@ pub struct Review {
     pub list: Option<Findings>,
     /// Whether the map is on screen; a review opens on its findings.
     pub on_map: bool,
+    /// Which changed nodes are reviewed (#115), once the full diff and the
+    /// stored marks have both arrived.
+    pub reviewed: Option<ReviewState>,
     /// The file diff request the code view waits for.
     code_request: Option<RequestId>,
 }
@@ -145,6 +149,13 @@ pub struct Workspace {
     pub notice: Option<String>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
+    /// Every review mark stored for the open repository (#115), as the
+    /// engine last answered plus the reviewer's marks since.
+    marks: Vec<Mark>,
+    /// The request for the stored marks, while it is unanswered.
+    marks_request: Option<RequestId>,
+    /// Marks sent to be stored and not yet answered.
+    mark_requests: std::collections::HashSet<RequestId>,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -187,6 +198,9 @@ impl Workspace {
             frame_started: std::time::Instant::now(),
             seeds: HashMap::new(),
             layout_generation: 0,
+            marks: Vec::new(),
+            marks_request: None,
+            mark_requests: std::collections::HashSet::new(),
         };
         if let Some(path) = path {
             w.open(path);
@@ -198,6 +212,9 @@ impl Workspace {
     /// asks for its refs. The engine drops its work on the previous one.
     pub fn open(&mut self, path: &str) {
         self.list = None;
+        self.marks.clear();
+        self.marks_request = None;
+        self.mark_requests.clear();
         self.palette = None;
         // Layouts still running belong to the repository left.
         self.layout_generation += 1;
@@ -268,6 +285,45 @@ impl Workspace {
 
     /// Takes in one engine reply.
     pub fn receive(&mut self, reply: Reply, cx: &mut Context<Self>) {
+        match &reply.response {
+            Response::Marks { marks, warning } if self.marks_request == Some(reply.id) => {
+                self.marks_request = None;
+                self.marks.clone_from(marks);
+                if let Some(w) = warning {
+                    self.notice = Some(w.clone());
+                }
+                self.refresh_reviewed();
+                self.replay(cx);
+                cx.notify();
+                return;
+            }
+            Response::Marked { warning, .. } => {
+                self.mark_requests.remove(&reply.id);
+                if let Some(w) = warning {
+                    self.notice = Some(w.clone());
+                }
+                // Observers wait for marks to be stored (`marks_pending`).
+                cx.notify();
+                return;
+            }
+            Response::Failed { error } if self.mark_requests.remove(&reply.id) => {
+                self.notice = Some(format!("The review mark was not saved: {error}"));
+                cx.notify();
+                return;
+            }
+            Response::Failed { error } if self.marks_request == Some(reply.id) => {
+                self.marks_request = None;
+                self.notice = Some(format!("Review marks could not be loaded: {error}"));
+                cx.notify();
+                return;
+            }
+            // A mark sent meanwhile replaced the load: load again, after it.
+            Response::Superseded if self.marks_request == Some(reply.id) => {
+                self.marks_request = Some(self.request(Request::Marks));
+                return;
+            }
+            _ => {}
+        }
         if let Screen::Review(review) = &mut self.screen
             && review.code_request == Some(reply.id)
         {
@@ -327,14 +383,20 @@ impl Workspace {
                 let detail = *detail;
                 let request = reply.id;
                 let task = cx.background_executor().spawn(async move {
+                    // Review state needs the change weights, which only the
+                    // full diff has; it reads both models.
+                    let basis = (detail == Detail::Full)
+                        .then(|| std::sync::Arc::new(ReviewBasis::new(&diff, &base, &head)));
                     let map = Map::new(base, head, &diff);
                     // The list with the map it is labelled and shown on.
                     let list = Findings::new(&diff, &map);
-                    (map, list)
+                    (map, list, basis)
                 });
                 cx.spawn(async move |this, cx| {
-                    let (map, list) = task.await;
-                    let _ = this.update(cx, |w, cx| w.map_ready(request, detail, map, list, cx));
+                    let (map, list, basis) = task.await;
+                    let _ = this.update(cx, |w, cx| {
+                        w.map_ready(request, detail, map, list, basis, cx);
+                    });
                 })
                 .detach();
             }
@@ -351,6 +413,7 @@ impl Workspace {
         detail: Detail,
         mut map: Map,
         mut list: Findings,
+        basis: Option<std::sync::Arc<ReviewBasis>>,
         cx: &mut Context<Self>,
     ) {
         if self.waiting != Some(request) {
@@ -396,10 +459,20 @@ impl Workspace {
         review.list = Some(list);
         review.map = Some(map);
         review.mapped = Some(detail);
+        if let Some(basis) = basis {
+            review.reviewed = Some(basis.state(&self.marks));
+        }
         // The old layout belongs to the old map.
         review.layout = None;
         self.lay_out(cx);
         cx.notify();
+    }
+
+    /// Whether the stored review marks, or a mark being stored, are still
+    /// awaited.
+    #[must_use]
+    pub fn marks_pending(&self) -> bool {
+        self.marks_request.is_some() || !self.mark_requests.is_empty()
     }
 
     /// Whether `--script` keys are still waiting to be pressed.
@@ -416,6 +489,7 @@ impl Workspace {
             Screen::Review(r) => {
                 r.mapped == Some(Detail::Full)
                     && r.layout.is_some()
+                    && self.marks_request.is_none()
                     && r.code
                         .as_ref()
                         .is_none_or(|c| c.detail == Some(Detail::Full) || c.error.is_some())
@@ -631,7 +705,77 @@ impl Workspace {
             Scope::Code => self.run_code(id),
             Scope::Findings => self.run_findings(id, cx),
             Scope::Map => self.run_map(id, cx),
+            Scope::Review if id == "review.reviewed" => self.toggle_reviewed(),
             Scope::Review => self.back_to_list(),
+        }
+    }
+
+    /// The node `r` marks: the code's, else the highlighted finding's on
+    /// the findings list, else the map's selected node.
+    fn review_target(&self) -> Option<NodeId> {
+        let Screen::Review(r) = &self.screen else {
+            return None;
+        };
+        let map = r.map.as_ref()?;
+        let selected = || {
+            map.selected
+                .and_then(|i| map.view.nodes.get(i))
+                .map(|n| n.id.clone())
+        };
+        if r.code.is_some() || r.on_map {
+            return selected();
+        }
+        r.list.as_ref()?.current().and_then(Item::target).cloned()
+    }
+
+    /// Marks the target node reviewed, or, if its own mark says reviewed,
+    /// not reviewed (its note stays). Applied at once; the engine stores it.
+    fn toggle_reviewed(&mut self) {
+        let target = self.review_target();
+        let Screen::Review(r) = &mut self.screen else {
+            return;
+        };
+        let Some(state) = r.reviewed.as_ref() else {
+            self.notice = Some("Review marks are available once the whole diff has loaded.".into());
+            return;
+        };
+        let Some(node) = target else {
+            self.notice = Some("Nothing is selected to mark.".into());
+            return;
+        };
+        let Some(key) = state.key(&node) else {
+            self.notice = Some("That node did not change in this review.".into());
+            return;
+        };
+        let own = state.mark(&node);
+        let marked = own.is_some_and(|m| m.reviewed);
+        if !marked && state.is_reviewed(&node) {
+            self.notice =
+                Some("Already reviewed, by a mark above it or on every change under it.".into());
+            return;
+        }
+        let mark = Mark {
+            node,
+            key,
+            reviewed: !marked,
+            note: own.and_then(|m| m.note.clone()),
+        };
+        self.marks
+            .retain(|m| !(m.node == mark.node && m.key == mark.key));
+        self.marks.push(mark.clone());
+        self.refresh_reviewed();
+        let id = self.request(Request::Mark { mark });
+        self.mark_requests.insert(id);
+    }
+
+    /// Recomputes the review state from the marks: cheap, as the basis is
+    /// kept (DR 0011).
+    fn refresh_reviewed(&mut self) {
+        if let Screen::Review(r) = &mut self.screen
+            && let Some(state) = r.reviewed.as_ref()
+        {
+            let basis = std::sync::Arc::clone(state.basis());
+            r.reviewed = Some(basis.state(&self.marks));
         }
     }
 
@@ -707,6 +851,8 @@ impl Workspace {
                 head: head.clone(),
             });
             self.waiting = Some(id);
+            // The stored marks, for the review state once the diff is in.
+            self.marks_request = Some(self.request(Request::Marks));
             self.findings_scroll = UniformListScrollHandle::new();
             self.screen = Screen::Review(Box::new(Review {
                 base,
@@ -722,6 +868,7 @@ impl Workspace {
                 camera: Camera::default(),
                 list: None,
                 on_map: false,
+                reviewed: None,
             }));
         }
     }
@@ -991,9 +1138,13 @@ impl Workspace {
                 } else {
                     crumbs.join(" › ")
                 };
+                let progress = r.reviewed.as_ref().map_or(String::new(), |st| {
+                    let (done, total) = st.progress();
+                    format!("; reviewed {done} of {total}")
+                });
                 let root = root
                     .child(format!(
-                        "Reviewing {} → {}: {} findings, {} changed nodes ({state})",
+                        "Reviewing {} → {}: {} findings, {} changed nodes ({state}{progress})",
                         short(&r.base),
                         short(&r.head),
                         r.findings,
@@ -1001,11 +1152,11 @@ impl Workspace {
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, m the map, Esc back to the list, F1 all actions.".to_owned()
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
@@ -1013,13 +1164,20 @@ impl Workspace {
                 if !r.on_map
                     && let (Some(list), Some(map)) = (&r.list, &r.map)
                 {
-                    return findings_view(root, list, map, &self.findings_scroll);
+                    return findings_view(
+                        root,
+                        list,
+                        map,
+                        r.reviewed.as_ref(),
+                        &self.findings_scroll,
+                    );
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
                         let size = window.viewport_size();
                         root.child(canvas(
                             map,
+                            r.reviewed.as_ref(),
                             l,
                             r.camera,
                             (f32::from(size.width), f32::from(size.height)),
@@ -1040,6 +1198,7 @@ fn findings_view<E: ParentElement>(
     root: E,
     list: &Findings,
     map: &Map,
+    reviewed: Option<&ReviewState>,
     scroll: &UniformListScrollHandle,
 ) -> E {
     if list.items.is_empty() {
@@ -1053,7 +1212,11 @@ fn findings_view<E: ParentElement>(
         .enumerate()
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
-            format!("{mark} {}", findings::label(item, map))
+            let done = item
+                .target()
+                .is_some_and(|t| reviewed.is_some_and(|r| r.is_reviewed(t)));
+            let check = if done { "✓" } else { " " };
+            format!("{mark} {check} {}", findings::label(item, map))
         })
         .collect();
     root.child(
@@ -1211,7 +1374,14 @@ fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
 /// The view as positioned boxes and edge segments (quads, DR 0003),
 /// centred on the selected node. Only what falls inside `viewport` is built
 /// (§4: no layout of off-screen content).
-fn canvas(map: &Map, l: &Layout, camera: Camera, viewport: (f32, f32), dark: bool) -> gpui::Div {
+fn canvas(
+    map: &Map,
+    reviewed: Option<&ReviewState>,
+    l: &Layout,
+    camera: Camera,
+    viewport: (f32, f32),
+    dark: bool,
+) -> gpui::Div {
     let m = Metrics::default();
     let (vw, vh) = (viewport.0, (viewport.1 - 120.0).max(100.0));
     let centre = map
@@ -1266,7 +1436,13 @@ fn canvas(map: &Map, l: &Layout, camera: Camera, viewport: (f32, f32), dark: boo
         } else {
             0xced4da
         };
-        let mut label = node.name.clone();
+        // Reviewed nodes (#115) carry a check: a mark, not only a colour.
+        let done = reviewed.is_some_and(|r| r.is_reviewed(&node.id));
+        let mut label = if done {
+            format!("✓ {}", node.name)
+        } else {
+            node.name.clone()
+        };
         if node.has_children {
             label.push_str(" ›");
         }
@@ -1455,7 +1631,7 @@ mod tests {
                         | "findings.show"
                         | "findings.map"
                 ),
-                Scope::Review => a.id == "review.back",
+                Scope::Review => matches!(a.id, "review.back" | "review.reviewed"),
                 Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };
             assert!(handled, "{} has no handler", a.id);

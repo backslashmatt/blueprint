@@ -5,6 +5,7 @@
 //! [`ReviewState`] from them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,24 +61,38 @@ pub fn fingerprints(model: &Model) -> HashMap<NodeId, u64> {
 
 /// Which changed nodes are reviewed, from the marks a reviewer made.
 ///
-/// A node is reviewed when it is marked reviewed, or when every changed
+/// A node is reviewed when it, or a node above it, is marked reviewed:
+/// reviewing a module reviews what is in it. It is also reviewed when every changed
 /// child is reviewed and nothing in the node itself changed apart from its
 /// children: no lines of its own (its weight less its children's), and no
 /// move, rename or surface change of its own. A changed node with no changed
 /// children is reviewed only by its own mark.
+///
+/// Built in two steps: a [`ReviewBasis`] once per diff, which reads both
+/// models, then [`ReviewBasis::state`] for each set of marks, which only
+/// visits changed nodes, so a front end can apply a mark at once.
 #[derive(Debug, Clone, Default)]
 pub struct ReviewState {
-    keys: HashMap<NodeId, u64>,
-    changed: BTreeSet<NodeId>,
-    own_mark: BTreeSet<NodeId>,
+    basis: Arc<ReviewBasis>,
     marks: HashMap<NodeId, Mark>,
     reviewed: BTreeSet<NodeId>,
 }
 
+/// What a review state depends on besides the marks: each changed node's
+/// key, its changed children, and whether only its own mark can make it
+/// reviewed.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewBasis {
+    keys: HashMap<NodeId, u64>,
+    /// Each changed node and ancestor of one, with its changed children.
+    changed: BTreeMap<NodeId, Vec<NodeId>>,
+    own_mark: BTreeSet<NodeId>,
+}
+
 impl ReviewState {
     /// The state of `diff` between `base` and `head`, given every mark
-    /// stored for the repository. Marks whose key no longer matches, because
-    /// the node's change is not the one that was marked, are ignored.
+    /// stored for the repository: [`ReviewBasis::new`], then
+    /// [`ReviewBasis::state`].
     #[must_use]
     pub fn new<'a>(
         diff: &Diff,
@@ -85,6 +100,21 @@ impl ReviewState {
         head: &Model,
         marks: impl IntoIterator<Item = &'a Mark>,
     ) -> ReviewState {
+        Arc::new(ReviewBasis::new(diff, base, head)).state(marks)
+    }
+
+    /// What this state was computed from.
+    #[must_use]
+    pub fn basis(&self) -> &Arc<ReviewBasis> {
+        &self.basis
+    }
+}
+
+impl ReviewBasis {
+    /// The basis of `diff` between `base` and `head`: one pass over each
+    /// model.
+    #[must_use]
+    pub fn new(diff: &Diff, base: &Model, head: &Model) -> ReviewBasis {
         let (base_fp, head_fp) = (fingerprints(base), fingerprints(head));
         // Each changed node's base id, for the nodes whose id changed.
         let mut base_id: HashMap<NodeId, NodeId> = HashMap::new();
@@ -183,32 +213,57 @@ impl ReviewState {
             h.u64(if b == id { 0 } else { digest(b) });
             keys.insert(id.clone(), h.finish());
         }
-        let marks: HashMap<NodeId, Mark> = marks
-            .into_iter()
-            .filter(|m| keys.get(&m.node) == Some(&m.key))
-            .map(|m| (m.node.clone(), m.clone()))
-            .collect();
-
-        // Children sort after parents (level first), so in reverse every
-        // child is settled before its parent.
-        let mut reviewed = BTreeSet::new();
         let mut own_mark = BTreeSet::new();
-        for (id, children) in changed.iter().rev() {
-            let needs_own =
-                children.is_empty() || own_change.contains(id) || own_lines(id, children);
-            if needs_own {
+        for (id, children) in &changed {
+            if children.is_empty() || own_change.contains(id) || own_lines(id, children) {
                 own_mark.insert(id.clone());
             }
+        }
+        let changed = changed
+            .into_iter()
+            .map(|(id, children)| {
+                let mut c: Vec<NodeId> = children.into_iter().map(|(c, _)| c).collect();
+                c.dedup();
+                (id, c)
+            })
+            .collect();
+        ReviewBasis {
+            keys,
+            changed,
+            own_mark,
+        }
+    }
+
+    /// The state given every mark stored for the repository. Marks whose
+    /// key no longer matches, because the node's change is not the one that
+    /// was marked, are ignored.
+    #[must_use]
+    pub fn state<'a>(self: &Arc<Self>, marks: impl IntoIterator<Item = &'a Mark>) -> ReviewState {
+        let marks: HashMap<NodeId, Mark> = marks
+            .into_iter()
+            .filter(|m| self.keys.get(&m.node) == Some(&m.key))
+            .map(|m| (m.node.clone(), m.clone()))
+            .collect();
+        // Parents sort before children (level first): a node marked
+        // reviewed covers every changed node under it.
+        let mut covered: HashSet<&NodeId> = HashSet::new();
+        for (id, children) in &self.changed {
+            if covered.contains(id) || marks.get(id).is_some_and(|m| m.reviewed) {
+                covered.extend(children);
+            }
+        }
+        // In reverse every child is settled before its parent.
+        let mut reviewed = BTreeSet::new();
+        for (id, children) in self.changed.iter().rev() {
             let marked = marks.get(id).is_some_and(|m| m.reviewed);
-            let rolls_up = !needs_own && children.iter().all(|(c, _)| reviewed.contains(c));
-            if marked || rolls_up {
+            let rolls_up =
+                !self.own_mark.contains(id) && children.iter().all(|c| reviewed.contains(c));
+            if marked || covered.contains(id) || rolls_up {
                 reviewed.insert(id.clone());
             }
         }
         ReviewState {
-            keys,
-            changed: changed.into_keys().collect(),
-            own_mark,
+            basis: Arc::clone(self),
             marks,
             reviewed,
         }
@@ -222,7 +277,7 @@ impl ReviewState {
 
     /// Every changed node, and every ancestor of one, ordered by id.
     pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
-        self.changed.iter()
+        self.changed.keys()
     }
 
     /// Whether only `id`'s own mark can make it reviewed: it has no changed
@@ -235,7 +290,32 @@ impl ReviewState {
     /// Whether `id` changed, itself or below it.
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {
-        self.changed.contains(id)
+        self.changed.contains_key(id)
+    }
+}
+
+impl ReviewState {
+    /// See [`ReviewBasis::key`].
+    #[must_use]
+    pub fn key(&self, id: &NodeId) -> Option<u64> {
+        self.basis.key(id)
+    }
+
+    /// See [`ReviewBasis::changed`].
+    pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
+        self.basis.changed()
+    }
+
+    /// See [`ReviewBasis::needs_own_mark`].
+    #[must_use]
+    pub fn needs_own_mark(&self, id: &NodeId) -> bool {
+        self.basis.needs_own_mark(id)
+    }
+
+    /// See [`ReviewBasis::is_changed`].
+    #[must_use]
+    pub fn is_changed(&self, id: &NodeId) -> bool {
+        self.basis.is_changed(id)
     }
 
     /// Whether `id` is reviewed, by its own mark or by roll-up.
@@ -256,12 +336,9 @@ impl ReviewState {
     /// changed node is reviewed.
     #[must_use]
     pub fn progress(&self) -> (usize, usize) {
-        let done = self
-            .own_mark
-            .iter()
-            .filter(|id| self.reviewed.contains(*id))
-            .count();
-        (done, self.own_mark.len())
+        let own = &self.basis.own_mark;
+        let done = own.iter().filter(|id| self.reviewed.contains(*id)).count();
+        (done, own.len())
     }
 }
 
@@ -417,6 +494,24 @@ mod tests {
             assert!(both.is_reviewed(&id(p)), "{p:?} rolls up");
         }
         assert_eq!(both.progress(), (2, 2));
+    }
+
+    #[test]
+    fn a_mark_on_a_parent_covers_everything_changed_under_it() {
+        let (base, head, diff) = (model(1, 2, None, 0), model(10, 20, None, 0), diff(1));
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        let m = mark(&blank, &["m"]);
+        let state = ReviewState::new(&diff, &base, &head, [&m]);
+        for p in [
+            &["m"][..],
+            &["m", "c"],
+            &["m", "c", "f"],
+            &["m", "c", "g"],
+            &[],
+        ] {
+            assert!(state.is_reviewed(&id(p)), "{p:?}");
+        }
+        assert_eq!(state.progress(), (3, 3), "c's own change too");
     }
 
     #[test]

@@ -40,6 +40,7 @@ Names below L1 come after their system's, as in `blueprint-store › segment`. O
 |---|---|
 | ↑ ↓ Home End | Choose a finding |
 | Enter | Show it on the map: drilled to its node (a dependency's dependent, a cycle's first node) and selected |
+| `r` | Mark the finding's node reviewed, or not (see Review state) |
 | `m` | The map, at the systems |
 | Esc | Back to the review list |
 
@@ -62,6 +63,7 @@ The **map** (#92), opened from the findings, shows the systems: one level at a t
 | Tab | Select the next node |
 | Enter | Drill into the selected node, or open its code if nothing is inside it |
 | `c` | Open the selected node's code (its file's diff, at its lines) |
+| `r` | Mark the selected node reviewed, or not (see Review state) |
 | Backspace | Up one level; the breadcrumb is in the header |
 | `f` | Back to the findings |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
@@ -78,7 +80,21 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 | ↑ ↓ PgUp PgDn Home End | Move |
 | ← → | Scroll both sides sideways, for lines wider than their half |
 | `n` `p` | Next or previous change |
+| `r` | Mark the node whose code this is reviewed, or not (see Review state) |
 | Backspace, Esc | Back to the map |
+
+## Review state
+
+`r` marks a changed node reviewed (#115, §5.4 view 5): on the map, the selected node; on the findings, the highlighted finding's node; in the code, the node it was opened from. Pressing it again on a node you marked unmarks it. The rules are in DR 0011:
+
+- **Marking covers what is inside.** Marking a node reviewed also counts every changed node under it as reviewed: marking a system says you have reviewed it whole.
+- **Roll-up.** A node is reviewed when every changed node under it is, unless something of its own changed: lines of its own, a move or rename, or a public surface change. A type whose signature changed is not reviewed because its methods are.
+- **What shows it.** Reviewed nodes carry a ✓ on the map, findings whose node is reviewed carry one in the list, and the header says `reviewed <n> of <m>`, counting the changed nodes that only their own mark can make reviewed.
+- **When it is available.** Marks need the full diff, so `r` works once the header says `complete`.
+- **Where marks live.** They are kept on this computer, per repository (`bp review` reads and writes the same ones: [cli.md](cli.md)).
+- **Rebases.** A mark applies wherever the node changed exactly as it did when marked, so it survives a rebase that leaves that change alone, and is dropped, never misapplied, when the change differs.
+
+Notes on nodes are stored with marks and shown by `bp review`; writing them in the app comes next (#115).
 
 ## Command palette
 

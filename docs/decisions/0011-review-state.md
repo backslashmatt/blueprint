@@ -47,7 +47,7 @@ A moved or renamed node is reviewed under its head id, and so is every ancestor 
 - **Never overwritten:** if the file cannot be read, cannot be moved aside, or was written by a newer version, it is left alone. A newer file is recognised by its `format` field alone, whatever shape its marks have. Marks are not shown and new marks are not saved, and the reviewer is told why.
 - **Clearing a mark:** a mark with neither reviewed nor a note is removed.
 
-**Roll-up.** A changed node is reviewed when it is marked reviewed, or when:
+**Roll-up and coverage.** A changed node is reviewed when it, or a node above it, is marked reviewed: a reviewer who marks a module has reviewed what is in it, so the changed nodes under it count as reviewed too. It is also reviewed when:
 - every changed child is reviewed, and
 - nothing in the node itself changed: no lines of its own (its weight less its changed children's) and no move, rename or surface change of its own.
 

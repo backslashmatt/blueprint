@@ -228,7 +228,7 @@ fn report_review(
         let (Some(map), Some(_)) = (&r.map, &r.layout) else {
             return;
         };
-        if r.mapped != Some(Detail::Full) || w.script_pending() {
+        if r.mapped != Some(Detail::Full) || w.script_pending() || w.marks_pending() {
             return;
         }
         // A code view opened by the script must have its highlighted diff.
@@ -239,8 +239,11 @@ fn report_review(
             return;
         }
         let code_rows = r.code.as_ref().map_or(0, |c| c.rows());
+        // Review progress (#115): changed nodes needing their own mark,
+        // and how many are reviewed.
+        let (reviewed, to_review) = r.reviewed.as_ref().map_or((0, 0), |s| s.progress());
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"reviewed\": {reviewed}, \"to_review\": {to_review}}}\n",
             r.base,
             r.head,
             r.findings,

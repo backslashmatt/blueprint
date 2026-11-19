@@ -253,6 +253,12 @@ pub const ACTIONS: &[ActionDef] = &[
         Scope::Review,
         &["escape"],
     ),
+    a(
+        "review.reviewed",
+        "Review: mark reviewed, or not (the selected node, the finding's, or the code's)",
+        Scope::Review,
+        &["r"],
+    ),
 ];
 
 /// The action with this id.
@@ -476,7 +482,11 @@ mod tests {
     #[test]
     fn the_palette_follows_the_screen_and_its_key_closes_it() {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
-        assert_eq!(p.matches.len(), 2, "back to the list, open a repository");
+        assert_eq!(
+            p.matches.len(),
+            3,
+            "back to the list, mark reviewed, open a repository"
+        );
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
         assert_eq!(p.key("f1"), PaletteEffect::Close);
