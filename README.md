@@ -31,3 +31,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 `unsafe` is forbidden. `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!` and `dbg!` are denied (workspace lints in `Cargo.toml`); `clippy.toml` allows the first three in tests, and an xtask test fails if any source outside `tests/` switches one of these lints off.
+
+## Licence
+
+Blueprint is licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the [MIT licence](LICENSE-MIT), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion in Blueprint, as defined in the Apache-2.0 licence, is dual licensed as above, without any additional terms or conditions.
