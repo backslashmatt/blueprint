@@ -96,20 +96,27 @@ impl Reviews {
                 return reviews;
             }
         };
+        // The format first, so a newer file is recognised even when its
+        // marks have a shape this version cannot parse.
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        if let Ok(Format { format }) = serde_json::from_slice::<Format>(&bytes)
+            && format > FORMAT
+        {
+            reviews.warning = Some(format!(
+                "review marks were saved by a newer Blueprint (format {format}); \
+                 they are not shown, and new marks will not be saved"
+            ));
+            reviews.writable = false;
+            return reviews;
+        }
         let why = match serde_json::from_slice::<File>(&bytes) {
             Ok(file) if file.format == FORMAT => {
                 for m in file.marks {
                     reviews.marks.insert((m.node.clone(), m.key), m);
                 }
-                return reviews;
-            }
-            Ok(file) if file.format > FORMAT => {
-                reviews.warning = Some(format!(
-                    "review marks were saved by a newer Blueprint (format {}); \
-                     they are not shown, and new marks will not be saved",
-                    file.format
-                ));
-                reviews.writable = false;
                 return reviews;
             }
             Ok(file) => format!("unknown format {}", file.format),
@@ -182,9 +189,12 @@ impl Reviews {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(err)?;
         }
+        // Unique per write, so two writers in one process never share it.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = self
             .path
-            .with_extension(format!("json.{}.tmp", std::process::id()));
+            .with_extension(format!("json.{}-{n}.tmp", std::process::id()));
         std::fs::write(&tmp, json).map_err(err)?;
         std::fs::rename(&tmp, &self.path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
@@ -280,7 +290,7 @@ mod tests {
         let path = scratch("newer");
         let dir = path.parent().ok_or("no parent")?;
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let newer = br#"{"format": 99, "marks": [], "more": true}"#;
+        let newer = br#"{"format": 99, "marks": [{"renamed": 1}], "more": true}"#;
         std::fs::write(&path, newer).map_err(|e| e.to_string())?;
 
         let mut reviews = Reviews::open_at(path.clone());

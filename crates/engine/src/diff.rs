@@ -436,7 +436,8 @@ fn attribute(lines: &[u32], text: &[&[u8]], nodes: &[&Node]) -> Vec<(NodeId, Lin
         .filter_map(|n| n.code.as_ref().map(|c| (*n, c.lines, c.body_line)))
         .collect();
     items.sort_by_key(|(n, (a, b), _)| (b - a, n.id.clone()));
-    let mut out: BTreeMap<NodeId, (Lines, u64)> = BTreeMap::new();
+    // Per node: its weight, its digest, and its last changed line.
+    let mut out: BTreeMap<NodeId, (Lines, u64, Option<u32>)> = BTreeMap::new();
     let file = nodes
         .iter()
         .filter(|n| n.code.is_none())
@@ -455,26 +456,34 @@ fn attribute(lines: &[u32], text: &[&[u8]], nodes: &[&Node]) -> Vec<(NodeId, Lin
                 None => continue,
             },
         };
-        let (w, digest) = out.entry(id).or_insert((
+        let (w, digest, prev) = out.entry(id).or_insert((
             Lines {
                 signature: 0,
                 body: 0,
             },
             fnv(b""),
+            None,
         ));
         if signature {
             w.signature += 1;
         } else {
             w.body += 1;
         }
-        // The node's changed lines in order, without their numbers.
-        let line_text = text
-            .get((line as usize).saturating_sub(1))
-            .copied()
-            .unwrap_or_default();
-        *digest = mix(*digest, fnv(line_text));
+        // The node's changed lines in order, without their numbers, each
+        // run of them with the unchanged line just above it, so the same
+        // text changed in another place is another change.
+        let at = |n: u32| {
+            text.get((n as usize).wrapping_sub(1))
+                .copied()
+                .unwrap_or_default()
+        };
+        if prev.is_none_or(|p| p + 1 != line) {
+            *digest = mix(*digest, mix(1, fnv(at(line.wrapping_sub(1)))));
+        }
+        *prev = Some(line);
+        *digest = mix(*digest, fnv(at(line)));
     }
-    out.into_iter().map(|(id, (w, d))| (id, w, d)).collect()
+    out.into_iter().map(|(id, (w, d, _))| (id, w, d)).collect()
 }
 
 /// A file's lines, each with its line ending, as `byte_lines` splits them.
@@ -545,6 +554,11 @@ mod tests {
             "pub fn f() -> u8 {\n    3\n}\n",
         );
         assert_ne!(one, other, "a different change");
+        let elsewhere = digest_of_f(
+            "pub fn f() -> u8 {\n    let x = 0;\n    1\n}\n",
+            "pub fn f() -> u8 {\n    let x = 0;\n    2\n}\n",
+        );
+        assert_ne!(one, elsewhere, "the same edit after other code");
     }
 
     #[test]

@@ -31,7 +31,7 @@ Three questions follow:
 - the node's id;
 - `KEY_VERSION`;
 - the node's fingerprint in base and in head (zero where it is absent);
-- the digest of its changed lines: a hash of the text of every line the diff counts against the node or below it, on each side, without line numbers. The engine computes it with the change weight (`Weight::digest`), so keys exist only for a full diff.
+- the digest of its changed lines: a hash of the text of every line the diff counts against the node or below it, on each side, without line numbers. Each run of changed lines is hashed together with the unchanged line just above it, so the same text changed somewhere else in the file counts as a different change. The engine computes it with the change weight (`Weight::digest`), so keys exist only for a full diff.
 
 A fingerprint is a hash of the node's kind, name, source file, visibility, confidence and code hashes, plus its children's fingerprints. It leaves out line numbers.
 
@@ -39,12 +39,12 @@ Fingerprints alone are not enough. A node with no code hashes still has lines of
 
 With both, a mark applies wherever the node changed in exactly the way that was reviewed. That holds after a rebase that leaves the node's change alone, even if its lines moved, and in any review that contains the same change. Otherwise the mark stops matching and the node shows as unreviewed: a mark is never applied to a change nobody saw.
 
-A moved or renamed node is reviewed under its head id. Its base id is not a separate changed node: its removed lines count with the head id's, for the key and for its old parent's roll-up.
+A moved or renamed node is reviewed under its head id, and so is every ancestor reached through its base id. Its base id is never a separate changed node: its removed lines count with the head id's, for the key and for its old parent's roll-up.
 
 **Store: option (b).** `<data>/reviews/<hash of the canonical repository path>.json`, where `<data>` is `$BLUEPRINT_DATA_DIR` or the platform data directory (`~/.local/share/blueprint` on Linux).
 - **Writes:** the whole file is rewritten on each change, through a temporary file and a rename, so a crash leaves the old file or the new one.
 - **Damage:** a file that does not parse is moved aside to `.json.damaged` and reported. A later one goes to `.json.damaged.1`, never over an earlier one. The session carries on with no marks (§5.5).
-- **Never overwritten:** if the file cannot be read, cannot be moved aside, or was written by a newer version, it is left alone. Marks are not shown and new marks are not saved, and the reviewer is told why.
+- **Never overwritten:** if the file cannot be read, cannot be moved aside, or was written by a newer version, it is left alone. A newer file is recognised by its `format` field alone, whatever shape its marks have. Marks are not shown and new marks are not saved, and the reviewer is told why.
 - **Clearing a mark:** a mark with neither reviewed nor a note is removed.
 
 **Roll-up.** A changed node is reviewed when it is marked reviewed, or when:

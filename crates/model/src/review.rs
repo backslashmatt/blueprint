@@ -130,12 +130,14 @@ impl ReviewState {
         for (seed, weight_id) in seeds {
             changed.entry(seed.clone()).or_default();
             let mut child = (seed, weight_id);
+            // Each ancestor under the id it is reviewed by: a moved
+            // parent's base id is its head id.
             while let Some(p) = parent(&child.1) {
-                let fresh = changed.entry(p.clone()).or_default().insert(child);
+                let fresh = changed.entry(status(&p)).or_default().insert(child);
                 if !fresh {
                     break;
                 }
-                child = (p.clone(), p);
+                child = (status(&p), p);
             }
         }
 
@@ -151,7 +153,12 @@ impl ReviewState {
         };
         let lines_of = |id: &NodeId| weight.get(id).map_or(zero, |w| w.0);
         let own_lines = |id: &NodeId, children: &BTreeSet<(NodeId, NodeId)>| -> bool {
+            // A moved node's weight on both sides: its children were counted
+            // under the base id on one side and the head id on the other.
             let mut own = lines_of(id);
+            if let Some(from) = base_id.get(id) {
+                own.add(lines_of(from));
+            }
             for (_, c) in children {
                 let l = lines_of(c);
                 own.signature = own.signature.saturating_sub(l.signature);
@@ -522,6 +529,61 @@ mod tests {
         assert!(state.is_reviewed(&id(&["m", "c"])));
         assert!(state.is_reviewed(&id(&[])));
         assert_eq!(state.progress(), (1, 1));
+    }
+
+    #[test]
+    fn a_type_moved_to_another_module_is_one_node_under_its_head_id() {
+        // m::c with f and g moves to n::c; n exists on both sides.
+        let mut base = Model::default();
+        let mut head = Model::default();
+        for n in [&[][..], &["m"], &["n"]] {
+            base.add_node(node(n, 0, 0)).unwrap();
+            head.add_node(node(n, 0, 0)).unwrap();
+        }
+        for (model, at) in [(&mut base, "m"), (&mut head, "n")] {
+            model.add_node(node(&[at, "c"], 1, 1)).unwrap();
+            model.add_node(node(&[at, "c", "f"], 2, 2)).unwrap();
+            model.add_node(node(&[at, "c", "g"], 3, 6)).unwrap();
+        }
+        let moved = |p: &[&str]| NodeChange::Moved {
+            from: id(&[&["m"][..], p].concat()),
+            to: id(&[&["n"][..], p].concat()),
+        };
+        let w = |p: &[&str], body: u32| Weight {
+            id: id(p),
+            lines: lines(body),
+            digest: u64::from(body) * 31 + p.len() as u64,
+        };
+        let diff = Diff {
+            nodes: vec![moved(&["c"]), moved(&["c", "f"]), moved(&["c", "g"])],
+            weights: vec![
+                w(&[], 10),
+                w(&["m"], 5),
+                w(&["m", "c"], 5),
+                w(&["m", "c", "f"], 2),
+                w(&["m", "c", "g"], 2),
+                w(&["n"], 5),
+                w(&["n", "c"], 5),
+                w(&["n", "c", "f"], 2),
+                w(&["n", "c", "g"], 2),
+            ],
+            ..Diff::default()
+        };
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        for gone in [&["m", "c"][..], &["m", "c", "f"], &["m", "c", "g"]] {
+            assert!(!blank.is_changed(&id(gone)), "{gone:?} is reviewed as n's");
+        }
+        assert_eq!(blank.progress(), (0, 3));
+        let marks = [
+            mark(&blank, &["n", "c"]),
+            mark(&blank, &["n", "c", "f"]),
+            mark(&blank, &["n", "c", "g"]),
+        ];
+        let state = ReviewState::new(&diff, &base, &head, &marks);
+        for p in [&[][..], &["m"], &["n"]] {
+            assert!(state.is_reviewed(&id(p)), "{p:?} rolls up");
+        }
+        assert_eq!(state.progress(), (3, 3));
     }
 
     #[test]
