@@ -367,7 +367,7 @@ fn current_version(key: &Key) -> bool {
 
 /// 64-bit FNV-1a: a stable directory name for a path. Collisions only cost
 /// sharing a cache, which is safe because entries are content-addressed.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
     })

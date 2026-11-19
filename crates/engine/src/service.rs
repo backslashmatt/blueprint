@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use blueprint_model::review::Mark;
 use blueprint_model::{Model, RepoPath};
 use blueprint_protocol::{
     CommitSummary, Detail, Lane, Ref, RefKind, Reply, Request, RequestId, Response,
@@ -32,8 +33,15 @@ use crate::commits;
 use crate::diff::ChangedFile;
 use crate::git::{CommitInfo, ObjectId, Repo};
 use crate::l1::Diagnostic;
+use crate::reviews::Reviews;
 
-const LANES: [Lane; 4] = [Lane::Repository, Lane::Model, Lane::Diff, Lane::Source];
+const LANES: [Lane; 5] = [
+    Lane::Repository,
+    Lane::Model,
+    Lane::Diff,
+    Lane::Source,
+    Lane::Review,
+];
 
 /// Returned by a stage whose request was superseded; never shown.
 const SUPERSEDED: &str = "superseded";
@@ -181,6 +189,16 @@ impl Drop for Service {
 /// exactly one final reply.
 fn work(shared: &Shared, lane: Lane, rx: &Receiver<Job>) {
     while let Ok(job) = rx.recv() {
+        // A mark is the reviewer's work: it is written and answered even
+        // when superseded.
+        if let Request::Mark { mark } = &job.request {
+            let response = match store_mark(job.repo.as_deref(), mark.clone()) {
+                Ok(()) => Response::Marked { mark: mark.clone() },
+                Err(error) => Response::Failed { error },
+            };
+            shared.send(job.id, response);
+            continue;
+        }
         let emit = |r: Response| shared.emit(lane, &job, r);
         let stale = || *shared.lane(lane) != job.generation;
         let outcome = if stale() {
@@ -393,7 +411,21 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                 text: source_lines(&path, rev, &file, *first, *last)?,
             }))
         }
+        Request::Marks => {
+            let reviews = Reviews::open(&repo()?)?;
+            sent(emit(Response::Marks {
+                marks: reviews.marks().cloned().collect(),
+                warning: reviews.warning().map(str::to_string),
+            }))
+        }
+        Request::Mark { mark } => store_mark(job.repo.as_deref(), mark.clone()),
     }
+}
+
+/// Stores `mark` with the marks of the repository at `repo`.
+fn store_mark(repo: Option<&Path>, mark: Mark) -> Result<(), String> {
+    let repo = repo.ok_or("no repository is open")?;
+    Reviews::open(repo)?.set(mark)
 }
 
 /// The L1–L2 model of `rev`, stored in the index as by `bp index`; if the

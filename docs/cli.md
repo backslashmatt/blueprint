@@ -12,6 +12,7 @@
 | `bp model <dir> --level 3`, `--level 4` | Adds L3 components (types, groups of functions, and one component per file no analyser reads), then L4 functions and methods (DR 0008) |
 | `bp model <dir> --rev <rev>` | Prints the model of commit `<rev>` of the git repository at `<dir>`, not of its working tree. `<rev>` is a branch, tag, full or abbreviated commit id, `HEAD`, or any rev-parse expression such as `main~2` |
 | `bp diff <repo> <base> <head> [--json]` | Prints the architectural diff of two commits |
+| `bp review <repo> <base> <head>` | Prints each changed node of the diff and whether it is reviewed. `--mark <node> [--note <text>]` marks a node reviewed first, `--unmark <node>` marks it not reviewed, `--json` prints JSON |
 | `bp index <repo> [--rev <rev>] [--level 2\|4]` | Analyses commit `<rev>` (default `HEAD`) and stores its L1–L2 model in the index, so that `bp model --rev` reopens it without analysing. With `--level 4` it also parses every Rust file and stores its facts |
 | `bp --version`, `bp -V` | Prints `bp <version>` |
 | `bp --help`, `bp -h`, `bp help`, `bp` | Prints usage |
@@ -29,6 +30,14 @@ If some of a commit's files cannot be read, for example in a partial clone, each
 The index lives in the platform cache, `~/.cache/blueprint/index/` on Linux. Set `BLUEPRINT_CACHE_DIR` to use another directory. Nothing is ever written inside the repository. The index can be deleted at any time. A damaged index is dropped with a warning and rebuilt, never fatal. Models are keyed by the commit's tree id, so commits with the same files share one (DR 0007), and facts by the file's blob id and the analyser's name and version (DR 0008). Entries written by an older version of the analysers are dropped when the index is compacted.
 
 `bp diff <repo> <base> <head>` prints the architectural diff of two commits: findings first (new dependencies across systems or modules, new dependency cycles), then changed nodes, then added and removed edges. Text lines are tab-separated: `finding`, `added`, `removed`, `moved`, `renamed`, `surface`, `contained`, `changed`, `+edge` or `-edge`, then the ids. `weight` lines then give each changed node's id and its changed signature and body lines, descendants included. `--json` prints the format in [diff-json.md](diff-json.md). Two identical commits print nothing. It exits 0 whether or not anything changed.
+
+`bp review <repo> <base> <head>` prints the review state of the diff (DR 0011). The first line is `reviewed <n> of <m>`, counting the changed nodes that only their own mark can make reviewed. Then there is one line per changed node and each ancestor of one, ordered by id: `reviewed` or `open`, the id, and the note if there is one, tab-separated.
+- **Roll-up:** a node with changed children is reviewed when all of them are and nothing of its own changed.
+- **`--mark <node>`:** marks a node reviewed before printing, with `<node>` an id as `bp diff` prints it. `--note <text>` sets its note, and `--note ""` removes it.
+- **`--unmark <node>`:** marks it not reviewed and keeps its note.
+- **Where marks live:** `~/.local/share/blueprint/reviews/` on Linux (`BLUEPRINT_DATA_DIR` overrides it), one file per repository. Unlike the index, this is the reviewer's work: it is never deleted, and a damaged file is moved aside, not overwritten.
+- **Which marks apply:** a mark applies wherever the node changed exactly as it did when marked, so it survives a rebase that leaves the node's change alone.
+- **Errors:** marking a node that did not change exits with code 1, and so does a diff whose change weight could not be computed, because marks are matched by it.
 
 ## Output
 

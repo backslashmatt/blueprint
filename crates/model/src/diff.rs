@@ -129,6 +129,11 @@ pub struct Weight {
     /// Its changed lines, its descendants' included.
     #[serde(flatten)]
     pub lines: Lines,
+    /// A hash of the text of those lines, on each side, without their line
+    /// numbers: what changed, so a review mark applies to this change and
+    /// no other (DR 0011). Zero when unknown. Not serialised.
+    #[serde(skip)]
+    pub digest: u64,
 }
 
 /// One side of a [`FileDiff`]: the file's lines and their coloured tokens.
