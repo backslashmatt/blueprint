@@ -106,6 +106,9 @@ jobs:
             timeout 300 target/debug/blueprint . --script $keys --review-report palette.json
           fi
           cat palette.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' palette.json; then
+            echo "the palette chose the same commit as base and head"; exit 1
+          fi
           if grep -q '"code_rows": 0' palette.json; then
             echo "the palette did not reach the code"; exit 1
           fi
@@ -173,6 +176,9 @@ jobs:
         run: |
           timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script end,b,home,h,f1,b,a,s,e,space,a,g,enter,enter,f1,o,p,e,n,space,t,h,e,enter --review-report palette.json
           cat palette.json
+          if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' palette.json; then
+            echo "the palette chose the same commit as base and head"; exit 1
+          fi
           if grep -q '"code_rows": 0' palette.json; then
             echo "the palette did not reach the code"; exit 1
           fi

@@ -317,7 +317,11 @@ impl Workspace {
                 vec![Scope::Code, Scope::Review, Scope::Global]
             }
             Screen::Review(r) if r.map.is_some() => vec![Scope::Map, Scope::Review, Scope::Global],
-            Screen::Review(_) | Screen::Failed(_) => vec![Scope::Review, Scope::Global],
+            // Back to the list only when there is a list to go back to.
+            Screen::Review(_) | Screen::Failed(_) if self.list.is_some() => {
+                vec![Scope::Review, Scope::Global]
+            }
+            Screen::Review(_) | Screen::Failed(_) => vec![Scope::Global],
         }
     }
 
@@ -325,7 +329,9 @@ impl Workspace {
     /// `ctrl-shift-p`): to the palette when it is open, else the action
     /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
+        let scopes = self.scopes();
         if let Some(palette) = self.palette.as_mut() {
+            palette.rescope(scopes);
             match palette.key(key) {
                 PaletteEffect::Stay => {}
                 PaletteEffect::Close => self.palette = None,
@@ -402,18 +408,8 @@ impl Workspace {
             review.code_request = None;
             return;
         }
-        let key = match id {
-            "code.up" => "up",
-            "code.down" => "down",
-            "code.page_up" => "pageup",
-            "code.page_down" => "pagedown",
-            "code.first" => "home",
-            "code.last" => "end",
-            "code.next_change" => "n",
-            "code.previous_change" => "p",
-            "code.scroll_left" => "left",
-            "code.scroll_right" => "right",
-            _ => return,
+        let Some(key) = code_key(id) else {
+            return;
         };
         if let Some(code) = review.code.as_mut()
             && code.key(key)
@@ -464,20 +460,14 @@ impl Workspace {
         let Some(map) = map.as_mut() else {
             return;
         };
-        let moved = match id {
-            "map.drill_down" => map.drill_down(),
-            "map.drill_up" => map.drill_up(),
-            "map.next" => {
+        let moved = match map_op(id) {
+            Some(MapOp::DrillDown) => map.drill_down(),
+            Some(MapOp::DrillUp) => map.drill_up(),
+            Some(MapOp::Next) => {
                 map.cycle(true);
                 false
             }
-            "map.left" | "map.right" | "map.up" | "map.down" => {
-                let (dx, dy) = match id {
-                    "map.left" => (-1.0, 0.0),
-                    "map.right" => (1.0, 0.0),
-                    "map.up" => (0.0, -1.0),
-                    _ => (0.0, 1.0),
-                };
+            Some(MapOp::Towards(dx, dy)) => {
                 if let (Some(l), Some(from)) = (layout.as_ref(), map.selected) {
                     let pts: Vec<(f32, f32)> = l.nodes.iter().map(|p| (p.x, p.y)).collect();
                     if let Some(i) = nearest_towards(&pts, from, dx, dy) {
@@ -486,7 +476,9 @@ impl Workspace {
                 }
                 false
             }
-            _ => false,
+            // `map.code` was handled above; on a node without source it
+            // does nothing.
+            Some(MapOp::Code) | None => false,
         };
         if moved {
             *layout = None;
@@ -509,6 +501,10 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_appearance(window.appearance());
         let dark = theme == Theme::DARK;
+        let scopes = self.scopes();
+        if let Some(p) = self.palette.as_mut() {
+            p.rescope(scopes);
+        }
         let root = div()
             .id("workspace")
             .track_focus(&self.focus)
@@ -617,6 +613,48 @@ impl Render for Workspace {
             }
         }
     }
+}
+
+/// The code view key an action stands for.
+fn code_key(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "code.up" => "up",
+        "code.down" => "down",
+        "code.page_up" => "pageup",
+        "code.page_down" => "pagedown",
+        "code.first" => "home",
+        "code.last" => "end",
+        "code.next_change" => "n",
+        "code.previous_change" => "p",
+        "code.scroll_left" => "left",
+        "code.scroll_right" => "right",
+        _ => return None,
+    })
+}
+
+/// What a map action does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MapOp {
+    DrillDown,
+    DrillUp,
+    Code,
+    Next,
+    /// Select the nearest node in this direction.
+    Towards(f32, f32),
+}
+
+fn map_op(id: &str) -> Option<MapOp> {
+    Some(match id {
+        "map.drill_down" => MapOp::DrillDown,
+        "map.drill_up" => MapOp::DrillUp,
+        "map.code" => MapOp::Code,
+        "map.next" => MapOp::Next,
+        "map.left" => MapOp::Towards(-1.0, 0.0),
+        "map.right" => MapOp::Towards(1.0, 0.0),
+        "map.up" => MapOp::Towards(0.0, -1.0),
+        "map.down" => MapOp::Towards(0.0, 1.0),
+        _ => return None,
+    })
 }
 
 /// The command palette: what was typed, then the matching actions with
@@ -921,4 +959,23 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     .track_scroll(scroll)
     .flex_1();
     div().flex().flex_col().flex_1().child(header).child(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_action_is_handled() {
+        for a in actions::ACTIONS {
+            let handled = match a.scope {
+                Scope::List => review_list::Action::from_id(a.id).is_some(),
+                Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
+                Scope::Map => map_op(a.id).is_some(),
+                Scope::Review => a.id == "review.back",
+                Scope::Global => a.id == "global.palette",
+            };
+            assert!(handled, "{} has no handler", a.id);
+        }
+    }
 }

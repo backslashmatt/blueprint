@@ -277,8 +277,21 @@ impl Palette {
         }
     }
 
+    /// Follows the screen under the palette: lists the actions of `scopes`
+    /// if they changed since it opened (a map arrived, a review failed).
+    pub fn rescope(&mut self, scopes: Vec<Scope>) {
+        if scopes != self.scopes {
+            self.scopes = scopes;
+            self.matches = search(&self.scopes, &self.query);
+            self.cursor = self.cursor.min(self.matches.len().saturating_sub(1));
+        }
+    }
+
     /// Applies one key (a GPUI key name).
     pub fn key(&mut self, key: &str) -> PaletteEffect {
+        if by_id("global.palette").is_some_and(|a| a.keys.contains(&key)) {
+            return PaletteEffect::Close;
+        }
         match key {
             "escape" => return PaletteEffect::Close,
             "enter" => {
@@ -345,6 +358,36 @@ mod tests {
                 assert!(search(&[a.scope], a.title).contains(&a), "{}", a.id);
             }
         }
+    }
+
+    #[test]
+    fn every_key_is_a_gpui_key_name() {
+        for a in ACTIONS {
+            for k in a.keys {
+                let parsed = gpui::Keystroke::parse(k);
+                assert!(parsed.is_ok(), "{k} of {} does not parse", a.id);
+                if let Ok(p) = parsed {
+                    assert!(
+                        k.ends_with(p.key.as_str())
+                            && (p.key.chars().count() == 1
+                                || p.key
+                                    .chars()
+                                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())),
+                        "{k} of {} is not a GPUI key name",
+                        a.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_palette_follows_the_screen_and_its_key_closes_it() {
+        let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
+        assert_eq!(p.matches.len(), 1);
+        p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
+        assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
+        assert_eq!(p.key("f1"), PaletteEffect::Close);
     }
 
     #[test]
