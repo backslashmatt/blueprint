@@ -1,6 +1,6 @@
 # The Blueprint app
 
-`blueprint [<repo>]` opens a window. Given a git repository, it shows the **review list**. Without a repository, it shows an empty window. Opening a repository from a folder dialog comes later in M3 (#90).
+`blueprint [<repo>]` opens a window. Given a git repository, it shows the **review list**. Without a repository, it shows an empty window. Ctrl+O (⌘O on macOS), or *Open a repository…* in the command palette, opens one from the platform's folder dialog, from any screen; it replaces whatever was open.
 
 The app reaches the engine only through the protocol (`crates/protocol`). The engine runs on its own threads (`engine::service`, #89), so the window never waits on git, parsing or diffing.
 

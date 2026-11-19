@@ -58,6 +58,12 @@ pub const ACTIONS: &[ActionDef] = &[
         Scope::Global,
         &["f1", "ctrl-shift-p", "cmd-shift-p"],
     ),
+    a(
+        "global.open",
+        "Open a repository…",
+        Scope::Global,
+        &["ctrl-o", "cmd-o"],
+    ),
     a("list.up", "Review list: previous row", Scope::List, &["up"]),
     a("list.down", "Review list: next row", Scope::List, &["down"]),
     a(
@@ -384,7 +390,7 @@ mod tests {
     #[test]
     fn the_palette_follows_the_screen_and_its_key_closes_it() {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
-        assert_eq!(p.matches.len(), 1);
+        assert_eq!(p.matches.len(), 2, "back to the list, open a repository");
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
         assert_eq!(p.key("f1"), PaletteEffect::Close);
@@ -417,7 +423,7 @@ mod tests {
         let mut p = Palette::new(vec![Scope::List, Scope::Global]);
         assert_eq!(
             p.matches.len(),
-            8,
+            9,
             "every list action, not the palette itself"
         );
         for k in ["s", "w", "a", "p"] {
