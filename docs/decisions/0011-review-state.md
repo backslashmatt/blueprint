@@ -31,7 +31,7 @@ Three questions follow:
 - the node's id;
 - `KEY_VERSION`;
 - the node's fingerprint in base and in head (zero where it is absent);
-- the digest of its changed lines: a hash of the text of every line the diff counts against the node or below it, on each side, without line numbers. Each run of changed lines is hashed together with the unchanged line just above it, so the same text changed somewhere else in the file counts as a different change. The engine computes it with the change weight (`Weight::digest`), so keys exist only for a full diff.
+- the digest of its changed lines: a hash of the text of every line the diff counts against the node or below it, on each side, without line numbers. Each run of changed lines is hashed together with the unchanged line just above it, so the same text changed somewhere else in the file counts as a different change. Lines no item holds (a file no analyser reads, a module's own lines) have no code hashes to place them, so their digest also includes the whole file's text. A mark on such a node is cleared by any other edit to the file, never carried to the same edit in another section. The engine computes it with the change weight (`Weight::digest`), so keys exist only for a full diff.
 
 A fingerprint is a hash of the node's kind, name, source file, visibility, confidence and code hashes, plus its children's fingerprints. It leaves out line numbers.
 
