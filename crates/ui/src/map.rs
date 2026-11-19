@@ -373,6 +373,68 @@ fn view(
         edges,
     }
 }
+/// How the map view is looked at (#92): the selection is centred, moved
+/// by `pan` (screen pixels) and scaled by `zoom`, which is a whole number of
+/// [`Camera::ZOOM_STEP`]s from 100%, so zooming back always meets 100%.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    /// Offset from centring the selection, in screen pixels.
+    pub pan: (f32, f32),
+    /// Scale: [`Camera::ZOOM_STEP`] to the power `steps`.
+    pub zoom: f32,
+    /// Zoom steps from 100%, within [`Camera::MIN_STEPS`] and
+    /// [`Camera::MAX_STEPS`].
+    pub steps: i32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Camera {
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+            steps: 0,
+        }
+    }
+}
+
+impl Camera {
+    /// The fewest steps: 1.25^-6, about 26%.
+    pub const MIN_STEPS: i32 = -6;
+    /// The most steps: 1.25^6, about 381%.
+    pub const MAX_STEPS: i32 = 6;
+    /// One pan step, in screen pixels.
+    pub const PAN_STEP: f32 = 120.0;
+    /// One zoom step, as a factor.
+    pub const ZOOM_STEP: f32 = 1.25;
+
+    /// Moves the view by one step in direction `(dx, dy)` (each -1, 0 or
+    /// 1): the content moves the other way, as when panning a document.
+    pub fn pan_by(&mut self, dx: f32, dy: f32) {
+        self.pan.0 -= dx * Self::PAN_STEP;
+        self.pan.1 -= dy * Self::PAN_STEP;
+    }
+
+    /// Zooms `steps` steps in (`steps > 0`) or out, about the screen
+    /// centre, so that what is in the middle stays there.
+    pub fn zoom_by(&mut self, steps: i32) {
+        self.steps = (self.steps + steps).clamp(Self::MIN_STEPS, Self::MAX_STEPS);
+        let to = Self::ZOOM_STEP.powi(self.steps);
+        let k = to / self.zoom;
+        self.pan = (self.pan.0 * k, self.pan.1 * k);
+        self.zoom = to;
+    }
+
+    /// Where a point of the layout lands on screen, for a viewport of
+    /// `viewport` with `centre` (a layout point) brought to its middle.
+    #[must_use]
+    pub fn to_screen(&self, p: (f32, f32), centre: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
+        (
+            (p.0 - centre.0) * self.zoom + viewport.0 / 2.0 + self.pan.0,
+            (p.1 - centre.1) * self.zoom + viewport.1 / 2.0 + self.pan.1,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +590,33 @@ mod tests {
         assert!(!empty.drill_down());
         empty.cycle(true);
         assert_eq!(empty.selected, None);
+    }
+
+    #[test]
+    fn the_camera_pans_and_zooms_about_the_centre() {
+        let mut c = Camera::default();
+        let (centre, vp) = ((100.0, 50.0), (800.0, 600.0));
+        assert_eq!(c.to_screen(centre, centre, vp), (400.0, 300.0));
+        c.pan_by(1.0, 0.0);
+        assert_eq!(
+            c.to_screen(centre, centre, vp),
+            (280.0, 300.0),
+            "panning right moves content left"
+        );
+        let middle_before = c.to_screen((220.0, 50.0), centre, vp);
+        c.zoom_by(1);
+        let middle_after = c.to_screen((220.0, 50.0), centre, vp);
+        assert!((middle_before.0 - 400.0).abs() < 1e-3 && (middle_after.0 - 400.0).abs() < 1e-3);
+        for _ in 0..40 {
+            c.zoom_by(1);
+        }
+        assert_eq!(c.steps, Camera::MAX_STEPS);
+        // Back from the limit, the steps meet 100% again.
+        c.zoom_by(-Camera::MAX_STEPS);
+        assert!((c.zoom - 1.0).abs() < 1e-6, "{}", c.zoom);
+        for _ in 0..80 {
+            c.zoom_by(-1);
+        }
+        assert_eq!(c.steps, Camera::MIN_STEPS);
     }
 }

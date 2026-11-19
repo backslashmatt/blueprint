@@ -32,7 +32,7 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 - **Nodes** are filled by how they changed: green added, red removed, orange public surface, purple moved or renamed, yellow changed, grey contained or unchanged. An orange outline means something inside changed. `›` means the node has children to drill into.
 - **Edges** are rolled up from the code (§3.2). A dependent is drawn above what it depends on. Green edges are new, red ones are gone, and grey ones are in both.
 - **Layout** follows DR 0010. Base and head share one layout, and going back to a view keeps its nodes where they were.
-- The view is centred on the selected node, which starts as the most changed one. Only what is on screen is drawn.
+- The view is centred on the selected node, which starts as the most changed one; selecting another node recentres it at the same zoom, and drilling resets pan and zoom. Only what is on screen is drawn.
 - The map is built and laid out off the UI thread. A drill only reads its view's edges, which were rolled up once when the map was built: on medium, 0.03 ms on average and 3 ms at worst (`crates/ui/examples/map_measure.rs`).
 - A contained change (body only) does not mark its ancestors, so the map stays quiet about it until you drill down to it (§3.3).
 
@@ -43,6 +43,9 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 | Enter | Drill into the selected node, or open its code if nothing is inside it |
 | `c` | Open the selected node's code (its file's diff, at its lines) |
 | Backspace | Up one level; the breadcrumb is in the header |
+| Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
+| `=` or `+`, `-` (also with Ctrl or ⌘, and the keypad + −) | Zoom in or out a step of 25%, about the middle of the view, from 26% to 381% |
+| `0` | Back to the selection at 100% |
 | Esc | Back to the review list |
 
 ## Code

@@ -21,7 +21,7 @@ use crate::Theme;
 use crate::actions::{self, Palette, PaletteEffect, Scope};
 use crate::code_view::CodeView;
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
-use crate::map::{EdgeStatus, Map, Status, nearest_towards};
+use crate::map::{Camera, EdgeStatus, Map, Status, nearest_towards};
 use crate::review_list::{self, Effect, ReviewList, short};
 
 /// Sends one request to the engine.
@@ -48,6 +48,8 @@ pub struct Review {
     pub layout: Option<Layout>,
     /// The code view, when one is open over the map (#93).
     pub code: Option<CodeView>,
+    /// How the map is looked at: pan and zoom (#92).
+    pub camera: Camera,
     /// The file diff request the code view waits for.
     code_request: Option<RequestId>,
 }
@@ -358,6 +360,23 @@ impl Workspace {
                 map.selected = Some(i);
             }
         }
+        // The camera stays only on the same view and selection.
+        let same = |m: &Map| {
+            (
+                m.path.clone(),
+                m.selected
+                    .and_then(|i| m.view.nodes.get(i))
+                    .map(|n| n.id.clone()),
+            )
+        };
+        match review.map.as_ref().map(same) {
+            Some((path, sel)) if path == map.path => {
+                if sel != same(&map).1 {
+                    review.camera.pan = (0.0, 0.0);
+                }
+            }
+            _ => review.camera = Camera::default(),
+        }
         review.map = Some(map);
         review.mapped = Some(detail);
         // The old layout belongs to the old map.
@@ -624,6 +643,7 @@ impl Workspace {
                 layout: None,
                 code: None,
                 code_request: None,
+                camera: Camera::default(),
             }));
         }
     }
@@ -685,11 +705,29 @@ impl Workspace {
             }
             return;
         }
-        let Review { map, layout, .. } = &mut **review;
+        let Review {
+            map,
+            layout,
+            camera,
+            ..
+        } = &mut **review;
         let Some(map) = map.as_mut() else {
             return;
         };
+        let before = map.selected;
         let moved = match map_op(id) {
+            Some(MapOp::Pan(dx, dy)) => {
+                camera.pan_by(dx, dy);
+                false
+            }
+            Some(MapOp::Zoom(steps)) => {
+                camera.zoom_by(steps);
+                false
+            }
+            Some(MapOp::ResetCamera) => {
+                *camera = Camera::default();
+                false
+            }
             Some(MapOp::DrillDown) => map.drill_down(),
             Some(MapOp::DrillUp) => map.drill_up(),
             Some(MapOp::Next) => {
@@ -710,8 +748,13 @@ impl Workspace {
             Some(MapOp::Code) | None => false,
         };
         if moved {
+            // A new view: looked at afresh.
+            *camera = Camera::default();
             *layout = None;
             self.lay_out(cx);
+        } else if map.selected != before {
+            // The view follows the selection, at the same zoom.
+            camera.pan = (0.0, 0.0);
         }
     }
 
@@ -875,7 +918,8 @@ impl Workspace {
                         r.changed
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, Esc back to the list, F1 all actions."
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, Esc back to the list, F1 all actions.",
+                        pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                     )));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
@@ -886,6 +930,7 @@ impl Workspace {
                         root.child(canvas(
                             map,
                             l,
+                            r.camera,
                             (f32::from(size.width), f32::from(size.height)),
                             dark,
                         ))
@@ -923,6 +968,12 @@ enum MapOp {
     Next,
     /// Select the nearest node in this direction.
     Towards(f32, f32),
+    /// Pan one step in this direction.
+    Pan(f32, f32),
+    /// Zoom this many steps in (or out, negative).
+    Zoom(i32),
+    /// Back to the selection, unscaled.
+    ResetCamera,
 }
 
 fn map_op(id: &str) -> Option<MapOp> {
@@ -935,6 +986,13 @@ fn map_op(id: &str) -> Option<MapOp> {
         "map.right" => MapOp::Towards(1.0, 0.0),
         "map.up" => MapOp::Towards(0.0, -1.0),
         "map.down" => MapOp::Towards(0.0, 1.0),
+        "map.pan_left" => MapOp::Pan(-1.0, 0.0),
+        "map.pan_right" => MapOp::Pan(1.0, 0.0),
+        "map.pan_up" => MapOp::Pan(0.0, -1.0),
+        "map.pan_down" => MapOp::Pan(0.0, 1.0),
+        "map.zoom_in" => MapOp::Zoom(1),
+        "map.zoom_out" => MapOp::Zoom(-1),
+        "map.zoom_reset" => MapOp::ResetCamera,
         _ => return None,
     })
 }
@@ -1028,7 +1086,7 @@ fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
 /// The view as positioned boxes and edge segments (quads, DR 0003),
 /// centred on the selected node. Only what falls inside `viewport` is built
 /// (§4: no layout of off-screen content).
-fn canvas(map: &Map, l: &Layout, viewport: (f32, f32), dark: bool) -> gpui::Div {
+fn canvas(map: &Map, l: &Layout, camera: Camera, viewport: (f32, f32), dark: bool) -> gpui::Div {
     let m = Metrics::default();
     let (vw, vh) = (viewport.0, (viewport.1 - 120.0).max(100.0));
     let centre = map
@@ -1037,9 +1095,11 @@ fn canvas(map: &Map, l: &Layout, viewport: (f32, f32), dark: bool) -> gpui::Div 
         .map_or((l.width / 2.0, l.height / 2.0), |p| {
             (p.x + m.width / 2.0, p.y + m.height / 2.0)
         });
-    let (ox, oy) = (vw / 2.0 - centre.0, vh / 2.0 - centre.1);
+    let z = camera.zoom;
+    let at = |x: f32, y: f32| camera.to_screen((x, y), centre, (vw, vh));
     let visible = |x: f32, y: f32, w: f32, h: f32| {
-        x + ox + w >= 0.0 && x + ox <= vw && y + oy + h >= 0.0 && y + oy <= vh
+        let (sx, sy) = at(x, y);
+        sx + w * z >= 0.0 && sx <= vw && sy + h * z >= 0.0 && sy <= vh
     };
     let mut c = div().relative().w(px(vw)).h(px(vh)).overflow_hidden();
     for (edge, points) in map.view.edges.iter().zip(&l.edges) {
@@ -1049,13 +1109,19 @@ fn canvas(map: &Map, l: &Layout, viewport: (f32, f32), dark: bool) -> gpui::Div 
             let (x, y) = (p.x.min(q.x), p.y.min(q.y));
             let (w, h) = ((p.x - q.x).abs().max(2.0), (p.y - q.y).abs().max(2.0));
             if visible(x, y, w, h) {
+                let (sx, sy) = at(x, y);
+                // Lines keep their 2 px weight at any zoom.
+                let (sw, sh) = (
+                    if w > 2.0 { w * z } else { 2.0 },
+                    if h > 2.0 { h * z } else { 2.0 },
+                );
                 c = c.child(
                     div()
                         .absolute()
-                        .left(px(x + ox - 1.0))
-                        .top(px(y + oy - 1.0))
-                        .w(px(w))
-                        .h(px(h))
+                        .left(px(sx - 1.0))
+                        .top(px(sy - 1.0))
+                        .w(px(sw))
+                        .h(px(sh))
                         .bg(rgb(colour)),
                 );
             }
@@ -1079,20 +1145,21 @@ fn canvas(map: &Map, l: &Layout, viewport: (f32, f32), dark: bool) -> gpui::Div 
         if node.has_children {
             label.push_str(" ›");
         }
+        let (sx, sy) = at(p.x, p.y);
         c = c.child(
             div()
                 .absolute()
-                .left(px(p.x + ox))
-                .top(px(p.y + oy))
-                .w(px(m.width))
-                .h(px(m.height))
-                .px_2()
+                .left(px(sx))
+                .top(px(sy))
+                .w(px(m.width * z))
+                .h(px(m.height * z))
+                .px(px(8.0 * z))
                 .overflow_hidden()
                 .bg(rgb(fill(node.status, dark)))
                 .border_2()
                 .border_color(rgb(border))
                 .rounded_md()
-                .text_sm()
+                .text_size(px(14.0 * z))
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child(label),
