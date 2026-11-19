@@ -360,7 +360,8 @@ pub fn weigh(d: &mut Diff, base: &Model, head: &Model, files: &[ChangedFile<'_>]
                 continue;
             }
             let nodes = nodes.map_or(&[][..], Vec::as_slice);
-            for (id, w, digest) in attribute(lines, text, nodes) {
+            let whole = fnv(if in_base { b } else { h });
+            for (id, w, digest) in attribute(lines, text, whole, nodes) {
                 let entry = own.entry((in_base, id)).or_insert((
                     Lines {
                         signature: 0,
@@ -429,7 +430,13 @@ fn by_source<'m>(
 }
 
 /// Each changed line's innermost item, or else the file's own node.
-fn attribute(lines: &[u32], text: &[&[u8]], nodes: &[&Node]) -> Vec<(NodeId, Lines, u64)> {
+/// `whole` is a hash of the file's text, for the lines no item holds.
+fn attribute(
+    lines: &[u32],
+    text: &[&[u8]],
+    whole: u64,
+    nodes: &[&Node],
+) -> Vec<(NodeId, Lines, u64)> {
     // Items by span length, so the innermost claims a line first.
     let mut items: Vec<(&Node, (u32, u32), Option<u32>)> = nodes
         .iter()
@@ -482,6 +489,14 @@ fn attribute(lines: &[u32], text: &[&[u8]], nodes: &[&Node]) -> Vec<(NodeId, Lin
         }
         *prev = Some(line);
         *digest = mix(*digest, fnv(at(line)));
+    }
+    // The file's own node has no code hashes to place its lines, and the
+    // same edit can recur in two places with the same line above it (two
+    // tables of a Cargo.toml): its change is placed by the whole file.
+    if let Some(n) = file
+        && let Some(entry) = out.get_mut(&n.id)
+    {
+        entry.1 = mix(entry.1, whole);
     }
     out.into_iter().map(|(id, (w, d, _))| (id, w, d)).collect()
 }
@@ -559,6 +574,48 @@ mod tests {
             "pub fn f() -> u8 {\n    let x = 0;\n    2\n}\n",
         );
         assert_ne!(one, elsewhere, "the same edit after other code");
+    }
+
+    /// The digest of the file node of `notes.txt` (a file no analyser reads).
+    fn digest_of_file(base: &str, head: &str) -> u64 {
+        use blueprint_model::RepoPath;
+        let file = RepoPath::parse("notes.txt").unwrap_or_else(|_| RepoPath::root());
+        let manifest = RepoPath::parse("Cargo.toml").unwrap_or_else(|_| RepoPath::root());
+        let paths = [manifest.clone(), file.clone()];
+        let model = |text: &str| {
+            let text = text.to_string();
+            let file = file.clone();
+            let read = move |p: &RepoPath| {
+                Some(if *p == file {
+                    text.clone().into_bytes()
+                } else {
+                    b"[package]\nname = \"a\"\n".to_vec()
+                })
+            };
+            crate::analyse_deep(&paths, &read).0
+        };
+        let (b, h) = (model(base), model(head));
+        let mut d = super::diff(&b, &h);
+        let changed = super::ChangedFile {
+            path: &file,
+            base: Some(base.as_bytes()),
+            head: Some(head.as_bytes()),
+        };
+        super::weigh(&mut d, &b, &h, &[changed]);
+        let w = d
+            .weights
+            .iter()
+            .find(|w| w.id.to_string().ends_with("notes.txt"));
+        w.map_or(0, |w| w.digest)
+    }
+
+    #[test]
+    fn the_same_edit_in_two_sections_of_a_file_without_items_differs() {
+        let base = "[a]\n\nx = 1\n[b]\n\nx = 1\n";
+        let first = digest_of_file(base, "[a]\n\nx = 2\n[b]\n\nx = 1\n");
+        let second = digest_of_file(base, "[a]\n\nx = 1\n[b]\n\nx = 2\n");
+        assert_ne!(first, 0, "the file node is weighed");
+        assert_ne!(first, second);
     }
 
     #[test]
