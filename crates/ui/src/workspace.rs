@@ -1404,8 +1404,12 @@ fn findings_view<E: ParentElement>(
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
             let done = reviewed.is_some_and(|r| match item {
-                // A cycle is reviewed when every node on it is.
-                Item::Cycle { nodes, .. } => nodes.iter().all(|n| r.is_reviewed(n)),
+                // A cycle is reviewed when every changed node on it is: an
+                // unchanged member has nothing to review.
+                Item::Cycle { nodes, .. } => {
+                    let mut changed = nodes.iter().filter(|n| r.is_changed(n)).peekable();
+                    changed.peek().is_some() && changed.all(|n| r.is_reviewed(n))
+                }
                 _ => item.target().is_some_and(|t| r.is_reviewed(t)),
             });
             let check = if done { "✓" } else { " " };
