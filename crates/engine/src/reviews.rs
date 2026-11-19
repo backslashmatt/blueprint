@@ -31,6 +31,9 @@ pub struct Reviews {
     path: PathBuf,
     marks: BTreeMap<(NodeId, u64), Mark>,
     warning: Option<String>,
+    /// False when the file holds marks this could not load and could not
+    /// move aside: writing would destroy them.
+    writable: bool,
 }
 
 impl Reviews {
@@ -67,46 +70,70 @@ impl Reviews {
     }
 
     /// Loads the marks stored at `path`. A missing file holds none. A file
-    /// that cannot be read or does not parse is moved aside to
-    /// `<path>.damaged`, never overwritten, and its loss is reported by
-    /// [`Reviews::warning`]: the session goes on with no marks.
+    /// that does not parse is moved aside to `<path>.damaged` (or
+    /// `.damaged.1` and so on, never over an earlier one), and its loss is
+    /// reported by [`Reviews::warning`]: the session goes on with no marks.
+    /// A file that cannot be read, or cannot be moved aside, or was written
+    /// by a newer version, is left alone: the session goes on with no
+    /// marks, and [`Reviews::set`] refuses to write over it.
     #[must_use]
     pub fn open_at(path: PathBuf) -> Reviews {
         let mut reviews = Reviews {
             path,
             marks: BTreeMap::new(),
             warning: None,
+            writable: true,
         };
         let bytes = match std::fs::read(&reviews.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return reviews,
             Err(e) => {
-                reviews.warning = Some(format!("{}: {e}", reviews.path.display()));
+                reviews.warning = Some(format!(
+                    "review marks could not be read, and will not be saved: {}: {e}",
+                    reviews.path.display()
+                ));
+                reviews.writable = false;
                 return reviews;
             }
         };
-        match serde_json::from_slice::<File>(&bytes) {
+        let why = match serde_json::from_slice::<File>(&bytes) {
             Ok(file) if file.format == FORMAT => {
                 for m in file.marks {
                     reviews.marks.insert((m.node.clone(), m.key), m);
                 }
+                return reviews;
             }
-            parsed => {
-                let why = match parsed {
-                    Ok(file) => format!("unknown format {}", file.format),
-                    Err(e) => e.to_string(),
-                };
-                let aside = reviews.path.with_extension("json.damaged");
-                let moved = std::fs::rename(&reviews.path, &aside);
-                reviews.warning = Some(match moved {
-                    Ok(()) => format!(
-                        "review marks could not be read ({why}); moved to {}",
-                        aside.display()
-                    ),
-                    Err(e) => format!("review marks could not be read ({why}) or moved: {e}"),
-                });
+            Ok(file) if file.format > FORMAT => {
+                reviews.warning = Some(format!(
+                    "review marks were saved by a newer Blueprint (format {}); \
+                     they are not shown, and new marks will not be saved",
+                    file.format
+                ));
+                reviews.writable = false;
+                return reviews;
             }
-        }
+            Ok(file) => format!("unknown format {}", file.format),
+            Err(e) => e.to_string(),
+        };
+        let aside = (0..)
+            .map(|n| match n {
+                0 => reviews.path.with_extension("json.damaged"),
+                n => reviews.path.with_extension(format!("json.damaged.{n}")),
+            })
+            .find(|p| !p.exists())
+            .unwrap_or_else(|| reviews.path.with_extension("json.damaged"));
+        reviews.warning = Some(match std::fs::rename(&reviews.path, &aside) {
+            Ok(()) => format!(
+                "review marks could not be read ({why}); moved to {}",
+                aside.display()
+            ),
+            Err(e) => {
+                reviews.writable = false;
+                format!(
+                    "review marks could not be read ({why}) or moved aside, and will not be saved: {e}"
+                )
+            }
+        });
         reviews
     }
 
@@ -126,7 +153,8 @@ impl Reviews {
     /// removed instead.
     ///
     /// # Errors
-    /// If the file cannot be written; the mark is still held in memory.
+    /// If the file cannot be written, or holds marks that could not be
+    /// loaded (see [`Reviews::open_at`]); the mark is still held in memory.
     pub fn set(&mut self, mark: Mark) -> Result<(), String> {
         let key = (mark.node.clone(), mark.key);
         let empty = !mark.reviewed && mark.note.as_deref().is_none_or(str::is_empty);
@@ -139,6 +167,12 @@ impl Reviews {
     }
 
     fn write(&self) -> Result<(), String> {
+        if !self.writable {
+            return Err(format!(
+                "{}: not saved, so as not to overwrite marks that could not be loaded",
+                self.path.display()
+            ));
+        }
         let file = File {
             format: FORMAT,
             marks: self.marks.values().cloned().collect(),
@@ -229,6 +263,30 @@ mod tests {
 
         reviews.set(mark(3, true, None))?;
         assert_eq!(Reviews::open_at(path.clone()).marks().count(), 1);
+
+        // A second damaged file does not replace the first one set aside.
+        std::fs::write(&path, b"[").map_err(|e| e.to_string())?;
+        let _ = Reviews::open_at(path.clone());
+        let second = std::fs::read(path.with_extension("json.damaged.1"));
+        assert_eq!(second.map_err(|e| e.to_string())?, b"[");
+        let first = std::fs::read(path.with_extension("json.damaged"));
+        assert_eq!(first.map_err(|e| e.to_string())?, b"{ not json");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
+        Ok(())
+    }
+
+    #[test]
+    fn marks_from_a_newer_version_are_never_overwritten() -> Result<(), String> {
+        let path = scratch("newer");
+        let dir = path.parent().ok_or("no parent")?;
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let newer = br#"{"format": 99, "marks": [], "more": true}"#;
+        std::fs::write(&path, newer).map_err(|e| e.to_string())?;
+
+        let mut reviews = Reviews::open_at(path.clone());
+        assert!(reviews.warning().is_some_and(|w| w.contains("newer")));
+        assert!(reviews.set(mark(1, true, None)).is_err());
+        assert_eq!(std::fs::read(&path).map_err(|e| e.to_string())?, newer);
         let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
         Ok(())
     }

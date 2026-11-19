@@ -68,7 +68,8 @@ pub fn fingerprints(model: &Model) -> HashMap<NodeId, u64> {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewState {
     keys: HashMap<NodeId, u64>,
-    changed: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    changed: BTreeSet<NodeId>,
+    own_mark: BTreeSet<NodeId>,
     marks: HashMap<NodeId, Mark>,
     reviewed: BTreeSet<NodeId>,
 }
@@ -106,11 +107,16 @@ impl ReviewState {
                 | NodeChange::Changed { id } => seeds.push(id.clone()),
             }
         }
+        // A moved or renamed node's base id carries its removed lines: it is
+        // the same node as its head id, which is the one reviewed.
+        let head_id: HashMap<&NodeId, &NodeId> = base_id.iter().map(|(t, f)| (f, t)).collect();
+        let status = |id: &NodeId| -> NodeId { head_id.get(id).map_or(id, |t| *t).clone() };
+        let mut seeds: Vec<(NodeId, NodeId)> = seeds.into_iter().map(|s| (s.clone(), s)).collect();
         seeds.extend(
             diff.weights
                 .iter()
                 .filter(|w| !w.lines.is_zero())
-                .map(|w| w.id.clone()),
+                .map(|w| (status(&w.id), w.id.clone())),
         );
 
         let parent = |id: &NodeId| -> Option<NodeId> {
@@ -118,31 +124,36 @@ impl ReviewState {
                 .or_else(|| base.node(base_id.get(id).unwrap_or(id)))
                 .and_then(|n| n.parent.clone())
         };
-        // Every changed node and its ancestors, with their changed children.
-        let mut changed: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
-        for seed in seeds {
+        // Every changed node and its ancestors, with their changed children
+        // as (child, the id the parent's weight counted the child under).
+        let mut changed: BTreeMap<NodeId, BTreeSet<(NodeId, NodeId)>> = BTreeMap::new();
+        for (seed, weight_id) in seeds {
             changed.entry(seed.clone()).or_default();
-            let mut child = seed;
-            while let Some(p) = parent(&child) {
+            let mut child = (seed, weight_id);
+            while let Some(p) = parent(&child.1) {
                 let fresh = changed.entry(p.clone()).or_default().insert(child);
                 if !fresh {
                     break;
                 }
-                child = p;
+                child = (p.clone(), p);
             }
         }
 
         // Own lines: each node's weight less its changed children's.
-        let weight: HashMap<&NodeId, Lines> =
-            diff.weights.iter().map(|w| (&w.id, w.lines)).collect();
+        let weight: HashMap<&NodeId, (Lines, u64)> = diff
+            .weights
+            .iter()
+            .map(|w| (&w.id, (w.lines, w.digest)))
+            .collect();
         let zero = Lines {
             signature: 0,
             body: 0,
         };
-        let own_lines = |id: &NodeId, children: &BTreeSet<NodeId>| -> bool {
-            let mut own = weight.get(id).copied().unwrap_or(zero);
-            for c in children {
-                let l = weight.get(c).copied().unwrap_or(zero);
+        let lines_of = |id: &NodeId| weight.get(id).map_or(zero, |w| w.0);
+        let own_lines = |id: &NodeId, children: &BTreeSet<(NodeId, NodeId)>| -> bool {
+            let mut own = lines_of(id);
+            for (_, c) in children {
+                let l = lines_of(c);
                 own.signature = own.signature.saturating_sub(l.signature);
                 own.body = own.body.saturating_sub(l.body);
             }
@@ -152,11 +163,17 @@ impl ReviewState {
         let mut keys = HashMap::new();
         for id in changed.keys() {
             let b = base_id.get(id).unwrap_or(id);
+            // What changed: the text of the node's changed lines on both
+            // sides, for nodes whose content the fingerprints do not cover
+            // (a file no analyser reads, a module's own lines).
+            let digest = |i: &NodeId| weight.get(i).map_or(0, |w| w.1);
             let mut h = Fnv::new();
             h.u64(u64::from(KEY_VERSION));
             h.str(&id.to_string());
             h.u64(base_fp.get(b).copied().unwrap_or(0));
             h.u64(head_fp.get(id).copied().unwrap_or(0));
+            h.u64(digest(id));
+            h.u64(if b == id { 0 } else { digest(b) });
             keys.insert(id.clone(), h.finish());
         }
         let marks: HashMap<NodeId, Mark> = marks
@@ -168,19 +185,23 @@ impl ReviewState {
         // Children sort after parents (level first), so in reverse every
         // child is settled before its parent.
         let mut reviewed = BTreeSet::new();
+        let mut own_mark = BTreeSet::new();
         for (id, children) in changed.iter().rev() {
+            let needs_own =
+                children.is_empty() || own_change.contains(id) || own_lines(id, children);
+            if needs_own {
+                own_mark.insert(id.clone());
+            }
             let marked = marks.get(id).is_some_and(|m| m.reviewed);
-            let rolls_up = !children.is_empty()
-                && !own_change.contains(id)
-                && !own_lines(id, children)
-                && children.iter().all(|c| reviewed.contains(c));
+            let rolls_up = !needs_own && children.iter().all(|(c, _)| reviewed.contains(c));
             if marked || rolls_up {
                 reviewed.insert(id.clone());
             }
         }
         ReviewState {
             keys,
-            changed,
+            changed: changed.into_keys().collect(),
+            own_mark,
             marks,
             reviewed,
         }
@@ -195,7 +216,7 @@ impl ReviewState {
     /// Whether `id` changed, itself or below it.
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {
-        self.changed.contains_key(id)
+        self.changed.contains(id)
     }
 
     /// Whether `id` is reviewed, by its own mark or by roll-up.
@@ -210,17 +231,18 @@ impl ReviewState {
         self.marks.get(id)
     }
 
-    /// Changed nodes with no changed children, and how many are reviewed:
-    /// the review's progress.
+    /// The changed nodes that only their own mark can make reviewed (no
+    /// changed children, or a change of their own), and how many are
+    /// reviewed: the review's progress. It is complete only when every
+    /// changed node is reviewed.
     #[must_use]
     pub fn progress(&self) -> (usize, usize) {
-        let leaves = self.changed.iter().filter(|(_, c)| c.is_empty());
-        let (mut done, mut total) = (0, 0);
-        for (id, _) in leaves {
-            total += 1;
-            done += usize::from(self.reviewed.contains(id));
-        }
-        (done, total)
+        let done = self
+            .own_mark
+            .iter()
+            .filter(|id| self.reviewed.contains(*id))
+            .count();
+        (done, self.own_mark.len())
     }
 }
 
@@ -324,6 +346,7 @@ mod tests {
         let w = |p: &[&str], body| Weight {
             id: id(p),
             lines: lines(body),
+            digest: u64::from(body),
         };
         let total = 5 + c_own;
         Diff {
@@ -394,6 +417,7 @@ mod tests {
             let children = ReviewState::new(&diff, &base, &head, &marks);
             assert!(!children.is_reviewed(&id(&["m", "c"])), "{diff:?}");
             assert!(!children.is_reviewed(&id(&["m"])));
+            assert_eq!(children.progress(), (2, 3), "c's own change counts");
 
             let all = [
                 marks[0].clone(),
@@ -454,6 +478,78 @@ mod tests {
             .mark(&id(&["m", "c", "f"]))
             .and_then(|m| m.note.as_deref());
         assert_eq!(kept, Some("check the bounds"));
+    }
+
+    #[test]
+    fn a_renamed_node_is_reviewed_under_its_head_id_and_rolls_up() {
+        // f renamed to f2: the engine weighs f's removed lines under f and
+        // f2's added lines under f2.
+        let base = model(1, 2, None, 0);
+        let mut head = Model::default();
+        for n in [
+            node(&[], 0, 0),
+            node(&["m"], 0, 0),
+            node(&["m", "c"], 1, 1),
+            node(&["m", "c", "f2"], 1, 2),
+            node(&["m", "c", "g"], 2, 6),
+        ] {
+            head.add_node(n).unwrap();
+        }
+        let w = |p: &[&str], body: u32| Weight {
+            id: id(p),
+            lines: lines(body),
+            digest: u64::from(body) + p.len() as u64,
+        };
+        let diff = Diff {
+            nodes: vec![NodeChange::Renamed {
+                from: id(&["m", "c", "f"]),
+                to: id(&["m", "c", "f2"]),
+            }],
+            weights: vec![
+                w(&[], 2),
+                w(&["m"], 2),
+                w(&["m", "c"], 2),
+                w(&["m", "c", "f"], 1),
+                w(&["m", "c", "f2"], 1),
+            ],
+            ..Diff::default()
+        };
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        assert!(!blank.is_changed(&id(&["m", "c", "f"])), "f is f2");
+        assert_eq!(blank.progress(), (0, 1));
+        let f2 = mark(&blank, &["m", "c", "f2"]);
+        let state = ReviewState::new(&diff, &base, &head, [&f2]);
+        assert!(state.is_reviewed(&id(&["m", "c"])));
+        assert!(state.is_reviewed(&id(&[])));
+        assert_eq!(state.progress(), (1, 1));
+    }
+
+    #[test]
+    fn a_mark_does_not_carry_to_another_change_of_a_node_without_code() {
+        // A module's own lines (no code hashes): the same id and content
+        // fingerprint, but different changed text, is a different change.
+        let (base, head) = (model(1, 2, None, 0), model(1, 2, None, 0));
+        let change = |digest: u64| Diff {
+            nodes: vec![NodeChange::Changed { id: id(&["m"]) }],
+            weights: vec![
+                Weight {
+                    id: id(&[]),
+                    lines: lines(1),
+                    digest,
+                },
+                Weight {
+                    id: id(&["m"]),
+                    lines: lines(1),
+                    digest,
+                },
+            ],
+            ..Diff::default()
+        };
+        let first = change(11);
+        let m = mark(&ReviewState::new(&first, &base, &head, &[]), &["m"]);
+        assert!(ReviewState::new(&first, &base, &head, [&m]).is_reviewed(&id(&["m"])));
+        let other = ReviewState::new(&change(12), &base, &head, [&m]);
+        assert!(!other.is_reviewed(&id(&["m"])));
     }
 
     #[test]

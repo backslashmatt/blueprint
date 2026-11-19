@@ -27,24 +27,31 @@ Three questions follow:
 
 ## Decision
 
-**Key: option (c).** A mark is stored as (node id, key, reviewed, note). The key is a hash of:
+**Key: option (c), plus the changed text.** A mark is stored as (node id, key, reviewed, note). The key is a hash of:
 - the node's id;
-- the node's fingerprint in base (zero if absent there);
-- the node's fingerprint in head (zero if absent there);
-- `KEY_VERSION`.
+- `KEY_VERSION`;
+- the node's fingerprint in base and in head (zero where it is absent);
+- the digest of its changed lines: a hash of the text of every line the diff counts against the node or below it, on each side, without line numbers. The engine computes it with the change weight (`Weight::digest`), so keys exist only for a full diff.
 
-A fingerprint is a hash of the node's kind, name, source file, visibility, confidence and code hashes, plus its children's fingerprints. It leaves out line numbers, so code that only moved within its file keeps its fingerprint. A mark therefore applies wherever the node changed in exactly the way that was reviewed. This holds after a rebase that leaves the node alone on both sides, and in any review that contains the same change. If either side differs, the mark stops matching and the node shows as unreviewed: a mark is never applied to a change nobody saw. A moved or renamed node uses its base id for the base side.
+A fingerprint is a hash of the node's kind, name, source file, visibility, confidence and code hashes, plus its children's fingerprints. It leaves out line numbers.
+
+Fingerprints alone are not enough. A node with no code hashes still has lines of its own, for example a file no analyser reads (`Cargo.toml`) or a module's `use` lines. Its fingerprint is the same whatever the edit, so without the digest a mark on one change to `Cargo.toml` would carry to every later one.
+
+With both, a mark applies wherever the node changed in exactly the way that was reviewed. That holds after a rebase that leaves the node's change alone, even if its lines moved, and in any review that contains the same change. Otherwise the mark stops matching and the node shows as unreviewed: a mark is never applied to a change nobody saw.
+
+A moved or renamed node is reviewed under its head id. Its base id is not a separate changed node: its removed lines count with the head id's, for the key and for its old parent's roll-up.
 
 **Store: option (b).** `<data>/reviews/<hash of the canonical repository path>.json`, where `<data>` is `$BLUEPRINT_DATA_DIR` or the platform data directory (`~/.local/share/blueprint` on Linux).
 - **Writes:** the whole file is rewritten on each change, through a temporary file and a rename, so a crash leaves the old file or the new one.
-- **Damage:** a file that does not parse is moved aside to `.json.damaged` and reported, never overwritten. The session carries on with no marks (§5.5).
+- **Damage:** a file that does not parse is moved aside to `.json.damaged` and reported. A later one goes to `.json.damaged.1`, never over an earlier one. The session carries on with no marks (§5.5).
+- **Never overwritten:** if the file cannot be read, cannot be moved aside, or was written by a newer version, it is left alone. Marks are not shown and new marks are not saved, and the reviewer is told why.
 - **Clearing a mark:** a mark with neither reviewed nor a note is removed.
 
 **Roll-up.** A changed node is reviewed when it is marked reviewed, or when:
 - every changed child is reviewed, and
 - nothing in the node itself changed: no lines of its own (its weight less its changed children's) and no move, rename or surface change of its own.
 
-A changed node with no changed children needs its own mark. This keeps roll-up honest. For example, a type whose signature changed is not reviewed just because its methods are. Progress is counted over the changed nodes with no changed children.
+A changed node with no changed children needs its own mark. This keeps roll-up honest. For example, a type whose signature changed is not reviewed just because its methods are. Progress is counted over the nodes that need their own mark, so it reaches 100% only when every changed node is reviewed.
 
 The logic is in `blueprint_model::review`, so it has no I/O and any front end, the CLI included, computes the same state. Storage is in `blueprint_engine::reviews`.
 

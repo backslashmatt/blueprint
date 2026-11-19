@@ -330,7 +330,7 @@ pub struct ChangedFile<'a> {
 /// the two are summed by id.
 pub fn weigh(d: &mut Diff, base: &Model, head: &Model, files: &[ChangedFile<'_>]) {
     use imara_diff::{Algorithm, InternedInput};
-    let mut own: BTreeMap<(bool, NodeId), Lines> = BTreeMap::new();
+    let mut own: BTreeMap<(bool, NodeId), (Lines, u64)> = BTreeMap::new();
     let paths: BTreeSet<&blueprint_model::RepoPath> = files.iter().map(|f| f.path).collect();
     let by_base = by_source(base, &paths);
     let by_head = by_source(head, &paths);
@@ -351,47 +351,61 @@ pub fn weigh(d: &mut Diff, base: &Model, head: &Model, files: &[ChangedFile<'_>]
             .filter(|&i| diff.is_added(i))
             .map(|i| i + 1)
             .collect();
-        for (lines, nodes, in_base) in [
-            (&removed, by_base.get(f.path), true),
-            (&added, by_head.get(f.path), false),
+        let (b_text, h_text) = (split_lines(b), split_lines(h));
+        for (lines, text, nodes, in_base) in [
+            (&removed, &b_text, by_base.get(f.path), true),
+            (&added, &h_text, by_head.get(f.path), false),
         ] {
             if lines.is_empty() {
                 continue;
             }
-            for (id, w) in attribute(lines, nodes.map_or(&[][..], Vec::as_slice)) {
-                own.entry((in_base, id))
-                    .or_insert(Lines {
+            let nodes = nodes.map_or(&[][..], Vec::as_slice);
+            for (id, w, digest) in attribute(lines, text, nodes) {
+                let entry = own.entry((in_base, id)).or_insert((
+                    Lines {
                         signature: 0,
                         body: 0,
-                    })
-                    .add(w);
+                    },
+                    0,
+                ));
+                entry.0.add(w);
+                // Files in any order: combined so the order does not matter.
+                entry.1 ^= mix(fnv(f.path.to_string().as_bytes()), digest);
             }
         }
     }
     // Roll up each model's own weights through its own parents.
-    let mut total: BTreeMap<NodeId, Lines> = BTreeMap::new();
+    let mut total: BTreeMap<NodeId, (Lines, u64)> = BTreeMap::new();
     for (model, in_base) in [(base, true), (head, false)] {
-        for ((_, id), w) in own
+        for ((_, id), (w, digest)) in own
             .iter()
             .filter(|((b, id), _)| *b == in_base && model.node(id).is_some())
         {
+            // Each node's own change, tagged with its side and id, so
+            // equal text in two places or on two sides does not cancel out.
+            let part = mix(
+                mix(u64::from(in_base), fnv(id.to_string().as_bytes())),
+                *digest,
+            );
             let mut cur = Some(id.clone());
             while let Some(c) = cur {
-                total
-                    .entry(c.clone())
-                    .or_insert(Lines {
+                let t = total.entry(c.clone()).or_insert((
+                    Lines {
                         signature: 0,
                         body: 0,
-                    })
-                    .add(*w);
+                    },
+                    0,
+                ));
+                t.0.add(*w);
+                t.1 ^= part;
                 cur = model.node(&c).and_then(|n| n.parent.clone());
             }
         }
     }
     d.weights = total
         .into_iter()
-        .filter(|(_, w)| !w.is_zero())
-        .map(|(id, lines)| Weight { id, lines })
+        .filter(|(_, (w, _))| !w.is_zero())
+        .map(|(id, (lines, digest))| Weight { id, lines, digest })
         .collect();
 }
 
@@ -415,14 +429,14 @@ fn by_source<'m>(
 }
 
 /// Each changed line's innermost item, or else the file's own node.
-fn attribute(lines: &[u32], nodes: &[&Node]) -> Vec<(NodeId, Lines)> {
+fn attribute(lines: &[u32], text: &[&[u8]], nodes: &[&Node]) -> Vec<(NodeId, Lines, u64)> {
     // Items by span length, so the innermost claims a line first.
     let mut items: Vec<(&Node, (u32, u32), Option<u32>)> = nodes
         .iter()
         .filter_map(|n| n.code.as_ref().map(|c| (*n, c.lines, c.body_line)))
         .collect();
     items.sort_by_key(|(n, (a, b), _)| (b - a, n.id.clone()));
-    let mut out: BTreeMap<NodeId, Lines> = BTreeMap::new();
+    let mut out: BTreeMap<NodeId, (Lines, u64)> = BTreeMap::new();
     let file = nodes
         .iter()
         .filter(|n| n.code.is_none())
@@ -441,22 +455,97 @@ fn attribute(lines: &[u32], nodes: &[&Node]) -> Vec<(NodeId, Lines)> {
                 None => continue,
             },
         };
-        let w = out.entry(id).or_insert(Lines {
-            signature: 0,
-            body: 0,
-        });
+        let (w, digest) = out.entry(id).or_insert((
+            Lines {
+                signature: 0,
+                body: 0,
+            },
+            fnv(b""),
+        ));
         if signature {
             w.signature += 1;
         } else {
             w.body += 1;
         }
+        // The node's changed lines in order, without their numbers.
+        let line_text = text
+            .get((line as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or_default();
+        *digest = mix(*digest, fnv(line_text));
     }
-    out.into_iter().collect()
+    out.into_iter().map(|(id, (w, d))| (id, w, d)).collect()
+}
+
+/// A file's lines, each with its line ending, as `byte_lines` splits them.
+fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes.split_inclusive(|&b| b == b'\n').collect()
+}
+
+/// 64-bit FNV-1a.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Combines two hashes, in order.
+fn mix(a: u64, b: u64) -> u64 {
+    fnv(&[a.to_le_bytes(), b.to_le_bytes()].concat())
 }
 
 #[cfg(test)]
 mod tests {
     use super::tarjan;
+
+    /// The digest of `f`'s weight, diffing `lib.rs` from `base` to `head`.
+    fn digest_of_f(base: &str, head: &str) -> u64 {
+        use blueprint_model::RepoPath;
+        let lib = RepoPath::parse("src/lib.rs").unwrap_or_else(|_| RepoPath::root());
+        let manifest = RepoPath::parse("Cargo.toml").unwrap_or_else(|_| RepoPath::root());
+        let paths = [manifest.clone(), lib.clone()];
+        let model = |text: &str| {
+            let text = text.to_string();
+            let lib = lib.clone();
+            let read = move |p: &RepoPath| {
+                Some(if *p == lib {
+                    text.clone().into_bytes()
+                } else {
+                    b"[package]\nname = \"a\"\n".to_vec()
+                })
+            };
+            crate::analyse_deep(&paths, &read).0
+        };
+        let (b, h) = (model(base), model(head));
+        let mut d = super::diff(&b, &h);
+        let file = super::ChangedFile {
+            path: &lib,
+            base: Some(base.as_bytes()),
+            head: Some(head.as_bytes()),
+        };
+        super::weigh(&mut d, &b, &h, &[file]);
+        let f = d.weights.iter().find(|w| w.id.to_string().ends_with("/f"));
+        f.map_or(0, |w| w.digest)
+    }
+
+    #[test]
+    fn a_weights_digest_is_the_changed_text_not_its_place() {
+        let one = digest_of_f(
+            "pub fn f() -> u8 {\n    1\n}\n",
+            "pub fn f() -> u8 {\n    2\n}\n",
+        );
+        assert_ne!(one, 0);
+        let moved = digest_of_f(
+            "// a\n// b\npub fn f() -> u8 {\n    1\n}\n",
+            "// a\n// b\npub fn f() -> u8 {\n    2\n}\n",
+        );
+        assert_eq!(one, moved, "the same change two lines lower");
+        let other = digest_of_f(
+            "pub fn f() -> u8 {\n    1\n}\n",
+            "pub fn f() -> u8 {\n    3\n}\n",
+        );
+        assert_ne!(one, other, "a different change");
+    }
 
     #[test]
     fn tarjan_finds_cycles_and_singletons() {
