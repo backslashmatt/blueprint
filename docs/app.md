@@ -44,7 +44,7 @@ Reviewing opens the **map** (#92) at the systems: one level at a time, base and 
 | `c` | Open the selected node's code (its file's diff, at its lines) |
 | Backspace | Up one level; the breadcrumb is in the header |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
-| `=` or `+`, `-` | Zoom in or out, about the middle of the view (25% to 400%) |
+| `=` or `+`, `-` (also with Ctrl or ⌘, and the keypad + −) | Zoom in or out a step of 25%, about the middle of the view, from 26% to 381% |
 | `0` | Back to the selection at 100% |
 | Esc | Back to the review list |
 

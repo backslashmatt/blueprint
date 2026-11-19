@@ -374,13 +374,17 @@ fn view(
     }
 }
 /// How the map view is looked at (#92): the selection is centred, moved
-/// by `pan` (screen pixels) and scaled by `zoom`.
+/// by `pan` (screen pixels) and scaled by `zoom`, which is a whole number of
+/// [`Camera::ZOOM_STEP`]s from 100%, so zooming back always meets 100%.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
     /// Offset from centring the selection, in screen pixels.
     pub pan: (f32, f32),
-    /// Scale, between [`Camera::MIN_ZOOM`] and [`Camera::MAX_ZOOM`].
+    /// Scale: [`Camera::ZOOM_STEP`] to the power `steps`.
     pub zoom: f32,
+    /// Zoom steps from 100%, within [`Camera::MIN_STEPS`] and
+    /// [`Camera::MAX_STEPS`].
+    pub steps: i32,
 }
 
 impl Default for Camera {
@@ -388,15 +392,16 @@ impl Default for Camera {
         Camera {
             pan: (0.0, 0.0),
             zoom: 1.0,
+            steps: 0,
         }
     }
 }
 
 impl Camera {
-    /// The smallest scale.
-    pub const MIN_ZOOM: f32 = 0.25;
-    /// The largest scale.
-    pub const MAX_ZOOM: f32 = 4.0;
+    /// The fewest steps: 1.25^-6, about 26%.
+    pub const MIN_STEPS: i32 = -6;
+    /// The most steps: 1.25^6, about 381%.
+    pub const MAX_STEPS: i32 = 6;
     /// One pan step, in screen pixels.
     pub const PAN_STEP: f32 = 120.0;
     /// One zoom step, as a factor.
@@ -409,10 +414,11 @@ impl Camera {
         self.pan.1 -= dy * Self::PAN_STEP;
     }
 
-    /// Zooms one step in (`steps > 0`) or out, about the screen centre, so
-    /// that what is in the middle stays there.
+    /// Zooms `steps` steps in (`steps > 0`) or out, about the screen
+    /// centre, so that what is in the middle stays there.
     pub fn zoom_by(&mut self, steps: i32) {
-        let to = (self.zoom * Self::ZOOM_STEP.powi(steps)).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.steps = (self.steps + steps).clamp(Self::MIN_STEPS, Self::MAX_STEPS);
+        let to = Self::ZOOM_STEP.powi(self.steps);
         let k = to / self.zoom;
         self.pan = (self.pan.0 * k, self.pan.1 * k);
         self.zoom = to;
@@ -604,10 +610,13 @@ mod tests {
         for _ in 0..40 {
             c.zoom_by(1);
         }
-        assert!((c.zoom - Camera::MAX_ZOOM).abs() < 1e-6);
+        assert_eq!(c.steps, Camera::MAX_STEPS);
+        // Back from the limit, the steps meet 100% again.
+        c.zoom_by(-Camera::MAX_STEPS);
+        assert!((c.zoom - 1.0).abs() < 1e-6, "{}", c.zoom);
         for _ in 0..80 {
             c.zoom_by(-1);
         }
-        assert!((c.zoom - Camera::MIN_ZOOM).abs() < 1e-6);
+        assert_eq!(c.steps, Camera::MIN_STEPS);
     }
 }

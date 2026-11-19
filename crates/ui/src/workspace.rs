@@ -360,6 +360,23 @@ impl Workspace {
                 map.selected = Some(i);
             }
         }
+        // The camera stays only on the same view and selection.
+        let same = |m: &Map| {
+            (
+                m.path.clone(),
+                m.selected
+                    .and_then(|i| m.view.nodes.get(i))
+                    .map(|n| n.id.clone()),
+            )
+        };
+        match review.map.as_ref().map(same) {
+            Some((path, sel)) if path == map.path => {
+                if sel != same(&map).1 {
+                    review.camera.pan = (0.0, 0.0);
+                }
+            }
+            _ => review.camera = Camera::default(),
+        }
         review.map = Some(map);
         review.mapped = Some(detail);
         // The old layout belongs to the old map.
@@ -901,7 +918,8 @@ impl Workspace {
                         r.changed
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, Ctrl+arrows pan, = - 0 zoom, Esc back to the list, F1 all actions."
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, Esc back to the list, F1 all actions.",
+                        pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                     )));
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));

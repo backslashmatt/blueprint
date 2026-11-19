@@ -149,8 +149,18 @@ pub const ACTIONS: &[ActionDef] = &[
         Scope::Map,
         &["ctrl-down", "cmd-down"],
     ),
-    a("map.zoom_in", "Map: zoom in", Scope::Map, &["=", "+"]),
-    a("map.zoom_out", "Map: zoom out", Scope::Map, &["-"]),
+    a(
+        "map.zoom_in",
+        "Map: zoom in",
+        Scope::Map,
+        &["=", "+", "ctrl-=", "cmd-=", "add"],
+    ),
+    a(
+        "map.zoom_out",
+        "Map: zoom out",
+        Scope::Map,
+        &["-", "ctrl--", "cmd--", "subtract"],
+    ),
     a(
         "map.zoom_reset",
         "Map: reset zoom and pan to the selection",
