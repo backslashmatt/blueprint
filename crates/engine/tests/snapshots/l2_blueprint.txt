@@ -49,6 +49,8 @@ nodes:
   L2:cargo:crates/engine#l34  Module  "l34"  Exact  crates/engine/src/l34.rs  Public
   L2:cargo:crates/engine#l34/edges  Module  "l34::edges"  Exact  crates/engine/src/l34/edges.rs  Private
   L2:cargo:crates/engine#resident  Module  "resident"  Exact  crates/engine/src/resident.rs  Public
+  L2:cargo:crates/engine#reviews  Module  "reviews"  Exact  crates/engine/src/reviews.rs  Public
+  L2:cargo:crates/engine#reviews/tests  Module  "reviews::tests"  Exact  crates/engine/src/reviews.rs  Private
   L2:cargo:crates/engine#service  Module  "service"  Exact  crates/engine/src/service.rs  Public
   L2:cargo:crates/engine#source  Module  "source"  Exact  crates/engine/src/source.rs  Public
   L2:cargo:crates/engine#source_diff  Module  "source_diff"  Exact  crates/engine/src/source_diff.rs  Public
@@ -63,6 +65,8 @@ nodes:
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
   L2:cargo:crates/model#lang  Module  "lang"  Exact  crates/model/src/lang.rs  Public
+  L2:cargo:crates/model#review  Module  "review"  Exact  crates/model/src/review.rs  Public
+  L2:cargo:crates/model#review/tests  Module  "review::tests"  Exact  crates/model/src/review.rs  Private
   L2:cargo:crates/model#tests  Module  "tests"  Exact  crates/model/src/lib.rs  Private
   L2:cargo:crates/protocol#tests  Module  "tests"  Exact  crates/protocol/src/lib.rs  Private
   L2:cargo:crates/store#checksum  Module  "checksum"  Exact  crates/store/src/checksum.rs  Private
