@@ -6,6 +6,7 @@ use gpui::{
     Context, IntoElement, ParentElement, Render, Styled, Window, WindowAppearance, div, rgb,
 };
 
+pub mod actions;
 pub mod code_view;
 pub mod layout;
 pub mod map;

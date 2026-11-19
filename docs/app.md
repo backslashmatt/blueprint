@@ -56,6 +56,12 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 | `n` `p` | Next or previous change |
 | Backspace, Esc | Back to the map |
 
+## Command palette
+
+Every action has a key and an entry in the **command palette** (#94, §2.4). F1 (or Ctrl+Shift+P, ⌘⇧P on macOS) opens it over any screen, listing the actions of that screen with their keys. Typing filters them: titles that contain what you typed come first, then titles that contain its letters in order. ↑ ↓ choose, Enter runs the action, Esc closes the palette.
+
+The actions, their titles, where they apply and their keys are one registry (`crates/ui/src/actions.rs`). The workspace runs keys through it, so a key without an action, or an action without a key or palette entry, cannot be added; a test checks every entry.
+
 ## Options for tests and benchmarks
 
 | Option | What it does |
@@ -65,4 +71,4 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 | `--review-report <file>` | Once the review's full map is laid out and every `--script` key has been pressed, writes `{"base", "head", "findings", "changed", "map_nodes", "code_rows"}` and quits; with a code view open, it first waits for its highlighted diff. |
 | `--stay-open` | With `--review-report`: does not quit after writing it, so that a screenshot can be taken. |
 
-CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, and of a code view, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).
+CI runs `blueprint . --script end,b,home,h,enter --review-report review.json` on Ubuntu, Fedora and Windows: it opens this repository, chooses the oldest commit listed as base and the first ref (at `HEAD`) as head by keyboard, waits for the laid-out map, and fails if base and head are the same commit. It then repeats the review through the command palette alone, opening the code of the node it drills to, and fails if no code is shown. On Ubuntu it also uploads screenshots of the map, at the systems and drilled one level, of a code view and of the palette, as the `screenshots` artifact (`.github/scripts/screenshot.sh`).
