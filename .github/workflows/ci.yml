@@ -131,6 +131,37 @@ jobs:
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
   # release; `latest` is not used, so a release never changes CI unannounced.
+
+  # The §4 interaction budgets on Windows (#95): a release build runs the timed session that
+  # bp-bench runs on Linux, on this repository, and the budgets are checked.
+  ui-timings:
+    name: ui timings (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Install toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-app
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build the app (release)
+        run: cargo build --release --locked -p blueprint-app
+      - name: timed session
+        shell: bash
+        run: |
+          # Open the review, drill three levels and back, open code and scroll it, then move
+          # about the map, pan and zoom.
+          keys=end,b,home,h,enter,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace
+          # One unmeasured session indexes the repository first.
+          timeout 300 target/release/blueprint . --script end,b,home,h,enter --review-report warm.json
+          timeout 300 target/release/blueprint . --script $keys --review-report review.json --timings timings.json
+          cat timings.json
+          python .github/scripts/check_ui_timings.py timings.json "$(echo $keys | tr ',' '\n' | wc -l)"
   fedora:
     name: test (fedora-45)
     runs-on: ubuntu-24.04
