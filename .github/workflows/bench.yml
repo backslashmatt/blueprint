@@ -13,6 +13,9 @@ concurrency:
   group: bench-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Runners: GitHub-hosted by default. Setting the repository variable LINUX_RUNNER (or
+# WINDOWS_RUNNER) to a self-hosted runner's label, such as `self-hosted`, moves those jobs onto
+# it without changing this file (#122).
 permissions:
   contents: read
 
@@ -26,7 +29,7 @@ jobs:
   bench:
     name: bench (linux x64)
     # The fixed runner class (DR 0002).
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     # Two cold release builds (fat LTO, the app included) can take 40 min on their own.
     timeout-minutes: 60
     steps:

@@ -15,6 +15,9 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Runners: GitHub-hosted by default. Setting the repository variable LINUX_RUNNER (or
+# WINDOWS_RUNNER) to a self-hosted runner's label, such as `self-hosted`, moves those jobs onto
+# it without changing this file (#122).
 permissions:
   contents: read
 
@@ -25,7 +28,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -41,7 +44,7 @@ jobs:
         # macOS is deferred by the owner (#15, DR 0004); reinstate by adding macos-latest back.
         # Ubuntu is pinned to the current LTS, the named Linux target (§5.1, #37).
         os: [ubuntu-24.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'windows-latest') || (vars.LINUX_RUNNER || matrix.os) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -137,7 +140,7 @@ jobs:
   # bp-bench runs on Linux, on this repository, and the budgets are checked.
   ui-timings:
     name: ui timings (windows-latest)
-    runs-on: windows-latest
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -161,7 +164,7 @@ jobs:
   # Xwayland.
   ui-timings-wayland:
     name: ui timings (wayland, ubuntu-24.04)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -195,7 +198,7 @@ jobs:
   # of the number (docs/app.md, Latency). The §4 check needs real hardware (#96).
   input-latency:
     name: input latency (x11, ubuntu-24.04, informational)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     # Reported, never failing the run.
     continue-on-error: true
     timeout-minutes: 45
@@ -229,7 +232,7 @@ jobs:
 
   fedora:
     name: test (fedora-45)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     container: fedora:45
     timeout-minutes: 30
     steps:
