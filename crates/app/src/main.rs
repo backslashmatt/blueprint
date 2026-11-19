@@ -3,7 +3,7 @@
 //! an empty window that opens a repository from a folder dialog (Ctrl+O).
 //!
 //! ```text
-//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open]]
+//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]]
 //! ```
 //!
 //! - `--cold-start-report <file>` writes the time from process start to the
@@ -27,7 +27,7 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
 static START: OnceLock<Instant> = OnceLock::new();
 
-const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open]]";
+const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]]";
 
 #[derive(Default)]
 struct Args {
@@ -36,6 +36,7 @@ struct Args {
     script: Vec<String>,
     review_report: Option<String>,
     stay_open: bool,
+    timings: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -54,10 +55,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--review-report" => out.review_report = Some(value()?),
             "--stay-open" => out.stay_open = true,
+            "--timings" => out.timings = Some(value()?),
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             repo if out.repo.is_none() => out.repo = Some(repo.to_owned()),
             extra => return Err(format!("unexpected argument {extra}")),
         }
+    }
+    if out.timings.is_some() && out.review_report.is_none() {
+        return Err("--timings needs --review-report".into());
     }
     Ok(out)
 }
@@ -94,6 +99,7 @@ fn main() {
         let script = args.script.clone();
         let review_report = args.review_report.clone();
         let stay_open = args.stay_open;
+        let timings = args.timings.clone();
         let opened = cx
             .open_window(options, |window, cx| {
                 if let Some(path) = report.clone() {
@@ -101,12 +107,19 @@ fn main() {
                 }
                 let to_engine = Arc::clone(&service);
                 let send = Rc::new(move |id, request| to_engine.send(id, request));
-                let ws = cx.new(|cx| Workspace::new(repo.as_deref(), send, script, cx));
+                let timed = timings.is_some();
+                let ws = cx.new(|cx| {
+                    let mut w = Workspace::new(repo.as_deref(), send, script, cx);
+                    if timed {
+                        w.time_keys();
+                    }
+                    w
+                });
                 let focus = ws.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
                 pump(ws.clone(), replies, Arc::clone(&service), cx);
                 if let Some(path) = review_report {
-                    report_review(&ws, path, stay_open, cx);
+                    report_review(&ws, path, timings, stay_open, cx);
                 }
                 ws
             })
@@ -160,7 +173,13 @@ fn pump(
 
 /// Once the review's diff is complete and its map laid out, writes it to
 /// `path` as JSON and quits.
-fn report_review(ws: &gpui::Entity<Workspace>, path: String, stay_open: bool, cx: &mut App) {
+fn report_review(
+    ws: &gpui::Entity<Workspace>,
+    path: String,
+    timings: Option<String>,
+    stay_open: bool,
+    cx: &mut App,
+) {
     let mut written = false;
     cx.observe(ws, move |ws, cx| {
         if written {
@@ -192,6 +211,12 @@ fn report_review(ws: &gpui::Entity<Workspace>, path: String, stay_open: bool, cx
             r.changed,
             map.view.nodes.len()
         );
+        if let Some(t) = &timings
+            && let Err(e) = std::fs::write(t, timings_json(&w.timings))
+        {
+            eprintln!("blueprint: cannot write {t}: {e}");
+            std::process::exit(1);
+        }
         if let Err(e) = std::fs::write(&path, json) {
             eprintln!("blueprint: cannot write {path}: {e}");
             std::process::exit(1);
@@ -202,6 +227,39 @@ fn report_review(ws: &gpui::Entity<Workspace>, path: String, stay_open: bool, cx
         }
     })
     .detach();
+}
+
+/// `s` as the inside of a JSON string.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The timed keys as JSON: `{"keys": [{"key", "action", "opened_code",
+/// "first_frame_ms", "settled_ms"}, …]}`.
+fn timings_json(t: &[blueprint_ui::workspace::KeyTiming]) -> String {
+    let rows: Vec<String> = t
+        .iter()
+        .map(|k| {
+            format!(
+                "{{\"key\": \"{}\", \"action\": {}, \"opened_code\": {}, \"first_frame_ms\": {:.2}, \"settled_ms\": {:.2}}}",
+                json_escape(&k.key),
+                k.action.map_or("null".to_owned(), |a| format!("\"{a}\"")),
+                k.opened_code,
+                k.first_frame_ms,
+                k.settled_ms
+            )
+        })
+        .collect();
+    format!("{{\"keys\": [\n  {}\n]}}\n", rows.join(",\n  "))
 }
 
 #[cfg(test)]
@@ -230,5 +288,7 @@ mod tests {
         assert!(parse(&args(&["--bogus"])).is_err());
         assert!(parse(&args(&["a", "b"])).is_err());
         assert!(parse(&args(&["--script"])).is_err());
+        assert!(parse(&args(&["r", "--timings", "t"])).is_err());
+        assert_eq!(json_escape("a\"b\\c\n'é"), "a\\\"b\\\\c\\u000a'é");
     }
 }
