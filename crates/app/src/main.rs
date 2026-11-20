@@ -90,6 +90,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
 
 fn main() {
     let start = *START.get_or_init(Instant::now);
+    // The system text size is read while GPUI starts, ready for the first
+    // frame (#118).
+    blueprint_ui::text_scale::prefetch();
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&raw) {
         Ok(a) => a,

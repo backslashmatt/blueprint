@@ -178,7 +178,7 @@ pub struct Workspace {
     marks_request: Option<RequestId>,
     /// Marks sent to be stored and not yet answered.
     mark_requests: HashMap<RequestId, Mark>,
-    /// The system text size (#118): 1 until it has been read.
+    /// The system text size (#118).
     text_scale: f32,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
@@ -227,23 +227,8 @@ impl Workspace {
             marks: Vec::new(),
             marks_request: None,
             mark_requests: HashMap::new(),
-            text_scale: 1.0,
+            text_scale: crate::text_scale::get(),
         };
-        // The platform's text size (#118) is read off the main thread, so
-        // the first frame does not wait for it.
-        let scale = cx
-            .background_executor()
-            .spawn(async move { crate::text_scale::system() });
-        cx.spawn(async move |this, cx| {
-            let scale = scale.await;
-            let _ = this.update(cx, |w, cx| {
-                if w.text_scale != scale {
-                    w.text_scale = scale;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
         if let Some(path) = path {
             w.open(path);
         }
@@ -1282,6 +1267,15 @@ impl Render for Workspace {
         // Text and row heights are in rems, so they follow the system's
         // text size.
         window.set_rem_size(px(crate::text_scale::BASE_REM * self.text_scale));
+        // Page keys move a screenful at the current text size.
+        if let Screen::Review(r) = &mut self.screen
+            && let Some(code) = &mut r.code
+        {
+            code.page = crate::code_view::page_rows(
+                f32::from(window.viewport_size().height),
+                f32::from(window.rem_size()),
+            );
+        }
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -1537,6 +1531,8 @@ impl Workspace {
                                     l,
                                     r.camera,
                                     (f32::from(size.width), f32::from(size.height)),
+                                    // The header above the map is in rems.
+                                    7.5 * f32::from(window.rem_size()),
                                     dark,
                                 )),
                         )
@@ -1863,10 +1859,11 @@ fn canvas(
     l: &Layout,
     camera: Camera,
     viewport: (f32, f32),
+    header: f32,
     dark: bool,
 ) -> gpui::Div {
     let m = Metrics::default();
-    let (vw, vh) = (viewport.0, (viewport.1 - 120.0).max(100.0));
+    let (vw, vh) = (viewport.0, (viewport.1 - header).max(100.0));
     let centre = map
         .selected
         .and_then(|i| l.nodes.get(i))

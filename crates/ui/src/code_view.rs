@@ -8,8 +8,21 @@ use std::sync::Arc;
 use blueprint_protocol::Detail;
 use blueprint_protocol::model::diff::{DiffRow, FileDiff, RowKind};
 
-/// Rows a page key moves.
+/// Rows a page key moves until the window has been measured.
 pub const PAGE: usize = 30;
+
+/// Rows a page key moves in a window `height` pixels tall at a rem of
+/// `rem` pixels: a screenful less a row, so no row is passed over unseen.
+/// The header above the rows is about 7.5 rem; rows are 1.125 rem.
+#[must_use]
+pub fn page_rows(height: f32, rem: f32) -> usize {
+    let row = 1.125 * rem;
+    if !(row > 0.0 && height.is_finite()) {
+        return 1;
+    }
+    let rows = ((height - 7.5 * rem) / row).floor();
+    if rows < 2.0 { 1 } else { rows as usize - 1 }
+}
 
 /// Characters a left or right key scrolls.
 pub const COLUMNS: usize = 8;
@@ -34,6 +47,8 @@ pub struct CodeView {
     pub detail: Option<Detail>,
     /// The row under the cursor.
     pub cursor: usize,
+    /// Rows a page key moves: set from the window on every frame.
+    pub page: usize,
     /// Why the diff could not be had, if it could not.
     pub error: Option<String>,
 }
@@ -56,6 +71,7 @@ impl CodeView {
             diff: None,
             detail: None,
             cursor: 0,
+            page: PAGE,
             error: None,
         }
     }
@@ -85,8 +101,8 @@ impl CodeView {
         let to = match key {
             "up" => self.cursor.saturating_sub(1),
             "down" => (self.cursor + 1).min(last),
-            "pageup" => self.cursor.saturating_sub(PAGE),
-            "pagedown" => (self.cursor + PAGE).min(last),
+            "pageup" => self.cursor.saturating_sub(self.page),
+            "pagedown" => (self.cursor + self.page).min(last),
             "home" => 0,
             "end" => last,
             "left" | "right" => {
@@ -206,5 +222,17 @@ mod tests {
         v.key("pageup");
         assert_eq!(v.cursor, 0);
         assert!(!v.key("x"));
+    }
+
+    #[test]
+    fn a_page_is_a_screenful_less_a_row() {
+        // 800 px at the default rem: 680 px of 18 px rows is 37 rows.
+        assert_eq!(page_rows(800.0, 16.0), 36);
+        // Twice the text size: the header grows too, so 560 px of 36 px
+        // rows is 15 rows.
+        assert_eq!(page_rows(800.0, 32.0), 14);
+        // A window too short for rows still moves.
+        assert_eq!(page_rows(100.0, 32.0), 1);
+        assert_eq!(page_rows(f32::NAN, 16.0), 1);
     }
 }
