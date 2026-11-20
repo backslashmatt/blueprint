@@ -123,6 +123,20 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 
 `e` writes a note on the same node `r` would mark: a one-line editor opens with the node's note, Enter saves it (keeping whether the node is reviewed), Esc cancels, and saving an empty note removes it. The note of the node under the cursor is shown under the header, and `bp review` prints notes too.
 
+## Accessibility
+
+Blueprint works with the keyboard alone, and with a screen reader (#118, §5.5):
+
+- **Screen readers.** The app exposes its screens to the platform's accessibility API (AccessKit through GPUI):
+  - the review list, the findings and the outline are named lists, and the outline is a tree;
+  - each row is read without its cursor mark, says whether it is the highlighted row and its place in the list, and for the outline, its level and whether it is expanded;
+  - the map is a named region whose label says where it is, how many nodes it shows, and the selected node's change, review state and edges;
+  - notices are announced as alerts.
+
+  The findings list and the outline together are the map's non-visual equivalent.
+- **Contrast.** Every pair of colours the app draws meets WCAG AA in light and dark themes: 4.5:1 for text, including code colours on changed rows, and 3:1 for map edges. A test checks every pair.
+- **Motion.** Nothing moves on its own: there are no animations or transitions, and the view changes only when you press a key. So there is nothing to turn off for reduced motion.
+
 ## Command palette
 
 Every action has a key and an entry in the **command palette** (#94, §2.4). F1 (or Ctrl+Shift+P, ⌘⇧P on macOS) opens it over any screen, listing the actions of that screen with their keys. Typing filters them: titles that contain what you typed come first, then titles that contain its letters in order. ↑ ↓ choose, Enter runs the action, Esc closes the palette.

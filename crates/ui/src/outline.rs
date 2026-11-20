@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 
 use blueprint_protocol::model::NodeId;
+use blueprint_protocol::model::review::ReviewState;
 
 use crate::map::{EdgeStatus, Map, MapNode, Status};
 
@@ -177,6 +178,41 @@ impl Outline {
             }
         }
     }
+}
+
+/// The map's current view in words, for a screen reader (#118): where it
+/// is, how many nodes it shows, and the selected node with its change,
+/// review state and edges, as the outline puts them.
+#[must_use]
+pub fn map_label(map: &Map, reviewed: Option<&ReviewState>) -> String {
+    let place = map.breadcrumb();
+    let place = if place.is_empty() {
+        "the systems".to_owned()
+    } else {
+        place.join(" › ")
+    };
+    let n = map.view.nodes.len();
+    let mut out = format!("Map of {place}: {n} node{}.", if n == 1 { "" } else { "s" });
+    if let Some(i) = map.selected
+        && let Some(node) = map.view.nodes.get(i)
+    {
+        let (deps, users) = map
+            .view
+            .edges
+            .iter()
+            .filter(|e| e.status != EdgeStatus::Removed)
+            .fold((0, 0), |(d, u), e| {
+                (d + usize::from(e.from == i), u + usize::from(e.to == i))
+            });
+        let done = reviewed.is_some_and(|r| r.is_reviewed(&node.id));
+        out.push_str(&format!(
+            " Selected: {}, {}{}; depends on {deps}, used by {users}.",
+            node.name,
+            status_word(node.status),
+            if done { ", reviewed" } else { "" },
+        ));
+    }
+    out
 }
 
 /// A status in words, for a row (and a screen reader).
@@ -365,6 +401,17 @@ mod tests {
             "the full map has its items"
         );
         assert!(o.apply(&full, Op::Expand));
+    }
+
+    #[test]
+    fn the_map_reads_as_a_sentence() {
+        let mut map = review();
+        let b = map.view.nodes.iter().position(|n| n.name == "b");
+        map.selected = b;
+        let text = map_label(&map, None);
+        assert!(text.starts_with("Map of the systems: "), "{text}");
+        assert!(text.contains("Selected: b, "), "{text}");
+        assert!(text.contains("depends on 1"), "{text}");
     }
 
     #[test]

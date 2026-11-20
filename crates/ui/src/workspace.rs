@@ -17,6 +17,7 @@ use gpui::{
     ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
     div, px, rgb, uniform_list,
 };
+use gpui::{Role, StatefulInteractiveElement};
 
 use crate::Theme;
 use crate::actions::{self, Palette, PaletteEffect, Scope};
@@ -1332,7 +1333,14 @@ impl Workspace {
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
         let root = match &self.notice {
-            Some(n) => root.child(div().text_color(rgb(theme.muted)).child(n.clone())),
+            Some(n) => root.child(
+                div()
+                    .id("notice")
+                    .role(Role::Alert)
+                    .aria_label(n.clone())
+                    .text_color(rgb(theme.muted))
+                    .child(n.clone()),
+            ),
             None => root,
         };
         let root = match &self.palette {
@@ -1398,15 +1406,26 @@ impl Workspace {
                 // Only the rows in view are built; the cursor's row is
                 // scrolled into view as it moves.
                 root.child(div().text_color(rgb(theme.muted)).child(header))
-                    .child(
-                        uniform_list("review-list", lines.len(), move |range, _, _| {
-                            range
-                                .map(|i| div().h(px(22.0)).child(lines[i].clone()))
-                                .collect()
+                    .child(a11y_list(
+                        "review-list-a11y",
+                        "Commits",
+                        Role::List,
+                        uniform_list("review-list", lines.len(), {
+                            let cursor = list.cursor;
+                            move |range, _, _| {
+                                let n = lines.len();
+                                range
+                                    .map(|i| {
+                                        list_item(i, n, &lines[i], i == cursor, Role::ListItem)
+                                            .h(px(22.0))
+                                            .child(lines[i].clone())
+                                    })
+                                    .collect()
+                            }
                         })
                         .track_scroll(&self.scroll)
                         .flex_1(),
-                    )
+                    ))
             }
             Screen::Review(r) => {
                 let state = match r.detail {
@@ -1475,20 +1494,70 @@ impl Workspace {
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
                         let size = window.viewport_size();
-                        root.child(canvas(
-                            map,
-                            r.reviewed.as_ref(),
-                            l,
-                            r.camera,
-                            (f32::from(size.width), f32::from(size.height)),
-                            dark,
-                        ))
+                        root.child(
+                            div()
+                                .id("map")
+                                .role(Role::Group)
+                                .aria_label(outline::map_label(map, r.reviewed.as_ref()))
+                                .child(canvas(
+                                    map,
+                                    r.reviewed.as_ref(),
+                                    l,
+                                    r.camera,
+                                    (f32::from(size.width), f32::from(size.height)),
+                                    dark,
+                                )),
+                        )
                     }
                     _ => root,
                 }
             }
         }
     }
+}
+
+/// A list (or tree) as assistive technology sees it (#118): a named
+/// container with a role, holding the virtualised rows.
+fn a11y_list(
+    id: &'static str,
+    name: &'static str,
+    role: Role,
+    rows: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(role)
+        .aria_label(name)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .child(rows)
+}
+
+/// One row of a list for assistive technology: its text without the
+/// cursor mark, whether it is the highlighted row, and where it is in the
+/// list (only the rows on screen are built).
+fn list_item(
+    i: usize,
+    n: usize,
+    text: &str,
+    selected: bool,
+    role: Role,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(i)
+        .role(role)
+        .aria_label(row_label(text))
+        .aria_selected(selected)
+        .aria_position_in_set(i + 1)
+        .aria_size_of_set(n)
+}
+
+/// A row's text as it is read out: without the cursor mark and the tree's
+/// expand marks drawn in front of it.
+fn row_label(text: &str) -> String {
+    text.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '›' | '▸' | '▾'))
+        .to_owned()
 }
 
 /// The findings list (#114) under the header: one row per finding, the
@@ -1517,15 +1586,24 @@ fn findings_view<E: ParentElement>(
             format!("{mark} {check} {}", findings::label(item, map))
         })
         .collect();
-    root.child(
+    let cursor = list.cursor;
+    root.child(a11y_list(
+        "findings-a11y",
+        "Findings",
+        Role::List,
         uniform_list("findings", rows.len(), move |range, _, _| {
+            let n = rows.len();
             range
-                .map(|i| div().h(px(24.0)).child(rows[i].clone()))
+                .map(|i| {
+                    list_item(i, n, &rows[i], i == cursor, Role::ListItem)
+                        .h(px(24.0))
+                        .child(rows[i].clone())
+                })
                 .collect()
         })
         .track_scroll(scroll)
         .flex_1(),
-    )
+    ))
 }
 
 /// The outline tree (#117): one indented row per node shown, with its
@@ -1559,15 +1637,33 @@ fn outline_view<E: ParentElement>(
             )
         })
         .collect();
-    root.child(
+    let tree: Vec<(usize, Option<bool>)> = o
+        .rows
+        .iter()
+        .map(|r| (r.depth, r.node.has_children.then_some(r.expanded)))
+        .collect();
+    let cursor = o.cursor;
+    root.child(a11y_list(
+        "outline-a11y",
+        "Outline of the map",
+        Role::Tree,
         uniform_list("outline", rows.len(), move |range, _, _| {
+            let n = rows.len();
             range
-                .map(|i| div().h(px(22.0)).whitespace_nowrap().child(rows[i].clone()))
+                .map(|i| {
+                    let (depth, expanded) = tree[i];
+                    list_item(i, n, &rows[i], i == cursor, Role::TreeItem)
+                        .aria_level(depth + 1)
+                        .when_some(expanded, |d, e| d.aria_expanded(e))
+                        .h(px(22.0))
+                        .whitespace_nowrap()
+                        .child(rows[i].clone())
+                })
                 .collect()
         })
         .track_scroll(scroll)
         .flex_1(),
-    )
+    ))
 }
 
 /// The code view key an action stands for.
@@ -2038,6 +2134,19 @@ mod tests {
             }
         }
         assert!(fails.is_empty(), "{fails:#?}");
+    }
+
+    #[test]
+    fn rows_are_read_without_their_marks() {
+        assert_eq!(
+            row_label("› ✓ New dependency: a → b"),
+            "✓ New dependency: a → b"
+        );
+        assert_eq!(
+            row_label("      ▾ m — changed; depends on 1"),
+            "m — changed; depends on 1"
+        );
+        assert_eq!(row_label("  plain"), "plain");
     }
 
     #[test]
