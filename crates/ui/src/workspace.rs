@@ -1198,6 +1198,8 @@ impl Workspace {
             && !node.source.is_empty()
         {
             let (base, head) = (review.base.clone(), review.head.clone());
+            // Its rows are measured afresh, not taken from the last file's.
+            self.code_scroll = UniformListScrollHandle::new();
             review.code = Some(CodeView::new(
                 node.source.clone(),
                 node.name.clone(),
@@ -1467,6 +1469,11 @@ impl Workspace {
                         .track_scroll(&self.scroll)
                         .flex_1(),
                     ))
+                    // Rows end in an ellipsis when they do not fit, so the
+                    // chosen one is also given in full, wrapped (#118).
+                    .when_some(list.rows.get(list.cursor), |d, row| {
+                        d.child(format!("Selected: {}", row.label()))
+                    })
             }
             Screen::Review(r) => {
                 let state = match r.detail {
@@ -1655,6 +1662,12 @@ fn findings_view<E: ParentElement>(
         })
         .collect();
     let cursor = list.cursor;
+    // Rows end in an ellipsis when they do not fit, so the chosen one is
+    // also given in full, wrapped (#118).
+    let selected = list
+        .items
+        .get(cursor)
+        .map(|item| format!("Selected: {}", findings::label(item, map)));
     root.child(a11y_list(
         "findings-a11y",
         "Findings",
@@ -1676,6 +1689,7 @@ fn findings_view<E: ParentElement>(
         .track_scroll(scroll)
         .flex_1(),
     ))
+    .children(selected)
 }
 
 /// The outline tree (#117): one indented row per node shown, with its
@@ -1716,6 +1730,11 @@ fn outline_view<E: ParentElement>(
         .collect();
     let cursor = o.cursor;
     let places = outline::sibling_positions(&o.rows);
+    // Deep or long rows end in an ellipsis, so the chosen one is also
+    // given in full, wrapped (#118).
+    let selected = rows
+        .get(cursor)
+        .map(|r| format!("Selected: {}", r.trim_start_matches(['›', ' '])));
     root.child(a11y_list(
         "outline-a11y",
         "Outline of the map",
@@ -1738,6 +1757,7 @@ fn outline_view<E: ParentElement>(
         .track_scroll(scroll)
         .flex_1(),
     ))
+    .children(selected)
 }
 
 /// The code view key an action stands for.
@@ -1907,7 +1927,7 @@ fn canvas(
     dark: bool,
 ) -> gpui::Div {
     let m = Metrics::default();
-    let (vw, vh) = (area.0.max(100.0), area.1.max(100.0));
+    let (vw, vh) = (area.0.max(1.0), area.1.max(1.0));
     let centre = map
         .selected
         .and_then(|i| l.nodes.get(i))
