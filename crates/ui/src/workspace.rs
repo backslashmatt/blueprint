@@ -1364,6 +1364,9 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .p_6()
+            // At large text sizes the header and lists can be taller than
+            // the window: the screen then scrolls rather than clipping.
+            .overflow_y_scroll()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
         let root = match &self.notice {
@@ -1605,6 +1608,9 @@ fn a11y_list(
         .flex()
         .flex_col()
         .flex_1()
+        // At least two rows stay in view however much text is above, at
+        // any text size; the screen scrolls if that leaves too little.
+        .min_h(rems(3.0))
         .child(rows)
 }
 
@@ -1734,7 +1740,7 @@ fn outline_view<E: ParentElement>(
     // given in full, wrapped (#118).
     let selected = rows
         .get(cursor)
-        .map(|r| format!("Selected: {}", r.trim_start_matches(['›', ' '])));
+        .map(|r| format!("Selected: {}", r.trim_start_matches(['›', ' ', '▸', '▾'])));
     root.child(a11y_list(
         "outline-a11y",
         "Outline of the map",
@@ -2153,7 +2159,8 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
             .collect()
     })
     .track_scroll(scroll)
-    .flex_1();
+    .flex_1()
+    .min_h(rems(2.25));
     div().flex().flex_col().flex_1().child(header).child(list)
 }
 
