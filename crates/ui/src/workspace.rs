@@ -1706,7 +1706,7 @@ fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     match (status, dark) {
         (EdgeStatus::Added, _) => 0x2f9e44,
         (EdgeStatus::Removed, _) => 0xe03131,
-        (EdgeStatus::Unchanged, false) => 0xadb5bd,
+        (EdgeStatus::Unchanged, false) => 0x80888f,
         (EdgeStatus::Unchanged, true) => 0x5c636a,
     }
 }
@@ -1823,9 +1823,9 @@ fn mono_font() -> &'static str {
 
 fn token_colour(class: TokenClass, dark: bool) -> u32 {
     match (class, dark) {
-        (TokenClass::Keyword, false) => 0x8250df,
+        (TokenClass::Keyword, false) => 0x6f42c1,
         (TokenClass::Keyword, true) => 0xd2a8ff,
-        (TokenClass::Type, false) => 0x0a7a7a,
+        (TokenClass::Type, false) => 0x066767,
         (TokenClass::Type, true) => 0x56d4dd,
         (TokenClass::Function, false) => 0x0550ae,
         (TokenClass::Function, true) => 0x79c0ff,
@@ -1833,8 +1833,22 @@ fn token_colour(class: TokenClass, dark: bool) -> u32 {
         (TokenClass::String, true) => 0xa5d6a7,
         (TokenClass::Number, false) => 0x953800,
         (TokenClass::Number, true) => 0xffa657,
-        (TokenClass::Comment, false) => 0x6e7781,
-        (TokenClass::Comment, true) => 0x8b949e,
+        (TokenClass::Comment, false) => 0x57606a,
+        (TokenClass::Comment, true) => 0xa3adb8,
+    }
+}
+
+/// The code view's line numbers.
+fn line_number_colour(dark: bool) -> u32 {
+    if dark { 0x9da7b3 } else { 0x59636e }
+}
+
+/// The code view's row tints: removed, added, and the cursor's row.
+fn row_tints(dark: bool) -> (u32, u32, u32) {
+    if dark {
+        (0x3d1d1d, 0x1d3d24, 0x2d333b)
+    } else {
+        (0xffebe9, 0xe6ffec, 0xeaeef2)
     }
 }
 
@@ -1891,7 +1905,7 @@ fn side(
         div()
             .w(px(48.0))
             .flex_none()
-            .text_color(rgb(if dark { 0x6e7681 } else { 0x8c959f }))
+            .text_color(rgb(line_number_colour(dark)))
             .child(format!("{:>5} ", i + 1)),
     )
     .child(StyledText::new(body).with_highlights(spans))
@@ -1915,11 +1929,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     };
     let cursor = code.cursor;
     let column = code.column;
-    let (removed, added, cursor_bg) = if dark {
-        (0x3d1d1d, 0x1d3d24, 0x2d333b)
-    } else {
-        (0xffebe9, 0xe6ffec, 0xeaeef2)
-    };
+    let (removed, added, cursor_bg) = row_tints(dark);
     let list = uniform_list("code-rows", diff.rows.len(), move |range, _, _| {
         range
             .filter_map(|i| Some((i, *diff.rows.get(i)?)))
@@ -1954,6 +1964,81 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG AA (§5.5): 4.5 for text on everything it is drawn on, 3 for
+    /// graphics (edges) against the background.
+    #[test]
+    fn every_colour_pair_meets_wcag_aa() {
+        use crate::{Theme, contrast};
+        let statuses = [
+            Status::Added,
+            Status::Removed,
+            Status::Surface,
+            Status::Moved,
+            Status::Changed,
+            Status::Contained,
+            Status::Inside,
+            Status::Unchanged,
+        ];
+        let tokens = [
+            TokenClass::Keyword,
+            TokenClass::Type,
+            TokenClass::Function,
+            TokenClass::String,
+            TokenClass::Number,
+            TokenClass::Comment,
+        ];
+        let mut fails = Vec::new();
+        let mut check = |what: String, fg: u32, bg: u32, min: f64| {
+            let c = contrast(fg, bg);
+            if c < min {
+                fails.push(format!("{what}: {c:.2} < {min}"));
+            }
+        };
+        for dark in [false, true] {
+            let theme = if dark { Theme::DARK } else { Theme::LIGHT };
+            check(
+                format!("muted text, dark {dark}"),
+                theme.muted,
+                theme.background,
+                4.5,
+            );
+            for s in statuses {
+                check(
+                    format!("label on {s:?}, dark {dark}"),
+                    theme.text,
+                    fill(s, dark),
+                    4.5,
+                );
+            }
+            for e in [
+                EdgeStatus::Added,
+                EdgeStatus::Removed,
+                EdgeStatus::Unchanged,
+            ] {
+                check(
+                    format!("edge {e:?}, dark {dark}"),
+                    edge_colour(e, dark),
+                    theme.background,
+                    3.0,
+                );
+            }
+            let (removed, added, cursor) = row_tints(dark);
+            for bg in [theme.background, removed, added, cursor] {
+                check(format!("text on {bg:06x}"), theme.text, bg, 4.5);
+                check(
+                    format!("line numbers on {bg:06x}"),
+                    line_number_colour(dark),
+                    bg,
+                    4.5,
+                );
+                for t in tokens {
+                    check(format!("{t:?} on {bg:06x}"), token_colour(t, dark), bg, 4.5);
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{fails:#?}");
+    }
 
     #[test]
     fn every_registered_action_is_handled() {
