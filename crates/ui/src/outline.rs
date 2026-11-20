@@ -180,6 +180,38 @@ impl Outline {
     }
 }
 
+/// Each row's place among its siblings, `(position from 1, how many)`, as a
+/// tree's items report it to assistive technology: not the row's place in
+/// the flattened list, which changes as unrelated branches expand.
+#[must_use]
+pub fn sibling_positions(rows: &[Row]) -> Vec<(usize, usize)> {
+    let mut out = vec![(0, 0); rows.len()];
+    // Per depth, the rows of the sibling set being read.
+    let mut open: Vec<Vec<usize>> = Vec::new();
+    let close = |set: Vec<usize>, out: &mut Vec<(usize, usize)>| {
+        let n = set.len();
+        for (k, i) in set.into_iter().enumerate() {
+            out[i] = (k + 1, n);
+        }
+    };
+    for (i, row) in rows.iter().enumerate() {
+        // Deeper sets end when a shallower row comes.
+        while open.len() > row.depth + 1 {
+            if let Some(set) = open.pop() {
+                close(set, &mut out);
+            }
+        }
+        while open.len() <= row.depth {
+            open.push(Vec::new());
+        }
+        open[row.depth].push(i);
+    }
+    while let Some(set) = open.pop() {
+        close(set, &mut out);
+    }
+    out
+}
+
 /// The map's current view in words, for a screen reader (#118): where it
 /// is, how many nodes it shows, and the selected node with its change,
 /// review state and edges, as the outline puts them.
@@ -401,6 +433,25 @@ mod tests {
             "the full map has its items"
         );
         assert!(o.apply(&full, Op::Expand));
+    }
+
+    #[test]
+    fn tree_items_count_among_their_siblings() {
+        let map = review();
+        let mut o = Outline::new(&map);
+        let roots = o.rows.len();
+        o.cursor = 0;
+        o.apply(&map, Op::Expand);
+        let kids = o.rows.len() - roots;
+        let pos = sibling_positions(&o.rows);
+        assert_eq!(pos[0], (1, roots), "the first root");
+        assert_eq!(pos[1], (1, kids), "its first child");
+        assert_eq!(
+            pos[1 + kids],
+            (2, roots),
+            "the next root, after the children"
+        );
+        assert_eq!(*pos.last().unwrap(), (roots, roots));
     }
 
     #[test]

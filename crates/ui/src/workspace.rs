@@ -1420,9 +1420,15 @@ impl Workspace {
                                 let n = lines.len();
                                 range
                                     .map(|i| {
-                                        list_item(i, n, &lines[i], i == cursor, Role::ListItem)
-                                            .h(px(22.0))
-                                            .child(lines[i].clone())
+                                        list_item(
+                                            i,
+                                            (i + 1, n),
+                                            &lines[i],
+                                            i == cursor,
+                                            Role::ListItem,
+                                        )
+                                        .h(px(22.0))
+                                        .child(lines[i].clone())
                                     })
                                     .collect()
                             }
@@ -1544,7 +1550,7 @@ fn a11y_list(
 /// list (only the rows on screen are built).
 fn list_item(
     i: usize,
-    n: usize,
+    (position, size): (usize, usize),
     text: &str,
     selected: bool,
     role: Role,
@@ -1555,8 +1561,8 @@ fn list_item(
         .aria_label(row_label(text))
         .aria_selected(selected)
         .when(selected, |d| d.aria_active_descendant())
-        .aria_position_in_set(i + 1)
-        .aria_size_of_set(n)
+        .aria_position_in_set(position)
+        .aria_size_of_set(size)
 }
 
 /// A row's text as it is read out: without the cursor mark and the tree's
@@ -1601,7 +1607,7 @@ fn findings_view<E: ParentElement>(
             let n = rows.len();
             range
                 .map(|i| {
-                    list_item(i, n, &rows[i], i == cursor, Role::ListItem)
+                    list_item(i, (i + 1, n), &rows[i], i == cursor, Role::ListItem)
                         .h(px(24.0))
                         .child(rows[i].clone())
                 })
@@ -1649,16 +1655,16 @@ fn outline_view<E: ParentElement>(
         .map(|r| (r.depth, r.node.has_children.then_some(r.expanded)))
         .collect();
     let cursor = o.cursor;
+    let places = outline::sibling_positions(&o.rows);
     root.child(a11y_list(
         "outline-a11y",
         "Outline of the map",
         Role::Tree,
         uniform_list("outline", rows.len(), move |range, _, _| {
-            let n = rows.len();
             range
                 .map(|i| {
                     let (depth, expanded) = tree[i];
-                    list_item(i, n, &rows[i], i == cursor, Role::TreeItem)
+                    list_item(i, places[i], &rows[i], i == cursor, Role::TreeItem)
                         .aria_level(depth + 1)
                         .when_some(expanded, |d, e| d.aria_expanded(e))
                         .h(px(22.0))
