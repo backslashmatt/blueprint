@@ -282,3 +282,9 @@ jobs:
           if grep -q '"code_rows": 0' palette.json; then
             echo "the palette did not reach the code"; exit 1
           fi
+      # The container runs as root. On a reused (self-hosted) runner, files it leaves in the
+      # workspace would belong to root and stop the next job's checkout from cleaning up (#127):
+      # give them back to the runner's user, whatever happened above.
+      - name: Give the workspace back to the runner's user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
