@@ -9,6 +9,7 @@ pub mod code_view;
 pub mod findings;
 pub mod layout;
 pub mod map;
+pub mod outline;
 pub mod review_list;
 pub mod workspace;
 

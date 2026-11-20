@@ -24,6 +24,7 @@ use crate::code_view::CodeView;
 use crate::findings::{self, Findings, Item};
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
 use crate::map::{Camera, EdgeStatus, Map, Status, nearest_towards};
+use crate::outline::{self, Outline};
 use crate::review_list::{self, Effect, ReviewList, short};
 
 /// Sends one request to the engine.
@@ -59,6 +60,8 @@ pub struct Review {
     /// Which changed nodes are reviewed (#115), once the full diff and the
     /// stored marks have both arrived.
     pub reviewed: Option<ReviewState>,
+    /// The outline tree, when it is shown in place of the map (#117).
+    pub outline: Option<Outline>,
     /// The diff as the engine last answered it, for the export (#116).
     pub diff: Option<std::sync::Arc<blueprint_protocol::model::diff::Diff>>,
     /// The file diff request the code view waits for.
@@ -144,6 +147,7 @@ pub struct Workspace {
     scroll: UniformListScrollHandle,
     code_scroll: UniformListScrollHandle,
     findings_scroll: UniformListScrollHandle,
+    outline_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
     /// The note being written, when the note editor is open (#115).
@@ -205,6 +209,7 @@ impl Workspace {
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
             findings_scroll: UniformListScrollHandle::new(),
+            outline_scroll: UniformListScrollHandle::new(),
             palette: None,
             note: None,
             notice: None,
@@ -699,6 +704,9 @@ impl Workspace {
             Screen::Review(r) if r.code.is_some() => {
                 vec![Scope::Code, Scope::Review, Scope::Global]
             }
+            Screen::Review(r) if r.outline.is_some() && r.code.is_none() => {
+                vec![Scope::Outline, Scope::Review, Scope::Global]
+            }
             Screen::Review(r) if r.map.is_some() && r.on_map => {
                 vec![Scope::Map, Scope::Review, Scope::Global]
             }
@@ -768,6 +776,7 @@ impl Workspace {
             Scope::Code => self.run_code(id),
             Scope::Findings => self.run_findings(id, cx),
             Scope::Map => self.run_map(id, cx),
+            Scope::Outline => self.run_outline(id, cx),
             Scope::Review if id == "review.reviewed" => self.toggle_reviewed(),
             Scope::Review if id == "review.note" => self.open_note(),
             Scope::Review if id == "review.export" => match self.export() {
@@ -791,6 +800,11 @@ impl Workspace {
             return None;
         };
         let map = r.map.as_ref()?;
+        if r.code.is_none()
+            && let Some(o) = &r.outline
+        {
+            return o.current().cloned();
+        }
         let selected = || {
             map.selected
                 .and_then(|i| map.view.nodes.get(i))
@@ -1021,6 +1035,45 @@ impl Workspace {
         }
     }
 
+    fn run_outline(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        let (Some(o), Some(map)) = (review.outline.as_mut(), review.map.as_mut()) else {
+            return;
+        };
+        let op = match id {
+            "outline.up" => Some(outline::Op::Up),
+            "outline.down" => Some(outline::Op::Down),
+            "outline.first" => Some(outline::Op::First),
+            "outline.last" => Some(outline::Op::Last),
+            "outline.expand" => Some(outline::Op::Expand),
+            "outline.collapse" => Some(outline::Op::Collapse),
+            _ => None,
+        };
+        if let Some(op) = op {
+            if o.apply(map, op) {
+                self.outline_scroll
+                    .scroll_to_item(o.cursor, ScrollStrategy::Nearest);
+            }
+            return;
+        }
+        // Back to the map, at the highlighted node.
+        let path = map.path.clone();
+        if let Some(node) = o.current().cloned() {
+            map.reveal(&node);
+        }
+        review.outline = None;
+        review.on_map = true;
+        if map.path != path || review.layout.is_none() {
+            review.camera = Camera::default();
+            review.layout = None;
+            self.lay_out(cx);
+        } else {
+            review.camera.pan = (0.0, 0.0);
+        }
+    }
+
     fn run_list(&mut self, id: &str) {
         let Screen::List(list) = &mut self.screen else {
             return;
@@ -1060,6 +1113,7 @@ impl Workspace {
                 on_map: false,
                 reviewed: None,
                 diff: None,
+                outline: None,
             }));
         }
     }
@@ -1090,6 +1144,10 @@ impl Workspace {
         };
         if id == "map.findings" {
             review.on_map = false;
+            return;
+        }
+        if id == "map.outline" {
+            review.outline = review.map.as_ref().map(Outline::new);
             return;
         }
         // Enter on a node with nothing inside, or `c` on any node, opens
@@ -1364,9 +1422,11 @@ impl Workspace {
                         r.findings,
                         r.changed
                     ))
-                    .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
+                    .child(div().text_color(rgb(theme.muted)).child(if r.outline.is_some() {
+                        "Outline: the map as a tree. ↑↓ Home End move, → expand, ← collapse, Enter show on the map, o or Esc the map, r reviewed, e note, x export, F1 all actions.".to_owned()
+                    } else if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, o outline, r reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
@@ -1387,6 +1447,9 @@ impl Workspace {
                 };
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
+                }
+                if let Some(o) = &r.outline {
+                    return outline_view(root, o, r.reviewed.as_ref(), &self.outline_scroll);
                 }
                 if !r.on_map
                     && let (Some(list), Some(map)) = (&r.list, &r.map)
@@ -1448,6 +1511,48 @@ fn findings_view<E: ParentElement>(
         uniform_list("findings", rows.len(), move |range, _, _| {
             range
                 .map(|i| div().h(px(24.0)).child(rows[i].clone()))
+                .collect()
+        })
+        .track_scroll(scroll)
+        .flex_1(),
+    )
+}
+
+/// The outline tree (#117): one indented row per node shown, with its
+/// change, whether it is reviewed and its edges to its siblings, in words.
+fn outline_view<E: ParentElement>(
+    root: E,
+    o: &Outline,
+    reviewed: Option<&ReviewState>,
+    scroll: &UniformListScrollHandle,
+) -> E {
+    let rows: Vec<String> = o
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let cursor = if i == o.cursor { "›" } else { " " };
+            let fold = match (row.node.has_children, row.expanded) {
+                (false, _) => " ",
+                (true, false) => "▸",
+                (true, true) => "▾",
+            };
+            let done = reviewed.is_some_and(|r| r.is_reviewed(&row.node.id));
+            let check = if done { " ✓ reviewed" } else { "" };
+            format!(
+                "{cursor} {indent}{fold} {name} — {status}{check}; depends on {out}, used by {into}",
+                indent = "    ".repeat(row.depth),
+                name = row.node.name,
+                status = outline::status_word(row.node.status),
+                out = row.out,
+                into = row.into,
+            )
+        })
+        .collect();
+    root.child(
+        uniform_list("outline", rows.len(), move |range, _, _| {
+            range
+                .map(|i| div().h(px(22.0)).whitespace_nowrap().child(rows[i].clone()))
                 .collect()
         })
         .track_scroll(scroll)
@@ -1846,7 +1951,10 @@ mod tests {
             let handled = match a.scope {
                 Scope::List => review_list::Action::from_id(a.id).is_some(),
                 Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
-                Scope::Map => a.id == "map.findings" || map_op(a.id).is_some(),
+                Scope::Map => {
+                    matches!(a.id, "map.findings" | "map.outline") || map_op(a.id).is_some()
+                }
+                Scope::Outline => a.id.starts_with("outline."),
                 Scope::Findings => matches!(
                     a.id,
                     "findings.up"

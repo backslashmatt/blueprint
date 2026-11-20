@@ -70,10 +70,23 @@ The **map** (#92), opened from the findings, shows the systems: one level at a t
 | `x` | Copy the review as Markdown |
 | Backspace | Up one level; the breadcrumb is in the header |
 | `f` | Back to the findings |
+| `o` | The outline tree, at the selected node |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
 | `=` or `+`, `-` (also with Ctrl or ⌘, and the keypad + −) | Zoom in or out a step of 25%, about the middle of the view, from 26% to 381% |
 | `0` | Back to the selection at 100% |
 | Esc | Back to the review list |
+
+## Outline
+
+The **outline** (#117, §5.5) is the map as a tree, its non-visual equivalent with the findings list. `o` on the map opens it, expanded down to the map's view with the selected node highlighted. Each row gives the node's name, how it changed in words, whether it is reviewed, and how many of its siblings it depends on and is used by: the map's edges, counted. It is built from the map's own views, so every node the map can show is in it.
+
+| Key | Action |
+|---|---|
+| ↑ ↓ Home End | Move |
+| → | Expand the row, or go to its first child |
+| ← | Collapse the row, or go to its parent |
+| Enter, `o`, Esc | Back to the map, at the highlighted node |
+| `r`, `e`, `x` | Mark the highlighted node reviewed, write a note on it, export the review |
 
 ## Code
 
