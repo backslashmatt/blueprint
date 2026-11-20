@@ -400,19 +400,30 @@ pub fn export(
     use std::fmt::Write as _;
     let basis = &state.basis;
     let short = |c: &str| c.chars().take(10).collect::<String>();
+    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A name as a code span on one line: rendered literally, never a
+    // mention, link or HTML.
+    let code = |name: String| format!("`{}`", one_line(&name).replace('`', "'"));
     let node = |id: &NodeId| {
         format!(
-            "`{}` (L{})",
-            findings::qualified(id, base, head).replace('`', "'"),
+            "{} (L{})",
+            code(findings::qualified(id, base, head)),
             id.level().number()
         )
     };
-    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Each changed node's changed parent.
-    let mut parent: HashMap<&NodeId, &NodeId> = HashMap::new();
+    // A reviewer's note as text: no HTML or comments, no mentions.
+    let text = |t: &str| {
+        one_line(t)
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('@', "&#64;")
+    };
+    // Each changed node's changed parents: a moved node has two.
+    let mut parents: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
     for (id, children) in &basis.changed {
         for c in children {
-            parent.insert(c, id);
+            parents.entry(c).or_default().push(id);
         }
     }
     // Whether anything under each node is reviewed (children before parents).
@@ -454,16 +465,19 @@ pub fn export(
             out,
             "{}. {tick} {}",
             n + 1,
-            findings::label(item, base, head)
+            findings::label_quoted(item, base, head, &code)
         );
     }
 
     let mut noted: HashSet<&NodeId> = HashSet::new();
-    let note = |id: &NodeId| state.mark(id).and_then(|m| m.note.as_deref()).map(one_line);
+    let note = |id: &NodeId| state.mark(id).and_then(|m| m.note.as_deref()).map(text);
     out.push_str("\n### Reviewed\n\n");
     let mut any = false;
     for id in basis.changed.keys() {
-        let top = state.is_reviewed(id) && !parent.get(id).is_some_and(|p| state.is_reviewed(p));
+        let top = state.is_reviewed(id)
+            && !parents
+                .get(id)
+                .is_some_and(|ps| ps.iter().any(|p| state.is_reviewed(p)));
         if top {
             any = true;
             let _ = match note(id) {
@@ -484,11 +498,13 @@ pub fn export(
     let mut stack: Vec<&NodeId> = basis
         .changed
         .keys()
-        .filter(|id| !parent.contains_key(id))
+        .filter(|id| !parents.contains_key(id))
         .rev()
         .collect();
+    // A moved node is under two parents: listed once.
+    let mut seen: HashSet<&NodeId> = HashSet::new();
     while let Some(id) = stack.pop() {
-        if state.is_reviewed(id) {
+        if !seen.insert(id) || state.is_reviewed(id) {
             continue;
         }
         if !touched.contains(id) {
@@ -801,8 +817,7 @@ mod tests {
         assert_eq!(state.progress(), (1, 1));
     }
 
-    #[test]
-    fn a_type_moved_to_another_module_is_one_node_under_its_head_id() {
+    fn moved_type() -> (Model, Model, Diff) {
         // m::c with f and g moves to n::c; n exists on both sides.
         let mut base = Model::default();
         let mut head = Model::default();
@@ -839,6 +854,12 @@ mod tests {
             ],
             ..Diff::default()
         };
+        (base, head, diff)
+    }
+
+    #[test]
+    fn a_type_moved_to_another_module_is_one_node_under_its_head_id() {
+        let (base, head, diff) = moved_type();
         let blank = ReviewState::new(&diff, &base, &head, &[]);
         for gone in [&["m", "c"][..], &["m", "c", "f"], &["m", "c", "g"]] {
             assert!(!blank.is_changed(&id(gone)), "{gone:?} is reviewed as n's");
@@ -892,7 +913,7 @@ mod tests {
         f.note = Some("bounds\nchecked".into());
         let mut g = mark(&blank, &["m", "c", "g"]);
         g.reviewed = false;
-        g.note = Some("why 20?".into());
+        g.note = Some("why 20? <!-- @team".into());
         let state = ReviewState::new(&diff, &base, &head, [&f, &g]);
         let text = export(
             &state,
@@ -909,8 +930,8 @@ Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that n
 
 ### Findings
 
-1. ☐ Change concentrated in a › g: 3 lines (0 in signatures)
-2. ✓ Change concentrated in a › f: 2 lines (0 in signatures)
+1. ☐ Change concentrated in `a › g`: 3 lines (0 in signatures)
+2. ✓ Change concentrated in `a › f`: 2 lines (0 in signatures)
 
 ### Reviewed
 
@@ -922,9 +943,27 @@ Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that n
 
 ### Notes
 
-- `a › g` (L4) (not reviewed): why 20?
+- `a › g` (L4) (not reviewed): why 20? &lt;!-- &#64;team
 ";
         assert_eq!(text, expected, "{text}");
+    }
+
+    #[test]
+    fn the_export_lists_a_moved_node_once() {
+        let (base, head, diff) = moved_type();
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        // Something under the moved type is reviewed, so both its old and
+        // its new module are partly reviewed and walked into.
+        let f = mark(&blank, &["n", "c", "f"]);
+        let state = ReviewState::new(&diff, &base, &head, [&f]);
+        let text = export(&state, &diff, &base, &head, "b", "h");
+        let open = text.split("### Still to review").nth(1).unwrap_or_default();
+        assert_eq!(
+            open.matches("`a › c` (L3): its own change").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(open.matches("`a › g` (L4)").count(), 1, "{text}");
     }
 
     #[test]

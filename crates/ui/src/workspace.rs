@@ -860,6 +860,10 @@ impl Workspace {
         let Screen::Review(r) = &self.screen else {
             return None;
         };
+        // The full map's models: the coarse map has only L1–L2.
+        if r.mapped != Some(Detail::Full) {
+            return None;
+        }
         let (state, diff, map) = (r.reviewed.as_ref()?, r.diff.as_ref()?, r.map.as_ref()?);
         Some(blueprint_protocol::model::review::export(
             state,

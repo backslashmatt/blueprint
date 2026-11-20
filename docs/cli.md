@@ -13,7 +13,7 @@
 | `bp model <dir> --rev <rev>` | Prints the model of commit `<rev>` of the git repository at `<dir>`, not of its working tree. `<rev>` is a branch, tag, full or abbreviated commit id, `HEAD`, or any rev-parse expression such as `main~2` |
 | `bp diff <repo> <base> <head> [--json]` | Prints the architectural diff of two commits |
 | `bp review <repo> <base> <head>` | Prints each changed node of the diff and whether it is reviewed. `--mark <node> [--note <text>]` marks a node reviewed first, `--unmark <node>` marks it not reviewed, `--json` prints JSON |
-| `bp review export <repo> <base> <head>` | Prints the review as Markdown, for a pull request comment: the same text the app copies with `x` |
+| `bp review export <repo> <base> <head>` | Prints the review as Markdown, for a pull request comment: the same text the app copies with `x`. Node names are code spans; notes have `<`, `>`, `&` and `@` escaped, so a pasted export never mentions anyone. A repository directory named `export` is given as `./export` |
 | `bp index <repo> [--rev <rev>] [--level 2\|4]` | Analyses commit `<rev>` (default `HEAD`) and stores its L1–L2 model in the index, so that `bp model --rev` reopens it without analysing. With `--level 4` it also parses every Rust file and stores its facts |
 | `bp --version`, `bp -V` | Prints `bp <version>` |
 | `bp --help`, `bp -h`, `bp help`, `bp` | Prints usage |

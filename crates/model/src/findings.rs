@@ -144,22 +144,40 @@ pub fn qualified(id: &NodeId, base: &Model, head: &Model) -> String {
 /// A finding's text, with node names from `base` and `head`.
 #[must_use]
 pub fn label(item: &Item, base: &Model, head: &Model) -> String {
+    label_quoted(item, base, head, &|n| n)
+}
+
+/// A finding's text with each node name passed through `quote`: the
+/// export puts them in code spans, so names render literally on GitHub.
+#[must_use]
+pub fn label_quoted(
+    item: &Item,
+    base: &Model,
+    head: &Model,
+    quote: &dyn Fn(String) -> String,
+) -> String {
     match item {
         Item::Dependency { from, to } => {
             format!(
                 "New dependency: {} → {}",
-                qualified(from, base, head),
-                qualified(to, base, head)
+                quote(qualified(from, base, head)),
+                quote(qualified(to, base, head))
             )
         }
         Item::Cycle { level, nodes } => {
-            let names: Vec<String> = nodes.iter().map(|n| qualified(n, base, head)).collect();
+            let names: Vec<String> = nodes
+                .iter()
+                .map(|n| quote(qualified(n, base, head)))
+                .collect();
             format!("New cycle at L{level}: {}", names.join(" → "))
         }
-        Item::Surface { id } => format!("Public surface changed: {}", qualified(id, base, head)),
+        Item::Surface { id } => format!(
+            "Public surface changed: {}",
+            quote(qualified(id, base, head))
+        ),
         Item::Concentration { id, lines } => format!(
             "Change concentrated in {}: {} lines ({} in signatures)",
-            qualified(id, base, head),
+            quote(qualified(id, base, head)),
             lines.signature + lines.body,
             lines.signature
         ),
