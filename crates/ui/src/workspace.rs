@@ -1563,7 +1563,9 @@ impl Workspace {
                                 .aria_label(outline::map_label(map, r.reviewed.as_ref()))
                                 .relative()
                                 .flex_1()
-                                .min_h_0()
+                                // Room for a few boxes at any text size; the
+                                // screen scrolls to it if the header is tall.
+                                .min_h(rems(12.0))
                                 .w_full()
                                 .overflow_hidden()
                                 .child(
@@ -1611,6 +1613,9 @@ fn a11y_list(
         // At least two rows stay in view however much text is above, at
         // any text size; the screen scrolls if that leaves too little.
         .min_h(rems(3.0))
+        // The wheel scrolls the list, not the screen around it: the list's
+        // own handler runs first, then the event stops here.
+        .on_scroll(|_, _, cx| cx.stop_propagation())
         .child(rows)
 }
 
@@ -2161,6 +2166,15 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     .track_scroll(scroll)
     .flex_1()
     .min_h(rems(2.25));
+    // As for the other lists: the wheel scrolls the rows, not the screen.
+    let list = div()
+        .id("code-rows-wheel")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(rems(2.25))
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .child(list);
     div().flex().flex_col().flex_1().child(header).child(list)
 }
 
