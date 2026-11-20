@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use blueprint_protocol::model::NodeId;
 
-use crate::map::{Map, MapNode, Status};
+use crate::map::{EdgeStatus, Map, MapNode, Status};
 
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,9 +19,10 @@ pub struct Row {
     pub depth: usize,
     /// Whether its children are shown.
     pub expanded: bool,
-    /// Edges from it to its siblings: what it depends on, in its view.
+    /// Edges in head from it to its siblings: what it depends on, in its
+    /// view. Edges only in base, now gone, are not counted.
     pub out: usize,
-    /// Edges from its siblings to it: what depends on it, in its view.
+    /// Edges in head from its siblings to it: what depends on it.
     pub into: usize,
 }
 
@@ -68,6 +69,15 @@ impl Outline {
             .map(|n| n.id.clone());
         o.select(selected.as_ref());
         o
+    }
+
+    /// Rebuilds the rows from `map`, a newer map of the same review (the
+    /// full one after the coarse one), keeping what is expanded and the
+    /// highlighted node.
+    pub fn refresh(&mut self, map: &Map) {
+        let current = self.current().cloned();
+        self.rebuild(map);
+        self.select(current.as_ref());
     }
 
     /// The highlighted node.
@@ -141,9 +151,18 @@ impl Outline {
     /// one, its children's.
     fn add(&mut self, map: &Map, parent: Option<&NodeId>, depth: usize) {
         let view = map.view_of(parent);
+        // One pass over the view's edges for every row's counts.
+        let (mut outs, mut intos) = (vec![0; view.nodes.len()], vec![0; view.nodes.len()]);
+        for e in view
+            .edges
+            .iter()
+            .filter(|e| e.status != EdgeStatus::Removed)
+        {
+            outs[e.from] += 1;
+            intos[e.to] += 1;
+        }
         for (i, node) in view.nodes.into_iter().enumerate() {
-            let out = view.edges.iter().filter(|e| e.from == i).count();
-            let into = view.edges.iter().filter(|e| e.to == i).count();
+            let (out, into) = (outs[i], intos[i]);
             let expanded = node.has_children && self.expanded.contains(&node.id);
             let id = node.id.clone();
             self.rows.push(Row {
@@ -310,6 +329,42 @@ mod tests {
         o.apply(&map, Op::Last);
         assert_eq!(o.cursor, systems - 1);
         assert!(!o.apply(&map, Op::Down), "stays in the tree");
+    }
+
+    #[test]
+    fn a_newer_map_refreshes_the_rows_and_keeps_the_place() {
+        let full = review();
+        // The coarse map: L1–L2 only, so modules have nothing inside.
+        let coarse = {
+            let strip = |m: &Model| {
+                let keep: Vec<_> = m
+                    .nodes()
+                    .filter(|n| n.id.level() <= blueprint_protocol::model::Level::Module)
+                    .cloned()
+                    .collect();
+                Model::from_trusted_parts(keep, Vec::new())
+            };
+            let (b, h) = (strip(full.base()), strip(full.head()));
+            let diff = blueprint_engine::diff::diff(&b, &h);
+            Map::new(Arc::new(b), Arc::new(h), &diff)
+        };
+        let mut o = Outline::new(&coarse);
+        o.cursor = o.rows.iter().position(|r| r.node.name == "a").unwrap();
+        o.apply(&coarse, Op::Expand);
+        o.apply(&coarse, Op::Expand);
+        let module = o.current().cloned().unwrap();
+        assert!(
+            !o.rows[o.cursor].node.has_children,
+            "nothing inside, coarse"
+        );
+
+        o.refresh(&full);
+        assert_eq!(o.current(), Some(&module), "the same row");
+        assert!(
+            o.rows[o.cursor].node.has_children,
+            "the full map has its items"
+        );
+        assert!(o.apply(&full, Op::Expand));
     }
 
     #[test]

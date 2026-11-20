@@ -500,6 +500,10 @@ impl Workspace {
             list.keep(old.current(), old.cursor);
         }
         review.list = Some(list);
+        // An open outline follows the new map, in place.
+        if let Some(o) = review.outline.as_mut() {
+            o.refresh(&map);
+        }
         review.map = Some(map);
         review.mapped = Some(detail);
 
