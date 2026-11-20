@@ -1152,6 +1152,12 @@ impl Workspace {
         }
         if id == "map.outline" {
             review.outline = review.map.as_ref().map(Outline::new);
+            // A fresh scroll position, at the highlighted row.
+            self.outline_scroll = UniformListScrollHandle::new();
+            if let Some(o) = &review.outline {
+                self.outline_scroll
+                    .scroll_to_item(o.cursor, ScrollStrategy::Center);
+            }
             return;
         }
         // Enter on a node with nothing inside, or `c` on any node, opens
