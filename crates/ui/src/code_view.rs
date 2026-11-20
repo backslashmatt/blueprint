@@ -11,17 +11,16 @@ use blueprint_protocol::model::diff::{DiffRow, FileDiff, RowKind};
 /// Rows a page key moves until the window has been measured.
 pub const PAGE: usize = 30;
 
-/// Rows a page key moves in a window `height` pixels tall at a rem of
-/// `rem` pixels: a screenful less a row, so no row is passed over unseen.
-/// The header above the rows is about 7.5 rem; rows are 1.125 rem.
+/// Rows a page key moves in a list `height` pixels tall whose rows are
+/// `row` pixels, both as last laid out: a screenful less a row, so no row
+/// is passed over unseen. `None` until the list has been laid out.
 #[must_use]
-pub fn page_rows(height: f32, rem: f32) -> usize {
-    let row = 1.125 * rem;
-    if !(row > 0.0 && height.is_finite()) {
-        return 1;
+pub fn page_rows(height: f32, row: f32) -> Option<usize> {
+    if !(row > 0.0 && height > 0.0 && height.is_finite()) {
+        return None;
     }
-    let rows = ((height - 7.5 * rem) / row).floor();
-    if rows < 2.0 { 1 } else { rows as usize - 1 }
+    let rows = (height / row).floor();
+    Some(if rows < 2.0 { 1 } else { rows as usize - 1 })
 }
 
 /// Characters a left or right key scrolls.
@@ -226,13 +225,15 @@ mod tests {
 
     #[test]
     fn a_page_is_a_screenful_less_a_row() {
-        // 800 px at the default rem: 680 px of 18 px rows is 37 rows.
-        assert_eq!(page_rows(800.0, 16.0), 36);
-        // Twice the text size: the header grows too, so 560 px of 36 px
-        // rows is 15 rows.
-        assert_eq!(page_rows(800.0, 32.0), 14);
-        // A window too short for rows still moves.
-        assert_eq!(page_rows(100.0, 32.0), 1);
-        assert_eq!(page_rows(f32::NAN, 16.0), 1);
+        // 640 px of 18 px rows shows 35 whole rows.
+        assert_eq!(page_rows(640.0, 18.0), Some(34));
+        // The same list at twice the text size.
+        assert_eq!(page_rows(640.0, 36.0), Some(16));
+        // A list too short for two rows still moves.
+        assert_eq!(page_rows(30.0, 36.0), Some(1));
+        // Not laid out yet.
+        assert_eq!(page_rows(0.0, 18.0), None);
+        assert_eq!(page_rows(640.0, 0.0), None);
+        assert_eq!(page_rows(f32::NAN, 18.0), None);
     }
 }

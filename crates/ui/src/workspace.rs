@@ -166,6 +166,9 @@ pub struct Workspace {
     frame_started: std::time::Instant,
     /// When the last frame finished painting, while keys are timed.
     painted: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    /// The map's area as last laid out: what is left of the window below
+    /// the header, at whatever text size.
+    map_size: Rc<std::cell::Cell<Option<(f32, f32)>>>,
     /// A message about the last action that went wrong outside the engine
     /// (the folder dialog), shown above the screen until the next key.
     pub notice: Option<String>,
@@ -220,6 +223,7 @@ impl Workspace {
             pending: None,
             timings: Vec::new(),
             painted: Rc::default(),
+            map_size: Rc::default(),
             press_wanted: false,
             frame_started: std::time::Instant::now(),
             seeds: HashMap::new(),
@@ -1138,9 +1142,27 @@ impl Workspace {
         let Some(key) = code_key(id) else {
             return;
         };
-        if let Some(code) = review.code.as_mut()
-            && code.key(key)
+        let Some(code) = review.code.as_mut() else {
+            return;
+        };
+        // Page keys move a screenful of the rows as last laid out, at
+        // whatever text size and window height.
         {
+            // As last laid out: the list's own height, and its content's
+            // height over its rows.
+            let size = self.code_scroll.0.borrow().last_item_size;
+            let rows = code.rows().max(1) as f32;
+            let (height, row) = size.map_or((0.0, 0.0), |s| {
+                (
+                    f32::from(s.item.height),
+                    f32::from(s.contents.height) / rows,
+                )
+            });
+            if let Some(page) = crate::code_view::page_rows(height, row) {
+                code.page = page;
+            }
+        }
+        if code.key(key) {
             self.code_scroll
                 .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
         }
@@ -1267,15 +1289,6 @@ impl Render for Workspace {
         // Text and row heights are in rems, so they follow the system's
         // text size.
         window.set_rem_size(px(crate::text_scale::BASE_REM * self.text_scale));
-        // Page keys move a screenful at the current text size.
-        if let Screen::Review(r) = &mut self.screen
-            && let Some(code) = &mut r.code
-        {
-            code.page = crate::code_view::page_rows(
-                f32::from(window.viewport_size().height),
-                f32::from(window.rem_size()),
-            );
-        }
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -1443,6 +1456,9 @@ impl Workspace {
                                             Role::ListItem,
                                         )
                                         .h(rems(1.375))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
                                         .child(lines[i].clone())
                                     })
                                     .collect()
@@ -1518,23 +1534,46 @@ impl Workspace {
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
-                        let size = window.viewport_size();
+                        // The map fills what the header leaves, measured as
+                        // laid out; before the first layout, an estimate.
+                        let size = self.map_size.get().unwrap_or_else(|| {
+                            let v = window.viewport_size();
+                            let rem = f32::from(window.rem_size());
+                            (
+                                f32::from(v.width) - 3.0 * rem,
+                                f32::from(v.height) - 10.0 * rem,
+                            )
+                        });
+                        let measured = Rc::clone(&self.map_size);
                         root.child(
                             div()
                                 .id("map")
                                 .role(Role::Group)
                                 .aria_active_descendant()
                                 .aria_label(outline::map_label(map, r.reviewed.as_ref()))
-                                .child(canvas(
-                                    map,
-                                    r.reviewed.as_ref(),
-                                    l,
-                                    r.camera,
-                                    (f32::from(size.width), f32::from(size.height)),
-                                    // The header above the map is in rems.
-                                    7.5 * f32::from(window.rem_size()),
-                                    dark,
-                                )),
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .overflow_hidden()
+                                .child(
+                                    gpui::canvas(
+                                        move |b, window, _| {
+                                            let now =
+                                                (f32::from(b.size.width), f32::from(b.size.height));
+                                            // A refresh while drawing is dropped, so
+                                            // the redraw at the measured size is
+                                            // asked for once this frame is done.
+                                            if measured.replace(Some(now)) != Some(now) {
+                                                window.on_next_frame(|w, _| w.refresh());
+                                            }
+                                        },
+                                        |_, (), _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(canvas(map, r.reviewed.as_ref(), l, r.camera, size, dark)),
                         )
                     }
                     _ => root,
@@ -1626,6 +1665,10 @@ fn findings_view<E: ParentElement>(
                 .map(|i| {
                     list_item(i, (i + 1, n), &rows[i], i == cursor, Role::ListItem)
                         .h(rems(1.5))
+                        // One line per row, at any text size or width.
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .child(rows[i].clone())
                 })
                 .collect()
@@ -1686,6 +1729,8 @@ fn outline_view<E: ParentElement>(
                         .when_some(expanded, |d, e| d.aria_expanded(e))
                         .h(rems(1.375))
                         .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .child(rows[i].clone())
                 })
                 .collect()
@@ -1858,12 +1903,11 @@ fn canvas(
     reviewed: Option<&ReviewState>,
     l: &Layout,
     camera: Camera,
-    viewport: (f32, f32),
-    header: f32,
+    area: (f32, f32),
     dark: bool,
 ) -> gpui::Div {
     let m = Metrics::default();
-    let (vw, vh) = (viewport.0, (viewport.1 - header).max(100.0));
+    let (vw, vh) = (area.0.max(100.0), area.1.max(100.0));
     let centre = map
         .selected
         .and_then(|i| l.nodes.get(i))
