@@ -130,12 +130,14 @@ Blueprint works with the keyboard alone, and with a screen reader (#118, §5.5):
 - **Screen readers.** The app exposes its screens to the platform's accessibility API (AccessKit through GPUI):
   - the review list, the findings and the outline are named lists, and the outline is a tree;
   - each row is read without its cursor mark, says whether it is the highlighted row and its place in the list, and for the outline, its level and whether it is expanded;
+  - the highlighted row, or the map, is the focused window's active item, so moving the cursor is read out;
   - the map is a named region whose label says where it is, how many nodes it shows, and the selected node's change, review state and edges;
-  - notices are announced as alerts.
+  - notices carry the alert role. GPUI cannot yet mark them live, so macOS and Windows screen readers find them but do not speak them unprompted.
 
   The findings list and the outline together are the map's non-visual equivalent.
-- **Contrast.** Every pair of colours the app draws meets WCAG AA in light and dark themes: 4.5:1 for text, including code colours on changed rows, and 3:1 for map edges. A test checks every pair.
-- **Motion.** Nothing moves on its own: there are no animations or transitions, and the view changes only when you press a key. So there is nothing to turn off for reduced motion.
+- **Contrast.** Every pair of colours the app draws meets WCAG AA in light and dark themes: 4.5:1 for text, including code colours on changed rows, and 3:1 for map edges. A test checks every pair, map node outlines included (3:1). Added and removed edges differ by colour only; the outline and the findings list say the same without colour.
+- **Motion.** There are no animations or transitions. The view changes when you press a key, or all at once when more of the diff arrives. So there is nothing to turn off for reduced motion.
+- **Text size.** The app does not yet follow the system's text-size setting (#118, still open). Display scaling is followed.
 
 ## Command palette
 

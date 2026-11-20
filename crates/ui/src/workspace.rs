@@ -1312,6 +1312,10 @@ impl Workspace {
         }
         let root = div()
             .id("workspace")
+            // A role, so focus is reported here and the highlighted row
+            // below is announced as its active item (#118).
+            .role(Role::Application)
+            .aria_label("Blueprint")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
@@ -1498,6 +1502,7 @@ impl Workspace {
                             div()
                                 .id("map")
                                 .role(Role::Group)
+                                .aria_active_descendant()
                                 .aria_label(outline::map_label(map, r.reviewed.as_ref()))
                                 .child(canvas(
                                     map,
@@ -1549,6 +1554,7 @@ fn list_item(
         .role(role)
         .aria_label(row_label(text))
         .aria_selected(selected)
+        .when(selected, |d| d.aria_active_descendant())
         .aria_position_in_set(i + 1)
         .aria_size_of_set(n)
 }
@@ -1798,6 +1804,20 @@ fn fill(status: Status, dark: bool) -> u32 {
     }
 }
 
+/// A node's outline: the selection, "something inside changed", or plain.
+/// Each is 3:1 against the background and every fill (WCAG 1.4.11): for an
+/// Inside node, which shares the quiet fill, the outline is the only cue.
+fn border_colour(selected: bool, status: Status, dark: bool) -> u32 {
+    match (selected, status == Status::Inside, dark) {
+        (true, _, false) => 0x1864ab,
+        (true, _, true) => 0x74c0fc,
+        (false, true, false) => 0xb35c00,
+        (false, true, true) => 0xf08c00,
+        (false, false, false) => 0x6c757d,
+        (false, false, true) => 0x9aa1a8,
+    }
+}
+
 fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     match (status, dark) {
         (EdgeStatus::Added, _) => 0x2f9e44,
@@ -1863,15 +1883,7 @@ fn canvas(
             continue;
         }
         let selected = map.selected == Some(i);
-        let border = if selected {
-            0x1c7ed6
-        } else if node.status == Status::Inside {
-            0xf08c00
-        } else if dark {
-            0x495057
-        } else {
-            0xced4da
-        };
+        let border = border_colour(selected, node.status, dark);
         // Reviewed nodes (#115) carry a check: a mark, not only a colour.
         let done = reviewed.is_some_and(|r| r.is_reviewed(&node.id));
         let mut label = if done {
@@ -2106,6 +2118,19 @@ mod tests {
                     fill(s, dark),
                     4.5,
                 );
+            }
+            for s in statuses {
+                for bg in [theme.background, fill(s, dark)] {
+                    for (sel, inside) in [(true, false), (false, true), (false, false)] {
+                        let status = if inside { Status::Inside } else { s };
+                        check(
+                            format!("border sel {sel} inside {inside} on {bg:06x}, dark {dark}"),
+                            border_colour(sel, status, dark),
+                            bg,
+                            3.0,
+                        );
+                    }
+                }
             }
             for e in [
                 EdgeStatus::Added,
