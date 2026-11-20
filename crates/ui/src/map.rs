@@ -239,6 +239,18 @@ impl Map {
         self.selected.is_some()
     }
 
+    /// The base commit's model.
+    #[must_use]
+    pub fn base(&self) -> &Model {
+        &self.base
+    }
+
+    /// The head commit's model.
+    #[must_use]
+    pub fn head(&self) -> &Model {
+        &self.head
+    }
+
     /// A node's parent, from head or else base.
     #[must_use]
     pub fn parent(&self, id: &NodeId) -> Option<NodeId> {

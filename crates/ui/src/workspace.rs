@@ -59,6 +59,8 @@ pub struct Review {
     /// Which changed nodes are reviewed (#115), once the full diff and the
     /// stored marks have both arrived.
     pub reviewed: Option<ReviewState>,
+    /// The diff as the engine last answered it, for the export (#116).
+    pub diff: Option<std::sync::Arc<blueprint_protocol::model::diff::Diff>>,
     /// The file diff request the code view waits for.
     code_request: Option<RequestId>,
 }
@@ -399,6 +401,7 @@ impl Workspace {
                 },
             ) => {
                 review.detail = Some(*detail);
+                review.diff = Some(diff.clone());
                 review.findings = diff.findings.len();
                 review.changed = diff.nodes.len();
                 // Building the map rolls up every edge once: off the UI
@@ -767,6 +770,16 @@ impl Workspace {
             Scope::Map => self.run_map(id, cx),
             Scope::Review if id == "review.reviewed" => self.toggle_reviewed(),
             Scope::Review if id == "review.note" => self.open_note(),
+            Scope::Review if id == "review.export" => match self.export() {
+                Some(text) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    self.notice = Some("The review is on the clipboard as Markdown.".into());
+                }
+                None => {
+                    self.notice =
+                        Some("The review can be exported once the whole diff has loaded.".into());
+                }
+            },
             Scope::Review => self.back_to_list(),
         }
     }
@@ -838,6 +851,24 @@ impl Workspace {
                     .into(),
             );
         }
+    }
+
+    /// The review as Markdown (#116), once its review state is known: the
+    /// same text as `bp review export`.
+    #[must_use]
+    pub fn export(&self) -> Option<String> {
+        let Screen::Review(r) = &self.screen else {
+            return None;
+        };
+        let (state, diff, map) = (r.reviewed.as_ref()?, r.diff.as_ref()?, r.map.as_ref()?);
+        Some(blueprint_protocol::model::review::export(
+            state,
+            diff,
+            map.base(),
+            map.head(),
+            &r.base,
+            &r.head,
+        ))
     }
 
     /// Opens the note editor on the node `r` would mark, with its note.
@@ -1024,6 +1055,7 @@ impl Workspace {
                 list: None,
                 on_map: false,
                 reviewed: None,
+                diff: None,
             }));
         }
     }
@@ -1330,11 +1362,11 @@ impl Workspace {
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, e note, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, r reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, e note, m the map, Esc back to the list, F1 all actions.".to_owned()
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, e note, x export, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
                 // The note on the node `r` and `e` act on, if it has one.
                 let note = self.review_target().and_then(|t| {
@@ -1403,15 +1435,7 @@ fn findings_view<E: ParentElement>(
         .enumerate()
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
-            let done = reviewed.is_some_and(|r| match item {
-                // A cycle is reviewed when every changed node on it is: an
-                // unchanged member has nothing to review.
-                Item::Cycle { nodes, .. } => {
-                    let mut changed = nodes.iter().filter(|n| r.is_changed(n)).peekable();
-                    changed.peek().is_some() && changed.all(|n| r.is_reviewed(n))
-                }
-                _ => item.target().is_some_and(|t| r.is_reviewed(t)),
-            });
+            let done = reviewed.is_some_and(|r| r.is_finding_reviewed(item));
             let check = if done { "✓" } else { " " };
             format!("{mark} {check} {}", findings::label(item, map))
         })
@@ -1829,7 +1853,10 @@ mod tests {
                         | "findings.map"
                 ),
                 Scope::Review => {
-                    matches!(a.id, "review.back" | "review.reviewed" | "review.note")
+                    matches!(
+                        a.id,
+                        "review.back" | "review.reviewed" | "review.note" | "review.export"
+                    )
                 }
                 Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };

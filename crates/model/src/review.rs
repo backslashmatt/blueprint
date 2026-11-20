@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{Diff, Lines, NodeChange};
+use crate::findings::{self, Item};
 use crate::{Model, Node, NodeId};
 
 /// Bumped whenever [`fingerprints`] or [`ReviewState::key`] would give a
@@ -367,6 +368,168 @@ impl Fnv {
     }
 }
 
+impl ReviewState {
+    /// Whether a finding is reviewed: its node is, or for a cycle, every
+    /// changed node on it is (an unchanged one has nothing to review).
+    #[must_use]
+    pub fn is_finding_reviewed(&self, item: &Item) -> bool {
+        match item {
+            Item::Cycle { nodes, .. } => {
+                let mut changed = nodes.iter().filter(|n| self.is_changed(n)).peekable();
+                changed.peek().is_some() && changed.all(|n| self.is_reviewed(n))
+            }
+            _ => item.target().is_some_and(|t| self.is_reviewed(t)),
+        }
+    }
+}
+
+/// The review of `diff` from `base_commit` to `head_commit` as Markdown, for
+/// a pull request comment (#116): the findings in order, ticked where
+/// reviewed; the reviewed nodes, each at the highest level reviewed; what is
+/// still to review, at the highest level nothing has been reviewed under;
+/// and every note. The app and `bp review export` both print this.
+#[must_use]
+pub fn export(
+    state: &ReviewState,
+    diff: &Diff,
+    base: &Model,
+    head: &Model,
+    base_commit: &str,
+    head_commit: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let basis = &state.basis;
+    let short = |c: &str| c.chars().take(10).collect::<String>();
+    let node = |id: &NodeId| {
+        format!(
+            "`{}` (L{})",
+            findings::qualified(id, base, head).replace('`', "'"),
+            id.level().number()
+        )
+    };
+    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Each changed node's changed parent.
+    let mut parent: HashMap<&NodeId, &NodeId> = HashMap::new();
+    for (id, children) in &basis.changed {
+        for c in children {
+            parent.insert(c, id);
+        }
+    }
+    // Whether anything under each node is reviewed (children before parents).
+    let mut touched: HashSet<&NodeId> = HashSet::new();
+    for (id, children) in basis.changed.iter().rev() {
+        if children
+            .iter()
+            .any(|c| state.is_reviewed(c) || touched.contains(c))
+        {
+            touched.insert(id);
+        }
+    }
+
+    let (done, total) = state.progress();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "## Blueprint review: `{}` → `{}`\n",
+        short(base_commit),
+        short(head_commit)
+    );
+    let _ = writeln!(
+        out,
+        "Base `{base_commit}`, head `{head_commit}`. Reviewed {done} of {total} changes that need their own review.\n"
+    );
+
+    out.push_str("### Findings\n\n");
+    let items = findings::items(diff, base, head);
+    if items.is_empty() {
+        out.push_str("None.\n");
+    }
+    for (n, item) in items.iter().enumerate() {
+        let tick = if state.is_finding_reviewed(item) {
+            "✓"
+        } else {
+            "☐"
+        };
+        let _ = writeln!(
+            out,
+            "{}. {tick} {}",
+            n + 1,
+            findings::label(item, base, head)
+        );
+    }
+
+    let mut noted: HashSet<&NodeId> = HashSet::new();
+    let note = |id: &NodeId| state.mark(id).and_then(|m| m.note.as_deref()).map(one_line);
+    out.push_str("\n### Reviewed\n\n");
+    let mut any = false;
+    for id in basis.changed.keys() {
+        let top = state.is_reviewed(id) && !parent.get(id).is_some_and(|p| state.is_reviewed(p));
+        if top {
+            any = true;
+            let _ = match note(id) {
+                Some(n) => {
+                    noted.insert(id);
+                    writeln!(out, "- {}: {n}", node(id))
+                }
+                None => writeln!(out, "- {}", node(id)),
+            };
+        }
+    }
+    if !any {
+        out.push_str("Nothing yet.\n");
+    }
+
+    out.push_str("\n### Still to review\n\n");
+    let mut open: Vec<String> = Vec::new();
+    let mut stack: Vec<&NodeId> = basis
+        .changed
+        .keys()
+        .filter(|id| !parent.contains_key(id))
+        .rev()
+        .collect();
+    while let Some(id) = stack.pop() {
+        if state.is_reviewed(id) {
+            continue;
+        }
+        if !touched.contains(id) {
+            open.push(format!("- {}", node(id)));
+            continue;
+        }
+        // Partly reviewed: its own change, if any, then what is open below.
+        if basis.own_mark.contains(id) {
+            open.push(format!("- {}: its own change", node(id)));
+        }
+        if let Some(children) = basis.changed.get(id) {
+            stack.extend(children.iter().rev());
+        }
+    }
+    if open.is_empty() {
+        out.push_str("Nothing: every change is reviewed.\n");
+    }
+    for line in open {
+        let _ = writeln!(out, "{line}");
+    }
+
+    let notes: Vec<(&NodeId, String)> = basis
+        .changed
+        .keys()
+        .filter(|id| !noted.contains(id))
+        .filter_map(|id| note(id).map(|n| (id, n)))
+        .collect();
+    if !notes.is_empty() {
+        out.push_str("\n### Notes\n\n");
+        for (id, n) in notes {
+            let status = if state.is_reviewed(id) {
+                "reviewed"
+            } else {
+                "not reviewed"
+            };
+            let _ = writeln!(out, "- {} ({status}): {n}", node(id));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +882,49 @@ mod tests {
         assert!(ReviewState::new(&first, &base, &head, [&m]).is_reviewed(&id(&["m"])));
         let other = ReviewState::new(&change(12), &base, &head, [&m]);
         assert!(!other.is_reviewed(&id(&["m"])));
+    }
+
+    #[test]
+    fn the_export_lists_findings_reviewed_nodes_what_is_open_and_notes() {
+        let (base, head, diff) = (model(1, 2, None, 0), model(10, 20, None, 0), diff(0));
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        let mut f = mark(&blank, &["m", "c", "f"]);
+        f.note = Some("bounds\nchecked".into());
+        let mut g = mark(&blank, &["m", "c", "g"]);
+        g.reviewed = false;
+        g.note = Some("why 20?".into());
+        let state = ReviewState::new(&diff, &base, &head, [&f, &g]);
+        let text = export(
+            &state,
+            &diff,
+            &base,
+            &head,
+            "0123456789abcdef",
+            "fedcba9876543210",
+        );
+        let expected = "\
+## Blueprint review: `0123456789` → `fedcba9876`
+
+Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that need their own review.
+
+### Findings
+
+1. ☐ Change concentrated in a › g: 3 lines (0 in signatures)
+2. ✓ Change concentrated in a › f: 2 lines (0 in signatures)
+
+### Reviewed
+
+- `a › f` (L4): bounds checked
+
+### Still to review
+
+- `a › g` (L4)
+
+### Notes
+
+- `a › g` (L4) (not reviewed): why 20?
+";
+        assert_eq!(text, expected, "{text}");
     }
 
     #[test]

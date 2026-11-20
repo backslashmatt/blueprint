@@ -254,6 +254,12 @@ pub const ACTIONS: &[ActionDef] = &[
         &["escape"],
     ),
     a(
+        "review.export",
+        "Review: copy the review as Markdown (for a pull request comment)",
+        Scope::Review,
+        &["x"],
+    ),
+    a(
         "review.note",
         "Review: write a note on the node (the selected node, the finding's, or the code's)",
         Scope::Review,
@@ -490,8 +496,8 @@ mod tests {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
         assert_eq!(
             p.matches.len(),
-            4,
-            "back to the list, note, mark reviewed, open a repository"
+            5,
+            "back to the list, export, note, mark reviewed, open a repository"
         );
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));

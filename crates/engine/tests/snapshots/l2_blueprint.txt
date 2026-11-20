@@ -62,6 +62,7 @@ nodes:
   L2:cargo:crates/model#codec  Module  "codec"  Exact  crates/model/src/codec.rs  Public
   L2:cargo:crates/model#codec/tests  Module  "codec::tests"  Exact  crates/model/src/codec.rs  Private
   L2:cargo:crates/model#diff  Module  "diff"  Exact  crates/model/src/diff.rs  Public
+  L2:cargo:crates/model#findings  Module  "findings"  Exact  crates/model/src/findings.rs  Public
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
   L2:cargo:crates/model#lang  Module  "lang"  Exact  crates/model/src/lang.rs  Public
