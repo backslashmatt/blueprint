@@ -11,6 +11,7 @@ pub mod layout;
 pub mod map;
 pub mod outline;
 pub mod review_list;
+pub mod text_scale;
 pub mod workspace;
 
 /// The colours of one theme (§5.5: light and dark, following the system).

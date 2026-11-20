@@ -15,7 +15,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, FocusHandle, HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
-    div, px, rgb, uniform_list,
+    div, px, rems, rgb, uniform_list,
 };
 use gpui::{Role, StatefulInteractiveElement};
 
@@ -178,6 +178,8 @@ pub struct Workspace {
     marks_request: Option<RequestId>,
     /// Marks sent to be stored and not yet answered.
     mark_requests: HashMap<RequestId, Mark>,
+    /// The system text size (#118): 1 until it has been read.
+    text_scale: f32,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -225,7 +227,23 @@ impl Workspace {
             marks: Vec::new(),
             marks_request: None,
             mark_requests: HashMap::new(),
+            text_scale: 1.0,
         };
+        // The platform's text size (#118) is read off the main thread, so
+        // the first frame does not wait for it.
+        let scale = cx
+            .background_executor()
+            .spawn(async move { crate::text_scale::system() });
+        cx.spawn(async move |this, cx| {
+            let scale = scale.await;
+            let _ = this.update(cx, |w, cx| {
+                if w.text_scale != scale {
+                    w.text_scale = scale;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         if let Some(path) = path {
             w.open(path);
         }
@@ -1261,6 +1279,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_started = std::time::Instant::now();
+        // Text and row heights are in rems, so they follow the system's
+        // text size.
+        window.set_rem_size(px(crate::text_scale::BASE_REM * self.text_scale));
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -1427,7 +1448,7 @@ impl Workspace {
                                             i == cursor,
                                             Role::ListItem,
                                         )
-                                        .h(px(22.0))
+                                        .h(rems(1.375))
                                         .child(lines[i].clone())
                                     })
                                     .collect()
@@ -1608,7 +1629,7 @@ fn findings_view<E: ParentElement>(
             range
                 .map(|i| {
                     list_item(i, (i + 1, n), &rows[i], i == cursor, Role::ListItem)
-                        .h(px(24.0))
+                        .h(rems(1.5))
                         .child(rows[i].clone())
                 })
                 .collect()
@@ -1667,7 +1688,7 @@ fn outline_view<E: ParentElement>(
                     list_item(i, places[i], &rows[i], i == cursor, Role::TreeItem)
                         .aria_level(depth + 1)
                         .when_some(expanded, |d, e| d.aria_expanded(e))
-                        .h(px(22.0))
+                        .h(rems(1.375))
                         .whitespace_nowrap()
                         .child(rows[i].clone())
                 })
@@ -2017,7 +2038,7 @@ fn side(
         .collect();
     cell.child(
         div()
-            .w(px(48.0))
+            .w(rems(3.0))
             .flex_none()
             .text_color(rgb(line_number_colour(dark)))
             .child(format!("{:>5} ", i + 1)),
@@ -2056,10 +2077,10 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
                 };
                 let mut row = div()
                     .w_full()
-                    .h(px(18.0))
+                    .h(rems(1.125))
                     .flex()
                     .flex_row()
-                    .text_size(px(13.0))
+                    .text_size(rems(0.8125))
                     .font_family(mono_font())
                     .child(side(&diff.base, r.base, left, column, dark))
                     .child(side(&diff.head, r.head, right, column, dark));
