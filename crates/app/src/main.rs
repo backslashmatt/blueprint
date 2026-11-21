@@ -105,6 +105,11 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // The window's name, for the window list and screen readers (#118).
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("Blueprint".into()),
+                ..Default::default()
+            }),
             focus: true,
             ..Default::default()
         };
