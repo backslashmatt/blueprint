@@ -1,3 +1,5 @@
 /target
 /bench/repos
 /spikes/*/target
+/exit-review.json
+/exit-review.md

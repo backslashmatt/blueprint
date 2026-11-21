@@ -282,6 +282,59 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  exit-test:
+    # The M4 exit test (REQUIREMENTS §6, #119): a review of one of the agent's own pull
+    # requests (#120, the findings view), end to end with the keyboard only, exported as
+    # Markdown. It keeps the keyboard-only review path from regressing.
+    name: M4 exit test (keyboard-only review, ubuntu-24.04)
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The reviewed pull request's base and head are older than a shallow checkout.
+          fetch-depth: 0
+      - name: Install toolchain from rust-toolchain.toml
+        shell: bash
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install
+      - name: Install the app's libraries and a headless display (see docs/building.md)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-app-exit-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build the app (release)
+        run: cargo build --release --locked -p blueprint-app
+      - name: review #120 by keyboard and export it
+        run: |
+          xvfb-run -a -s "-screen 0 1280x800x24" .github/scripts/exit-test.sh \
+            1169157cbbb84878313606449cb3d59b71b9e2df 9786f409587a9a0295377c9a6c790808106d54a2
+          {
+            echo "### M4 exit test: the exported review of #120"
+            echo
+            cat exit-review.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exit-review
+          path: |
+            exit-review.json
+            exit-review.md
+          if-no-files-found: warn
+
   fedora:
     name: test (fedora-45)
     runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
