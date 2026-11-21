@@ -338,6 +338,16 @@ impl ReviewBasis {
             self.children[i].iter().map(|&c| &self.order[c]).collect()
         })
     }
+
+    /// Every changed node with its changed children, each parent before its
+    /// children (reversed, each child before its parents), which id order
+    /// does not always give.
+    pub fn parents_first(&self) -> impl DoubleEndedIterator<Item = (&NodeId, Vec<&NodeId>)> + '_ {
+        self.topo.iter().map(move |&i| {
+            let children = self.children[i].iter().map(|&c| &self.order[c]).collect();
+            (&self.order[i], children)
+        })
+    }
 }
 
 impl ReviewState {
@@ -393,7 +403,8 @@ impl ReviewState {
 /// The indices of a graph given as each node's children, parents before
 /// their children (Kahn's algorithm, smallest index first, so a graph
 /// already in that order keeps it). A cycle, which the model never has,
-/// would leave its nodes out of the passes; they are appended in index order.
+/// would hold back its nodes and everything under them; those are appended
+/// in index order.
 fn topological(children: &[Vec<usize>]) -> Vec<usize> {
     let n = children.len();
     let mut parents = vec![0usize; n];
@@ -507,7 +518,7 @@ pub fn export(
     }
     // Whether anything under each node is reviewed (children before parents).
     let mut touched: HashSet<&NodeId> = HashSet::new();
-    for (id, children) in basis.entries().rev() {
+    for (id, children) in basis.parents_first().rev() {
         if children
             .iter()
             .any(|&c| state.is_reviewed(c) || touched.contains(c))
@@ -1053,7 +1064,7 @@ Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that n
         assert_eq!(serde_json::from_str::<Mark>(&json).unwrap(), m);
     }
 
-    /// A basis over `ids` in id order, with `children` by index, every node
+    /// A basis over `ids` in that index order, with `children` by index, every node
     /// keyed 1, and `own` marking the nodes only their own mark can review.
     fn basis(ids: &[NodeId], children: Vec<Vec<usize>>, own: Vec<bool>) -> Arc<ReviewBasis> {
         Arc::new(ReviewBasis {
@@ -1081,13 +1092,16 @@ Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that n
 
     #[test]
     fn a_child_that_sorts_before_its_moved_parent_is_still_covered() {
-        // P moved to sort last, its unmoved child C first: P > C > D.
+        // The index order puts the child C, and its child D, before their
+        // parent P: the order a moved node's unmoved child can take. P > C > D.
         let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
         let b = basis(
             &[c.clone(), d.clone(), p.clone()],
             vec![vec![1], vec![], vec![0]],
             vec![false, true, true],
         );
+        let order: Vec<&NodeId> = b.parents_first().map(|(n, _)| n).collect();
+        assert_eq!(order, [&p, &c, &d], "parents first");
         let state = b.state([&reviewed_mark(&p)]);
         for n in [&p, &c, &d] {
             assert!(state.is_reviewed(n), "{n:?} is under a reviewed mark");
@@ -1113,5 +1127,29 @@ Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that n
         assert_eq!(topological(&[vec![], vec![2], vec![0]]), vec![1, 2, 0]);
         // A cycle cannot happen, but its nodes are still visited.
         assert_eq!(topological(&[vec![1], vec![0]]), vec![0, 1]);
+    }
+
+    #[test]
+    fn the_export_walks_into_a_moved_parent_that_sorts_after_its_child() {
+        // P > C > D, with C and D first in index order; only D is reviewed.
+        let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), d.clone(), p.clone()],
+            vec![vec![1], vec![], vec![0]],
+            vec![true, true, true],
+        );
+        let state = b.state([&reviewed_mark(&d)]);
+        let (model, diff) = (Model::default(), Diff::default());
+        let text = export(&state, &diff, &model, &model, "b", "h");
+        let open = text.split("### Still to review").nth(1).unwrap_or_default();
+        let open = open.split("###").next().unwrap_or_default();
+        // P and C are partly reviewed: each is listed for its own change,
+        // and D, which is reviewed, is not listed at all.
+        assert_eq!(open.matches(": its own change").count(), 2, "{text}");
+        assert_eq!(
+            open.lines().filter(|l| l.starts_with("- ")).count(),
+            2,
+            "{text}"
+        );
     }
 }
