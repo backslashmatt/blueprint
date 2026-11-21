@@ -16,8 +16,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Runners: GitHub-hosted by default. Setting the repository variable LINUX_RUNNER (or
-# WINDOWS_RUNNER) to a self-hosted runner's label, such as `self-hosted`, moves those jobs onto
-# it without changing this file (#122).
+# WINDOWS_RUNNER) to a self-hosted runner's label moves pushes and manual runs onto it without
+# changing this file (#122). Use a label that names one machine and its OS, not the generic
+# `self-hosted`, so Linux and Windows jobs cannot land on each other's runner. Pull requests
+# always run on GitHub-hosted runners: the repository is public, and a fork's code must never
+# run on a self-hosted machine.
 permissions:
   contents: read
 
@@ -28,7 +31,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -36,9 +39,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - run: cargo fmt --all --check
@@ -51,7 +57,7 @@ jobs:
         # macOS is deferred by the owner (#15, DR 0004); reinstate by adding macos-latest back.
         # Ubuntu is pinned to the current LTS, the named Linux target (§5.1, #37).
         os: [ubuntu-24.04, windows-latest]
-    runs-on: ${{ matrix.os == 'windows-latest' && (vars.WINDOWS_RUNNER || 'windows-latest') || (vars.LINUX_RUNNER || matrix.os) }}
+    runs-on: ${{ matrix.os == 'windows-latest' && (github.event_name != 'pull_request' && vars.WINDOWS_RUNNER || 'windows-latest') || (github.event_name != 'pull_request' && vars.LINUX_RUNNER || matrix.os) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -62,9 +68,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - name: Install the app's libraries and a headless display (see docs/building.md)
@@ -153,7 +162,7 @@ jobs:
   # bp-bench runs on Linux, on this repository, and the budgets are checked.
   ui-timings:
     name: ui timings (windows-latest)
-    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -163,9 +172,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -183,7 +195,7 @@ jobs:
   # Xwayland.
   ui-timings-wayland:
     name: ui timings (wayland, ubuntu-24.04)
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -193,9 +205,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - name: Install the app's libraries and a headless compositor
@@ -224,7 +239,7 @@ jobs:
   # of the number (docs/app.md, Latency). The §4 check needs real hardware (#96).
   input-latency:
     name: input latency (x11, ubuntu-24.04, informational)
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     # Reported, never failing the run.
     continue-on-error: true
     timeout-minutes: 45
@@ -236,9 +251,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - name: Install the app's libraries, a headless display and xdotool
@@ -265,7 +283,7 @@ jobs:
 
   fedora:
     name: test (fedora-45)
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     container: fedora:45
     timeout-minutes: 30
     steps:

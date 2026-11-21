@@ -14,8 +14,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Runners: GitHub-hosted by default. Setting the repository variable LINUX_RUNNER (or
-# WINDOWS_RUNNER) to a self-hosted runner's label, such as `self-hosted`, moves those jobs onto
-# it without changing this file (#122).
+# WINDOWS_RUNNER) to a self-hosted runner's label moves pushes and manual runs onto it without
+# changing this file (#122). Use a label that names one machine and its OS, not the generic
+# `self-hosted`, so Linux and Windows jobs cannot land on each other's runner. Pull requests
+# always run on GitHub-hosted runners: the repository is public, and a fork's code must never
+# run on a self-hosted machine.
 permissions:
   contents: read
 
@@ -29,7 +32,7 @@ jobs:
   bench:
     name: bench (linux x64)
     # The fixed runner class (DR 0002).
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     # Two cold release builds (fat LTO, the app included) can take 40 min on their own.
     timeout-minutes: 60
     steps:
@@ -38,9 +41,12 @@ jobs:
         shell: bash
         # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
         run: |
-          if [ -d "$HOME/.cargo/bin" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # On Windows, bash's PATH takes /c/... and GITHUB_PATH takes C:\...
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; fi
+          if [ -d "$bin" ]; then
+            export PATH="$bin:$PATH"
+            if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
       - name: Install the app's libraries and a headless display (see docs/building.md)
