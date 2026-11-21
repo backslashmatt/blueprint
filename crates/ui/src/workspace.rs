@@ -9,13 +9,15 @@ use std::rc::Rc;
 use blueprint_protocol::model::NodeId;
 use blueprint_protocol::model::diff::{FileText, RowKind};
 use blueprint_protocol::model::lang::TokenClass;
+use blueprint_protocol::model::review::{Mark, ReviewBasis, ReviewState};
 use blueprint_protocol::{Detail, Reply, Request, RequestId, Response};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, FocusHandle, HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
-    div, px, rgb, uniform_list,
+    div, px, rems, rgb, uniform_list,
 };
+use gpui::{Role, StatefulInteractiveElement};
 
 use crate::Theme;
 use crate::actions::{self, Palette, PaletteEffect, Scope};
@@ -23,6 +25,7 @@ use crate::code_view::CodeView;
 use crate::findings::{self, Findings, Item};
 use crate::layout::{Layout, Metrics, Seed, layout, relayout};
 use crate::map::{Camera, EdgeStatus, Map, Status, nearest_towards};
+use crate::outline::{self, Outline};
 use crate::review_list::{self, Effect, ReviewList, short};
 
 /// Sends one request to the engine.
@@ -55,8 +58,28 @@ pub struct Review {
     pub list: Option<Findings>,
     /// Whether the map is on screen; a review opens on its findings.
     pub on_map: bool,
+    /// Which changed nodes are reviewed (#115), once the full diff and the
+    /// stored marks have both arrived.
+    pub reviewed: Option<ReviewState>,
+    /// The outline tree, when it is shown in place of the map (#117).
+    pub outline: Option<Outline>,
+    /// The diff as the engine last answered it, for the export (#116).
+    pub diff: Option<std::sync::Arc<blueprint_protocol::model::diff::Diff>>,
     /// The file diff request the code view waits for.
     code_request: Option<RequestId>,
+}
+
+/// The one-line editor for a node's review note (#115).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteEditor {
+    /// The node, and the key its mark is stored under.
+    pub node: NodeId,
+    /// [`ReviewState::key`] of the node.
+    pub key: u64,
+    /// The node's name, for the prompt.
+    pub name: String,
+    /// The text so far.
+    pub text: String,
 }
 
 /// One timed `--script` key (#95).
@@ -125,8 +148,11 @@ pub struct Workspace {
     scroll: UniformListScrollHandle,
     code_scroll: UniformListScrollHandle,
     findings_scroll: UniformListScrollHandle,
+    outline_scroll: UniformListScrollHandle,
     /// The command palette, when open (#94).
     pub palette: Option<Palette>,
+    /// The note being written, when the note editor is open (#115).
+    pub note: Option<NoteEditor>,
     /// Whether `--script` keys are timed (#95): pressed one at a time, each
     /// once the last one's effect is on screen.
     timed: bool,
@@ -140,11 +166,23 @@ pub struct Workspace {
     frame_started: std::time::Instant,
     /// When the last frame finished painting, while keys are timed.
     painted: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    /// The map's area as last laid out: what is left of the window below
+    /// the header, at whatever text size.
+    map_size: Rc<std::cell::Cell<Option<(f32, f32)>>>,
     /// A message about the last action that went wrong outside the engine
     /// (the folder dialog), shown above the screen until the next key.
     pub notice: Option<String>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
+    /// Every review mark stored for the open repository (#115), as the
+    /// engine last answered plus the reviewer's marks since.
+    marks: Vec<Mark>,
+    /// The request for the stored marks, while it is unanswered.
+    marks_request: Option<RequestId>,
+    /// Marks sent to be stored and not yet answered.
+    mark_requests: HashMap<RequestId, Mark>,
+    /// The system text size (#118).
+    text_scale: f32,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -177,16 +215,23 @@ impl Workspace {
             scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
             findings_scroll: UniformListScrollHandle::new(),
+            outline_scroll: UniformListScrollHandle::new(),
             palette: None,
+            note: None,
             notice: None,
             timed: false,
             pending: None,
             timings: Vec::new(),
             painted: Rc::default(),
+            map_size: Rc::default(),
             press_wanted: false,
             frame_started: std::time::Instant::now(),
             seeds: HashMap::new(),
             layout_generation: 0,
+            marks: Vec::new(),
+            marks_request: None,
+            mark_requests: HashMap::new(),
+            text_scale: crate::text_scale::get(),
         };
         if let Some(path) = path {
             w.open(path);
@@ -198,6 +243,9 @@ impl Workspace {
     /// asks for its refs. The engine drops its work on the previous one.
     pub fn open(&mut self, path: &str) {
         self.list = None;
+        self.marks.clear();
+        self.marks_request = None;
+        self.mark_requests.clear();
         self.palette = None;
         // Layouts still running belong to the repository left.
         self.layout_generation += 1;
@@ -268,6 +316,53 @@ impl Workspace {
 
     /// Takes in one engine reply.
     pub fn receive(&mut self, reply: Reply, cx: &mut Context<Self>) {
+        match &reply.response {
+            Response::Marks { marks, warning } if self.marks_request == Some(reply.id) => {
+                self.marks_request = None;
+                self.marks.clone_from(marks);
+                // Marks still being stored are newer than what was loaded.
+                let unsaved: Vec<Mark> = self.mark_requests.values().cloned().collect();
+                for m in unsaved {
+                    self.marks.retain(|o| !(o.node == m.node && o.key == m.key));
+                    self.marks.push(m);
+                }
+                if let Some(w) = warning {
+                    self.notice = Some(w.clone());
+                }
+                self.refresh_reviewed();
+                self.replay(cx);
+                cx.notify();
+                return;
+            }
+            Response::Marked { warning, .. } => {
+                self.mark_requests.remove(&reply.id);
+                if let Some(w) = warning {
+                    self.notice = Some(w.clone());
+                }
+                // Observers wait for marks to be stored (`marks_pending`).
+                cx.notify();
+                return;
+            }
+            Response::Failed { error } if self.mark_requests.remove(&reply.id).is_some() => {
+                self.notice = Some(format!("The review mark was not saved: {error}"));
+                cx.notify();
+                return;
+            }
+            Response::Failed { error } if self.marks_request == Some(reply.id) => {
+                self.marks_request = None;
+                self.notice = Some(format!("Review marks could not be loaded: {error}"));
+                // Scripts wait for the load to end, either way.
+                self.replay(cx);
+                cx.notify();
+                return;
+            }
+            // A mark sent meanwhile replaced the load: load again, after it.
+            Response::Superseded if self.marks_request == Some(reply.id) => {
+                self.marks_request = Some(self.request(Request::Marks));
+                return;
+            }
+            _ => {}
+        }
         if let Screen::Review(review) = &mut self.screen
             && review.code_request == Some(reply.id)
         {
@@ -319,6 +414,7 @@ impl Workspace {
                 },
             ) => {
                 review.detail = Some(*detail);
+                review.diff = Some(diff.clone());
                 review.findings = diff.findings.len();
                 review.changed = diff.nodes.len();
                 // Building the map rolls up every edge once: off the UI
@@ -326,6 +422,19 @@ impl Workspace {
                 let (base, head, diff) = (base_model.clone(), head_model.clone(), diff.clone());
                 let detail = *detail;
                 let request = reply.id;
+                // Review state needs the change weights, which only the full
+                // diff has; it reads both models, beside the map (#115).
+                if detail == Detail::Full {
+                    let (base, head, diff) = (base.clone(), head.clone(), diff.clone());
+                    let task = cx.background_executor().spawn(async move {
+                        std::sync::Arc::new(ReviewBasis::new(&diff, &base, &head))
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let basis = task.await;
+                        let _ = this.update(cx, |w, cx| w.basis_ready(request, basis, cx));
+                    })
+                    .detach();
+                }
                 let task = cx.background_executor().spawn(async move {
                     let map = Map::new(base, head, &diff);
                     // The list with the map it is labelled and shown on.
@@ -359,6 +468,11 @@ impl Workspace {
         let Screen::Review(review) = &mut self.screen else {
             return;
         };
+        // The coarse map, built in its own task, can finish after the full
+        // one: it never replaces it.
+        if detail == Detail::Coarse && review.mapped == Some(Detail::Full) {
+            return;
+        }
         if let Some(old) = &review.map {
             for id in &old.path {
                 map.selected = map.view.nodes.iter().position(|n| &n.id == id);
@@ -394,12 +508,41 @@ impl Workspace {
             list.keep(old.current(), old.cursor);
         }
         review.list = Some(list);
+        // An open outline follows the new map, in place.
+        if let Some(o) = review.outline.as_mut() {
+            o.refresh(&map);
+        }
         review.map = Some(map);
         review.mapped = Some(detail);
+
         // The old layout belongs to the old map.
         review.layout = None;
         self.lay_out(cx);
         cx.notify();
+    }
+
+    /// Takes in the review basis of the full diff (#115).
+    fn basis_ready(
+        &mut self,
+        request: RequestId,
+        basis: std::sync::Arc<ReviewBasis>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.waiting != Some(request) {
+            return;
+        }
+        if let Screen::Review(r) = &mut self.screen {
+            r.reviewed = Some(basis.state(&self.marks));
+            self.replay(cx);
+            cx.notify();
+        }
+    }
+
+    /// Whether the stored review marks, or a mark being stored, are still
+    /// awaited.
+    #[must_use]
+    pub fn marks_pending(&self) -> bool {
+        self.marks_request.is_some() || !self.mark_requests.is_empty()
     }
 
     /// Whether `--script` keys are still waiting to be pressed.
@@ -416,6 +559,8 @@ impl Workspace {
             Screen::Review(r) => {
                 r.mapped == Some(Detail::Full)
                     && r.layout.is_some()
+                    && r.reviewed.is_some()
+                    && self.marks_request.is_none()
                     && r.code
                         .as_ref()
                         .is_none_or(|c| c.detail == Some(Detail::Full) || c.error.is_some())
@@ -571,6 +716,9 @@ impl Workspace {
             Screen::Review(r) if r.code.is_some() => {
                 vec![Scope::Code, Scope::Review, Scope::Global]
             }
+            Screen::Review(r) if r.outline.is_some() && r.code.is_none() => {
+                vec![Scope::Outline, Scope::Review, Scope::Global]
+            }
             Screen::Review(r) if r.map.is_some() && r.on_map => {
                 vec![Scope::Map, Scope::Review, Scope::Global]
             }
@@ -590,6 +738,15 @@ impl Workspace {
     /// bound to it on this screen (`crate::actions`).
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) {
         self.notice = None;
+        if self.note.is_some() {
+            let typed = match key {
+                "space" => Some(" ".to_owned()),
+                k if k.chars().count() == 1 => Some(k.to_owned()),
+                _ => None,
+            };
+            self.note_key(key, typed.as_deref());
+            return;
+        }
         // Opening a repository works over the palette too.
         if actions::for_key(&[Scope::Global], key).is_some_and(|a| a.id == "global.open") {
             self.run("global.open", cx);
@@ -631,7 +788,210 @@ impl Workspace {
             Scope::Code => self.run_code(id),
             Scope::Findings => self.run_findings(id, cx),
             Scope::Map => self.run_map(id, cx),
+            Scope::Outline => self.run_outline(id, cx),
+            Scope::Review if id == "review.reviewed" => self.toggle_reviewed(),
+            Scope::Review if id == "review.note" => self.open_note(),
+            Scope::Review if id == "review.export" => match self.export() {
+                Some(text) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    self.notice = Some("The review is on the clipboard as Markdown.".into());
+                }
+                None => {
+                    self.notice =
+                        Some("The review can be exported once the whole diff has loaded.".into());
+                }
+            },
             Scope::Review => self.back_to_list(),
+        }
+    }
+
+    /// The node `r` marks: the code's, else the highlighted finding's on
+    /// the findings list, else the map's selected node.
+    fn review_target(&self) -> Option<NodeId> {
+        let Screen::Review(r) = &self.screen else {
+            return None;
+        };
+        let map = r.map.as_ref()?;
+        if r.code.is_none()
+            && let Some(o) = &r.outline
+        {
+            return o.current().cloned();
+        }
+        let selected = || {
+            map.selected
+                .and_then(|i| map.view.nodes.get(i))
+                .map(|n| n.id.clone())
+        };
+        if r.code.is_some() || r.on_map {
+            return selected();
+        }
+        r.list.as_ref()?.current().and_then(Item::target).cloned()
+    }
+
+    /// Marks the target node reviewed, or, if its own mark says reviewed,
+    /// not reviewed (its note stays). Applied at once; the engine stores it.
+    fn toggle_reviewed(&mut self) {
+        let target = self.review_target();
+        let Screen::Review(r) = &mut self.screen else {
+            return;
+        };
+        let Some(state) = r.reviewed.as_ref() else {
+            self.notice = Some("Review marks are available once the whole diff has loaded.".into());
+            return;
+        };
+        if self.marks_request.is_some() {
+            // A mark made now would not know the stored note, and the load
+            // would hide it.
+            self.notice = Some("Review marks are still loading.".into());
+            return;
+        }
+        let Some(node) = target else {
+            self.notice = Some("Nothing is selected to mark.".into());
+            return;
+        };
+        let Some(key) = state.key(&node) else {
+            self.notice = Some("That node did not change in this review.".into());
+            return;
+        };
+        let own = state.mark(&node);
+        let marked = own.is_some_and(|m| m.reviewed);
+        if !marked && state.is_reviewed(&node) {
+            self.notice =
+                Some("Already reviewed, by a mark above it or on every change under it.".into());
+            return;
+        }
+        let mark = Mark {
+            node,
+            key,
+            reviewed: !marked,
+            note: own.and_then(|m| m.note.clone()),
+        };
+        let node = mark.node.clone();
+        self.store_mark(mark);
+        if marked
+            && let Screen::Review(r) = &self.screen
+            && r.reviewed.as_ref().is_some_and(|st| st.is_reviewed(&node))
+        {
+            self.notice = Some(
+                "Unmarked, but still reviewed: a mark above it, or on every change under it, covers it."
+                    .into(),
+            );
+        }
+    }
+
+    /// The review as Markdown (#116), once its review state is known: the
+    /// same text as `bp review export`.
+    #[must_use]
+    pub fn export(&self) -> Option<String> {
+        let Screen::Review(r) = &self.screen else {
+            return None;
+        };
+        // The full map's models: the coarse map has only L1–L2.
+        if r.mapped != Some(Detail::Full) {
+            return None;
+        }
+        let (state, diff, map) = (r.reviewed.as_ref()?, r.diff.as_ref()?, r.map.as_ref()?);
+        Some(blueprint_protocol::model::review::export(
+            state,
+            diff,
+            map.base(),
+            map.head(),
+            &r.base,
+            &r.head,
+        ))
+    }
+
+    /// Opens the note editor on the node `r` would mark, with its note.
+    fn open_note(&mut self) {
+        let target = self.review_target();
+        let Screen::Review(r) = &self.screen else {
+            return;
+        };
+        let (Some(state), Some(node)) = (r.reviewed.as_ref(), target) else {
+            self.notice = Some("Notes are available once the whole diff has loaded.".into());
+            return;
+        };
+        if self.marks_request.is_some() {
+            self.notice = Some("Review marks are still loading.".into());
+            return;
+        }
+        let Some(key) = state.key(&node) else {
+            self.notice = Some("That node did not change in this review.".into());
+            return;
+        };
+        let text = state
+            .mark(&node)
+            .and_then(|m| m.note.clone())
+            .unwrap_or_default();
+        let name = r
+            .map
+            .as_ref()
+            .map_or_else(|| node.to_string(), |m| m.name(&node));
+        self.note = Some(NoteEditor {
+            node,
+            key,
+            name,
+            text,
+        });
+    }
+
+    /// One key in the note editor: `typed` is the character it types, if
+    /// any.
+    fn note_key(&mut self, key: &str, typed: Option<&str>) {
+        let Some(editor) = self.note.as_mut() else {
+            return;
+        };
+        match key {
+            "escape" => self.note = None,
+            "enter" => {
+                let Some(editor) = self.note.take() else {
+                    return;
+                };
+                let reviewed = match &self.screen {
+                    Screen::Review(r) => r
+                        .reviewed
+                        .as_ref()
+                        .and_then(|st| st.mark(&editor.node))
+                        .is_some_and(|m| m.reviewed),
+                    _ => false,
+                };
+                let text = editor.text.trim();
+                self.store_mark(Mark {
+                    node: editor.node,
+                    key: editor.key,
+                    reviewed,
+                    note: (!text.is_empty()).then(|| text.to_owned()),
+                });
+            }
+            "backspace" => {
+                editor.text.pop();
+            }
+            _ => {
+                if let Some(t) = typed.filter(|t| !t.chars().any(char::is_control)) {
+                    editor.text.push_str(t);
+                }
+            }
+        }
+    }
+
+    /// Applies `mark` at once and sends it to the engine to store.
+    fn store_mark(&mut self, mark: Mark) {
+        self.marks
+            .retain(|m| !(m.node == mark.node && m.key == mark.key));
+        self.marks.push(mark.clone());
+        self.refresh_reviewed();
+        let id = self.request(Request::Mark { mark: mark.clone() });
+        self.mark_requests.insert(id, mark);
+    }
+
+    /// Recomputes the review state from the marks: cheap, as the basis is
+    /// kept (DR 0011).
+    fn refresh_reviewed(&mut self) {
+        if let Screen::Review(r) = &mut self.screen
+            && let Some(state) = r.reviewed.as_ref()
+        {
+            let basis = std::sync::Arc::clone(state.basis());
+            r.reviewed = Some(basis.state(&self.marks));
         }
     }
 
@@ -687,6 +1047,45 @@ impl Workspace {
         }
     }
 
+    fn run_outline(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Screen::Review(review) = &mut self.screen else {
+            return;
+        };
+        let (Some(o), Some(map)) = (review.outline.as_mut(), review.map.as_mut()) else {
+            return;
+        };
+        let op = match id {
+            "outline.up" => Some(outline::Op::Up),
+            "outline.down" => Some(outline::Op::Down),
+            "outline.first" => Some(outline::Op::First),
+            "outline.last" => Some(outline::Op::Last),
+            "outline.expand" => Some(outline::Op::Expand),
+            "outline.collapse" => Some(outline::Op::Collapse),
+            _ => None,
+        };
+        if let Some(op) = op {
+            if o.apply(map, op) {
+                self.outline_scroll
+                    .scroll_to_item(o.cursor, ScrollStrategy::Nearest);
+            }
+            return;
+        }
+        // Back to the map, at the highlighted node.
+        let path = map.path.clone();
+        if let Some(node) = o.current().cloned() {
+            map.reveal(&node);
+        }
+        review.outline = None;
+        review.on_map = true;
+        if map.path != path || review.layout.is_none() {
+            review.camera = Camera::default();
+            review.layout = None;
+            self.lay_out(cx);
+        } else {
+            review.camera.pan = (0.0, 0.0);
+        }
+    }
+
     fn run_list(&mut self, id: &str) {
         let Screen::List(list) = &mut self.screen else {
             return;
@@ -707,6 +1106,8 @@ impl Workspace {
                 head: head.clone(),
             });
             self.waiting = Some(id);
+            // The stored marks, for the review state once the diff is in.
+            self.marks_request = Some(self.request(Request::Marks));
             self.findings_scroll = UniformListScrollHandle::new();
             self.screen = Screen::Review(Box::new(Review {
                 base,
@@ -722,6 +1123,9 @@ impl Workspace {
                 camera: Camera::default(),
                 list: None,
                 on_map: false,
+                reviewed: None,
+                diff: None,
+                outline: None,
             }));
         }
     }
@@ -738,9 +1142,27 @@ impl Workspace {
         let Some(key) = code_key(id) else {
             return;
         };
-        if let Some(code) = review.code.as_mut()
-            && code.key(key)
+        let Some(code) = review.code.as_mut() else {
+            return;
+        };
+        // Page keys move a screenful of the rows as last laid out, at
+        // whatever text size and window height.
         {
+            // As last laid out: the list's own height, and its content's
+            // height over its rows.
+            let size = self.code_scroll.0.borrow().last_item_size;
+            let rows = code.rows().max(1) as f32;
+            let (height, row) = size.map_or((0.0, 0.0), |s| {
+                (
+                    f32::from(s.item.height),
+                    f32::from(s.contents.height) / rows,
+                )
+            });
+            if let Some(page) = crate::code_view::page_rows(height, row) {
+                code.page = page;
+            }
+        }
+        if code.key(key) {
             self.code_scroll
                 .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
         }
@@ -752,6 +1174,16 @@ impl Workspace {
         };
         if id == "map.findings" {
             review.on_map = false;
+            return;
+        }
+        if id == "map.outline" {
+            review.outline = review.map.as_ref().map(Outline::new);
+            // A fresh scroll position, at the highlighted row.
+            self.outline_scroll = UniformListScrollHandle::new();
+            if let Some(o) = &review.outline {
+                self.outline_scroll
+                    .scroll_to_item(o.cursor, ScrollStrategy::Center);
+            }
             return;
         }
         // Enter on a node with nothing inside, or `c` on any node, opens
@@ -766,6 +1198,8 @@ impl Workspace {
             && !node.source.is_empty()
         {
             let (base, head) = (review.base.clone(), review.head.clone());
+            // Its rows are measured afresh, not taken from the last file's.
+            self.code_scroll = UniformListScrollHandle::new();
             review.code = Some(CodeView::new(
                 node.source.clone(),
                 node.name.clone(),
@@ -854,6 +1288,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_started = std::time::Instant::now();
+        // Text and row heights are in rems, so they follow the system's
+        // text size.
+        window.set_rem_size(px(crate::text_scale::BASE_REM * self.text_scale));
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -905,9 +1342,21 @@ impl Workspace {
         }
         let root = div()
             .id("workspace")
+            // A role, so focus is reported here and the highlighted row
+            // below is announced as its active item (#118).
+            .role(Role::Application)
+            .aria_label("Blueprint")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                this.key(&key_name(&ev.keystroke), cx);
+                let k = &ev.keystroke;
+                let m = &k.modifiers;
+                if this.note.is_some() && !(m.control || m.alt || m.platform) {
+                    // The character typed, shift and layout applied.
+                    this.notice = None;
+                    this.note_key(&key_name(k), k.key_char.as_deref());
+                } else {
+                    this.key(&key_name(k), cx);
+                }
                 cx.notify();
             }))
             .size_full()
@@ -915,14 +1364,39 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .p_6()
+            // At large text sizes the header and lists can be taller than
+            // the window: the screen then scrolls rather than clipping.
+            .overflow_y_scroll()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
         let root = match &self.notice {
-            Some(n) => root.child(div().text_color(rgb(theme.muted)).child(n.clone())),
+            Some(n) => root.child(
+                div()
+                    .id("notice")
+                    .role(Role::Alert)
+                    .aria_label(n.clone())
+                    .text_color(rgb(theme.muted))
+                    .child(n.clone()),
+            ),
             None => root,
         };
         let root = match &self.palette {
             Some(p) => root.child(palette_view(p, theme)),
+            None => root,
+        };
+        let root = match &self.note {
+            Some(n) => root.child(
+                div()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(theme.muted))
+                    .child(format!("Note on {}: {}▏", n.name, n.text))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.muted))
+                            .child("Enter saves, Esc cancels; an empty note removes it."),
+                    ),
+            ),
             None => root,
         };
         match &self.screen {
@@ -969,15 +1443,40 @@ impl Workspace {
                 // Only the rows in view are built; the cursor's row is
                 // scrolled into view as it moves.
                 root.child(div().text_color(rgb(theme.muted)).child(header))
-                    .child(
-                        uniform_list("review-list", lines.len(), move |range, _, _| {
-                            range
-                                .map(|i| div().h(px(22.0)).child(lines[i].clone()))
-                                .collect()
+                    .child(a11y_list(
+                        "review-list-a11y",
+                        "Commits",
+                        Role::List,
+                        uniform_list("review-list", lines.len(), {
+                            let cursor = list.cursor;
+                            move |range, _, _| {
+                                let n = lines.len();
+                                range
+                                    .map(|i| {
+                                        list_item(
+                                            i,
+                                            (i + 1, n),
+                                            &lines[i],
+                                            i == cursor,
+                                            Role::ListItem,
+                                        )
+                                        .h(rems(1.375))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(lines[i].clone())
+                                    })
+                                    .collect()
+                            }
                         })
                         .track_scroll(&self.scroll)
                         .flex_1(),
-                    )
+                    ))
+                    // Rows end in an ellipsis when they do not fit, so the
+                    // chosen one is also given in full, wrapped (#118).
+                    .when_some(list.rows.get(list.cursor), |d, row| {
+                        d.child(format!("Selected: {}", row.label()))
+                    })
             }
             Screen::Review(r) => {
                 let state = match r.detail {
@@ -991,46 +1490,160 @@ impl Workspace {
                 } else {
                     crumbs.join(" › ")
                 };
+                let progress = r.reviewed.as_ref().map_or(String::new(), |st| {
+                    let (done, total) = st.progress();
+                    format!("; reviewed {done} of {total}")
+                });
                 let root = root
                     .child(format!(
-                        "Reviewing {} → {}: {} findings, {} changed nodes ({state})",
+                        "Reviewing {} → {}: {} findings, {} changed nodes ({state}{progress})",
                         short(&r.base),
                         short(&r.head),
                         r.findings,
                         r.changed
                     ))
-                    .child(div().text_color(rgb(theme.muted)).child(if r.on_map || r.list.is_none() || r.map.is_none() {
+                    .child(div().text_color(rgb(theme.muted)).child(if r.outline.is_some() {
+                        "Outline: the map as a tree. ↑↓ Home End move, → expand, ← collapse, Enter show on the map, o or Esc the map, r mark ✓ reviewed, e note, x export, F1 all actions.".to_owned()
+                    } else if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, o outline, r mark ✓ reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, m the map, Esc back to the list, F1 all actions.".to_owned()
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r mark ✓ reviewed, e note, x export, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
+                // The note on the node `r` and `e` act on, if it has one.
+                let note = self.review_target().and_then(|t| {
+                    let st = r.reviewed.as_ref()?;
+                    st.mark(&t)?.note.clone()
+                });
+                let root = match note {
+                    Some(n) => root.child(
+                        div()
+                            .text_color(rgb(theme.muted))
+                            .child(format!("Note: {n}")),
+                    ),
+                    None => root,
+                };
                 if let Some(code) = &r.code {
                     return root.child(code_view(code, &self.code_scroll, dark));
+                }
+                if let Some(o) = &r.outline {
+                    return outline_view(root, o, r.reviewed.as_ref(), &self.outline_scroll);
                 }
                 if !r.on_map
                     && let (Some(list), Some(map)) = (&r.list, &r.map)
                 {
-                    return findings_view(root, list, map, &self.findings_scroll);
+                    return findings_view(
+                        root,
+                        list,
+                        map,
+                        r.reviewed.as_ref(),
+                        &self.findings_scroll,
+                    );
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
-                        let size = window.viewport_size();
-                        root.child(canvas(
-                            map,
-                            l,
-                            r.camera,
-                            (f32::from(size.width), f32::from(size.height)),
-                            dark,
-                        ))
+                        // The map fills what the header leaves, measured as
+                        // laid out; before the first layout, an estimate.
+                        let size = self.map_size.get().unwrap_or_else(|| {
+                            let v = window.viewport_size();
+                            let rem = f32::from(window.rem_size());
+                            (
+                                f32::from(v.width) - 3.0 * rem,
+                                f32::from(v.height) - 10.0 * rem,
+                            )
+                        });
+                        let measured = Rc::clone(&self.map_size);
+                        root.child(
+                            div()
+                                .id("map")
+                                .role(Role::Group)
+                                .aria_active_descendant()
+                                .aria_label(outline::map_label(map, r.reviewed.as_ref()))
+                                .relative()
+                                .flex_1()
+                                // Room for a few boxes at any text size; the
+                                // screen scrolls to it if the header is tall.
+                                .min_h(rems(12.0))
+                                .w_full()
+                                .overflow_hidden()
+                                .child(
+                                    gpui::canvas(
+                                        move |b, window, _| {
+                                            let now =
+                                                (f32::from(b.size.width), f32::from(b.size.height));
+                                            // A refresh while drawing is dropped, so
+                                            // the redraw at the measured size is
+                                            // asked for once this frame is done.
+                                            if measured.replace(Some(now)) != Some(now) {
+                                                window.on_next_frame(|w, _| w.refresh());
+                                            }
+                                        },
+                                        |_, (), _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(canvas(map, r.reviewed.as_ref(), l, r.camera, size, dark)),
+                        )
                     }
                     _ => root,
                 }
             }
         }
     }
+}
+
+/// A list (or tree) as assistive technology sees it (#118): a named
+/// container with a role, holding the virtualised rows.
+fn a11y_list(
+    id: &'static str,
+    name: &'static str,
+    role: Role,
+    rows: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(role)
+        .aria_label(name)
+        .flex()
+        .flex_col()
+        .flex_1()
+        // At least two rows stay in view however much text is above, at
+        // any text size; the screen scrolls if that leaves too little.
+        .min_h(rems(3.0))
+        // The wheel scrolls the list, not the screen around it: the list's
+        // own handler runs first, then the event stops here.
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .child(rows)
+}
+
+/// One row of a list for assistive technology: its text without the
+/// cursor mark, whether it is the highlighted row, and where it is in the
+/// list (only the rows on screen are built).
+fn list_item(
+    i: usize,
+    (position, size): (usize, usize),
+    text: &str,
+    selected: bool,
+    role: Role,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(i)
+        .role(role)
+        .aria_label(row_label(text))
+        .aria_selected(selected)
+        .when(selected, |d| d.aria_active_descendant())
+        .aria_position_in_set(position)
+        .aria_size_of_set(size)
+}
+
+/// A row's text as it is read out: without the cursor mark and the tree's
+/// expand marks drawn in front of it.
+fn row_label(text: &str) -> String {
+    text.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '›' | '▸' | '▾'))
+        .to_owned()
 }
 
 /// The findings list (#114) under the header: one row per finding, the
@@ -1040,6 +1653,7 @@ fn findings_view<E: ParentElement>(
     root: E,
     list: &Findings,
     map: &Map,
+    reviewed: Option<&ReviewState>,
     scroll: &UniformListScrollHandle,
 ) -> E {
     if list.items.is_empty() {
@@ -1053,18 +1667,111 @@ fn findings_view<E: ParentElement>(
         .enumerate()
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
-            format!("{mark} {}", findings::label(item, map))
+            let done = reviewed.is_some_and(|r| r.is_finding_reviewed(item));
+            // The help line above shows ✓ too, so its glyph is shaped when
+            // the view opens: on Windows the first ✓ needs a font fallback
+            // that took 22 ms, over the 16 ms input budget, inside `r`.
+            let check = if done { "✓" } else { " " };
+            format!("{mark} {check} {}", findings::label(item, map))
         })
         .collect();
-    root.child(
+    let cursor = list.cursor;
+    // Rows end in an ellipsis when they do not fit, so the chosen one is
+    // also given in full, wrapped (#118).
+    let selected = list
+        .items
+        .get(cursor)
+        .map(|item| format!("Selected: {}", findings::label(item, map)));
+    root.child(a11y_list(
+        "findings-a11y",
+        "Findings",
+        Role::List,
         uniform_list("findings", rows.len(), move |range, _, _| {
+            let n = rows.len();
             range
-                .map(|i| div().h(px(24.0)).child(rows[i].clone()))
+                .map(|i| {
+                    list_item(i, (i + 1, n), &rows[i], i == cursor, Role::ListItem)
+                        .h(rems(1.5))
+                        // One line per row, at any text size or width.
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(rows[i].clone())
+                })
                 .collect()
         })
         .track_scroll(scroll)
         .flex_1(),
-    )
+    ))
+    .children(selected)
+}
+
+/// The outline tree (#117): one indented row per node shown, with its
+/// change, whether it is reviewed and its edges to its siblings, in words.
+fn outline_view<E: ParentElement>(
+    root: E,
+    o: &Outline,
+    reviewed: Option<&ReviewState>,
+    scroll: &UniformListScrollHandle,
+) -> E {
+    let rows: Vec<String> = o
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let cursor = if i == o.cursor { "›" } else { " " };
+            let fold = match (row.node.has_children, row.expanded) {
+                (false, _) => " ",
+                (true, false) => "▸",
+                (true, true) => "▾",
+            };
+            let done = reviewed.is_some_and(|r| r.is_reviewed(&row.node.id));
+            let check = if done { " ✓ reviewed" } else { "" };
+            format!(
+                "{cursor} {indent}{fold} {name} — {status}{check}; depends on {out}, used by {into}",
+                indent = "    ".repeat(row.depth),
+                name = row.node.name,
+                status = outline::status_word(row.node.status),
+                out = row.out,
+                into = row.into,
+            )
+        })
+        .collect();
+    let tree: Vec<(usize, Option<bool>)> = o
+        .rows
+        .iter()
+        .map(|r| (r.depth, r.node.has_children.then_some(r.expanded)))
+        .collect();
+    let cursor = o.cursor;
+    let places = outline::sibling_positions(&o.rows);
+    // Deep or long rows end in an ellipsis, so the chosen one is also
+    // given in full, wrapped (#118).
+    let selected = rows
+        .get(cursor)
+        .map(|r| format!("Selected: {}", r.trim_start_matches(['›', ' ', '▸', '▾'])));
+    root.child(a11y_list(
+        "outline-a11y",
+        "Outline of the map",
+        Role::Tree,
+        uniform_list("outline", rows.len(), move |range, _, _| {
+            range
+                .map(|i| {
+                    let (depth, expanded) = tree[i];
+                    list_item(i, places[i], &rows[i], i == cursor, Role::TreeItem)
+                        .aria_level(depth + 1)
+                        .when_some(expanded, |d, e| d.aria_expanded(e))
+                        .h(rems(1.375))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(rows[i].clone())
+                })
+                .collect()
+        })
+        .track_scroll(scroll)
+        .flex_1(),
+    ))
+    .children(selected)
 }
 
 /// The code view key an action stands for.
@@ -1199,11 +1906,25 @@ fn fill(status: Status, dark: bool) -> u32 {
     }
 }
 
+/// A node's outline: the selection, "something inside changed", or plain.
+/// Each is 3:1 against the background and every fill (WCAG 1.4.11): for an
+/// Inside node, which shares the quiet fill, the outline is the only cue.
+fn border_colour(selected: bool, status: Status, dark: bool) -> u32 {
+    match (selected, status == Status::Inside, dark) {
+        (true, _, false) => 0x1864ab,
+        (true, _, true) => 0x74c0fc,
+        (false, true, false) => 0xb35c00,
+        (false, true, true) => 0xf08c00,
+        (false, false, false) => 0x6c757d,
+        (false, false, true) => 0x9aa1a8,
+    }
+}
+
 fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     match (status, dark) {
         (EdgeStatus::Added, _) => 0x2f9e44,
         (EdgeStatus::Removed, _) => 0xe03131,
-        (EdgeStatus::Unchanged, false) => 0xadb5bd,
+        (EdgeStatus::Unchanged, false) => 0x80888f,
         (EdgeStatus::Unchanged, true) => 0x5c636a,
     }
 }
@@ -1211,9 +1932,16 @@ fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
 /// The view as positioned boxes and edge segments (quads, DR 0003),
 /// centred on the selected node. Only what falls inside `viewport` is built
 /// (§4: no layout of off-screen content).
-fn canvas(map: &Map, l: &Layout, camera: Camera, viewport: (f32, f32), dark: bool) -> gpui::Div {
+fn canvas(
+    map: &Map,
+    reviewed: Option<&ReviewState>,
+    l: &Layout,
+    camera: Camera,
+    area: (f32, f32),
+    dark: bool,
+) -> gpui::Div {
     let m = Metrics::default();
-    let (vw, vh) = (viewport.0, (viewport.1 - 120.0).max(100.0));
+    let (vw, vh) = (area.0.max(1.0), area.1.max(1.0));
     let centre = map
         .selected
         .and_then(|i| l.nodes.get(i))
@@ -1257,16 +1985,14 @@ fn canvas(map: &Map, l: &Layout, camera: Camera, viewport: (f32, f32), dark: boo
             continue;
         }
         let selected = map.selected == Some(i);
-        let border = if selected {
-            0x1c7ed6
-        } else if node.status == Status::Inside {
-            0xf08c00
-        } else if dark {
-            0x495057
+        let border = border_colour(selected, node.status, dark);
+        // Reviewed nodes (#115) carry a check: a mark, not only a colour.
+        let done = reviewed.is_some_and(|r| r.is_reviewed(&node.id));
+        let mut label = if done {
+            format!("✓ {}", node.name)
         } else {
-            0xced4da
+            node.name.clone()
         };
-        let mut label = node.name.clone();
         if node.has_children {
             label.push_str(" ›");
         }
@@ -1307,9 +2033,9 @@ fn mono_font() -> &'static str {
 
 fn token_colour(class: TokenClass, dark: bool) -> u32 {
     match (class, dark) {
-        (TokenClass::Keyword, false) => 0x8250df,
+        (TokenClass::Keyword, false) => 0x6f42c1,
         (TokenClass::Keyword, true) => 0xd2a8ff,
-        (TokenClass::Type, false) => 0x0a7a7a,
+        (TokenClass::Type, false) => 0x066767,
         (TokenClass::Type, true) => 0x56d4dd,
         (TokenClass::Function, false) => 0x0550ae,
         (TokenClass::Function, true) => 0x79c0ff,
@@ -1317,8 +2043,22 @@ fn token_colour(class: TokenClass, dark: bool) -> u32 {
         (TokenClass::String, true) => 0xa5d6a7,
         (TokenClass::Number, false) => 0x953800,
         (TokenClass::Number, true) => 0xffa657,
-        (TokenClass::Comment, false) => 0x6e7781,
-        (TokenClass::Comment, true) => 0x8b949e,
+        (TokenClass::Comment, false) => 0x57606a,
+        (TokenClass::Comment, true) => 0xa3adb8,
+    }
+}
+
+/// The code view's line numbers.
+fn line_number_colour(dark: bool) -> u32 {
+    if dark { 0x9da7b3 } else { 0x59636e }
+}
+
+/// The code view's row tints: removed, added, and the cursor's row.
+fn row_tints(dark: bool) -> (u32, u32, u32) {
+    if dark {
+        (0x3d1d1d, 0x1d3d24, 0x2d333b)
+    } else {
+        (0xffebe9, 0xe6ffec, 0xeaeef2)
     }
 }
 
@@ -1373,9 +2113,9 @@ fn side(
         .collect();
     cell.child(
         div()
-            .w(px(48.0))
+            .w(rems(3.0))
             .flex_none()
-            .text_color(rgb(if dark { 0x6e7681 } else { 0x8c959f }))
+            .text_color(rgb(line_number_colour(dark)))
             .child(format!("{:>5} ", i + 1)),
     )
     .child(StyledText::new(body).with_highlights(spans))
@@ -1391,7 +2131,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
         (None, Some(Detail::Full)) => format!("{} rows", code.rows()),
     };
     let header = div().child(format!(
-        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, Backspace back to the map.",
+        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, r mark ✓ reviewed, Backspace back to the map.",
         code.path, code.title
     ));
     let Some(diff) = code.diff.clone() else {
@@ -1399,11 +2139,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     };
     let cursor = code.cursor;
     let column = code.column;
-    let (removed, added, cursor_bg) = if dark {
-        (0x3d1d1d, 0x1d3d24, 0x2d333b)
-    } else {
-        (0xffebe9, 0xe6ffec, 0xeaeef2)
-    };
+    let (removed, added, cursor_bg) = row_tints(dark);
     let list = uniform_list("code-rows", diff.rows.len(), move |range, _, _| {
         range
             .filter_map(|i| Some((i, *diff.rows.get(i)?)))
@@ -1416,10 +2152,10 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
                 };
                 let mut row = div()
                     .w_full()
-                    .h(px(18.0))
+                    .h(rems(1.125))
                     .flex()
                     .flex_row()
-                    .text_size(px(13.0))
+                    .text_size(rems(0.8125))
                     .font_family(mono_font())
                     .child(side(&diff.base, r.base, left, column, dark))
                     .child(side(&diff.head, r.head, right, column, dark));
@@ -1431,7 +2167,17 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
             .collect()
     })
     .track_scroll(scroll)
-    .flex_1();
+    .flex_1()
+    .min_h(rems(2.25));
+    // As for the other lists: the wheel scrolls the rows, not the screen.
+    let list = div()
+        .id("code-rows-wheel")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(rems(2.25))
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .child(list);
     div().flex().flex_col().flex_1().child(header).child(list)
 }
 
@@ -1439,13 +2185,117 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
 mod tests {
     use super::*;
 
+    /// WCAG AA (§5.5): 4.5 for text on everything it is drawn on, 3 for
+    /// graphics (edges) against the background.
+    #[test]
+    fn every_colour_pair_meets_wcag_aa() {
+        use crate::{Theme, contrast};
+        let statuses = [
+            Status::Added,
+            Status::Removed,
+            Status::Surface,
+            Status::Moved,
+            Status::Changed,
+            Status::Contained,
+            Status::Inside,
+            Status::Unchanged,
+        ];
+        let tokens = [
+            TokenClass::Keyword,
+            TokenClass::Type,
+            TokenClass::Function,
+            TokenClass::String,
+            TokenClass::Number,
+            TokenClass::Comment,
+        ];
+        let mut fails = Vec::new();
+        let mut check = |what: String, fg: u32, bg: u32, min: f64| {
+            let c = contrast(fg, bg);
+            if c < min {
+                fails.push(format!("{what}: {c:.2} < {min}"));
+            }
+        };
+        for dark in [false, true] {
+            let theme = if dark { Theme::DARK } else { Theme::LIGHT };
+            check(
+                format!("muted text, dark {dark}"),
+                theme.muted,
+                theme.background,
+                4.5,
+            );
+            for s in statuses {
+                check(
+                    format!("label on {s:?}, dark {dark}"),
+                    theme.text,
+                    fill(s, dark),
+                    4.5,
+                );
+            }
+            for s in statuses {
+                for bg in [theme.background, fill(s, dark)] {
+                    for (sel, inside) in [(true, false), (false, true), (false, false)] {
+                        let status = if inside { Status::Inside } else { s };
+                        check(
+                            format!("border sel {sel} inside {inside} on {bg:06x}, dark {dark}"),
+                            border_colour(sel, status, dark),
+                            bg,
+                            3.0,
+                        );
+                    }
+                }
+            }
+            for e in [
+                EdgeStatus::Added,
+                EdgeStatus::Removed,
+                EdgeStatus::Unchanged,
+            ] {
+                check(
+                    format!("edge {e:?}, dark {dark}"),
+                    edge_colour(e, dark),
+                    theme.background,
+                    3.0,
+                );
+            }
+            let (removed, added, cursor) = row_tints(dark);
+            for bg in [theme.background, removed, added, cursor] {
+                check(format!("text on {bg:06x}"), theme.text, bg, 4.5);
+                check(
+                    format!("line numbers on {bg:06x}"),
+                    line_number_colour(dark),
+                    bg,
+                    4.5,
+                );
+                for t in tokens {
+                    check(format!("{t:?} on {bg:06x}"), token_colour(t, dark), bg, 4.5);
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{fails:#?}");
+    }
+
+    #[test]
+    fn rows_are_read_without_their_marks() {
+        assert_eq!(
+            row_label("› ✓ New dependency: a → b"),
+            "✓ New dependency: a → b"
+        );
+        assert_eq!(
+            row_label("      ▾ m — changed; depends on 1"),
+            "m — changed; depends on 1"
+        );
+        assert_eq!(row_label("  plain"), "plain");
+    }
+
     #[test]
     fn every_registered_action_is_handled() {
         for a in actions::ACTIONS {
             let handled = match a.scope {
                 Scope::List => review_list::Action::from_id(a.id).is_some(),
                 Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
-                Scope::Map => a.id == "map.findings" || map_op(a.id).is_some(),
+                Scope::Map => {
+                    matches!(a.id, "map.findings" | "map.outline") || map_op(a.id).is_some()
+                }
+                Scope::Outline => a.id.starts_with("outline."),
                 Scope::Findings => matches!(
                     a.id,
                     "findings.up"
@@ -1455,7 +2305,12 @@ mod tests {
                         | "findings.show"
                         | "findings.map"
                 ),
-                Scope::Review => a.id == "review.back",
+                Scope::Review => {
+                    matches!(
+                        a.id,
+                        "review.back" | "review.reviewed" | "review.note" | "review.export"
+                    )
+                }
                 Scope::Global => matches!(a.id, "global.palette" | "global.open"),
             };
             assert!(handled, "{} has no handler", a.id);

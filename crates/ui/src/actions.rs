@@ -16,6 +16,8 @@ pub enum Scope {
     Findings,
     /// The map of a review.
     Map,
+    /// The outline tree of a review (#117).
+    Outline,
     /// The code diff of one file.
     Code,
     /// Any review: the map, the code, or one that failed.
@@ -124,6 +126,60 @@ pub const ACTIONS: &[ActionDef] = &[
         "Findings: open the map at the systems",
         Scope::Findings,
         &["m"],
+    ),
+    a(
+        "map.outline",
+        "Map: the outline tree (the map as a list)",
+        Scope::Map,
+        &["o"],
+    ),
+    a(
+        "outline.up",
+        "Outline: previous row",
+        Scope::Outline,
+        &["up"],
+    ),
+    a(
+        "outline.down",
+        "Outline: next row",
+        Scope::Outline,
+        &["down"],
+    ),
+    a(
+        "outline.first",
+        "Outline: first row",
+        Scope::Outline,
+        &["home"],
+    ),
+    a(
+        "outline.last",
+        "Outline: last row",
+        Scope::Outline,
+        &["end"],
+    ),
+    a(
+        "outline.expand",
+        "Outline: expand, or go to the first child",
+        Scope::Outline,
+        &["right"],
+    ),
+    a(
+        "outline.collapse",
+        "Outline: collapse, or go to the parent",
+        Scope::Outline,
+        &["left"],
+    ),
+    a(
+        "outline.show",
+        "Outline: show the node on the map",
+        Scope::Outline,
+        &["enter"],
+    ),
+    a(
+        "outline.map",
+        "Outline: back to the map, at the highlighted node",
+        Scope::Outline,
+        &["o", "escape"],
     ),
     a(
         "map.findings",
@@ -252,6 +308,24 @@ pub const ACTIONS: &[ActionDef] = &[
         "Review: back to the review list",
         Scope::Review,
         &["escape"],
+    ),
+    a(
+        "review.export",
+        "Review: copy the review as Markdown (for a pull request comment)",
+        Scope::Review,
+        &["x"],
+    ),
+    a(
+        "review.note",
+        "Review: write a note on the node (the selected node, the finding's, or the code's)",
+        Scope::Review,
+        &["e"],
+    ),
+    a(
+        "review.reviewed",
+        "Review: mark reviewed, or not (the selected node, the finding's, or the code's)",
+        Scope::Review,
+        &["r"],
     ),
 ];
 
@@ -476,7 +550,11 @@ mod tests {
     #[test]
     fn the_palette_follows_the_screen_and_its_key_closes_it() {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
-        assert_eq!(p.matches.len(), 2, "back to the list, open a repository");
+        assert_eq!(
+            p.matches.len(),
+            5,
+            "back to the list, export, note, mark reviewed, open a repository"
+        );
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
         assert_eq!(p.key("f1"), PaletteEffect::Close);

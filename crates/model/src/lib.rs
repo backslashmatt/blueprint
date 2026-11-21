@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod codec;
 pub mod diff;
+pub mod findings;
 pub mod graph;
 pub mod lang;
+pub mod review;
 pub use graph::{
     Code, DepKind, Ecosystem, Edge, EdgeKey, EdgeKind, InvalidPath, Model, ModelError, Node,
     NodeId, NodeKind, RepoPath, SystemKey, Visibility,

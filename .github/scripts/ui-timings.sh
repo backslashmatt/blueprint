@@ -6,7 +6,7 @@
 # The app is target/release/blueprint; the wrapper, if any, runs it (a compositor, say).
 set -eu
 app=target/release/blueprint
-keys=end,b,home,h,enter,m,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace
+keys=end,b,home,h,enter,r,m,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace
 # One unmeasured session indexes the repository first.
 timeout 300 "$@" "$app" . --script end,b,home,h,enter --review-report warm.json
 timeout 300 "$@" "$app" . --script "$keys" --review-report review.json --timings timings.json

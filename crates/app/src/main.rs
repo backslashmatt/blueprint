@@ -3,7 +3,7 @@
 //! an empty window that opens a repository from a folder dialog (Ctrl+O).
 //!
 //! ```text
-//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]]
+//! blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>] [--export-report <file>]]
 //! ```
 //!
 //! - `--cold-start-report <file>` writes the time from process start to the
@@ -27,7 +27,7 @@ use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 
 static START: OnceLock<Instant> = OnceLock::new();
 
-const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>]] [--latency-report <file> [--latency-samples <n>]]";
+const USAGE: &str = "usage: blueprint [<repo>] [--cold-start-report <file>] [--script <keys>] [--review-report <file> [--stay-open] [--timings <file>] [--export-report <file>]] [--latency-report <file> [--latency-samples <n>]]";
 
 #[derive(Default)]
 struct Args {
@@ -37,6 +37,7 @@ struct Args {
     review_report: Option<String>,
     stay_open: bool,
     timings: Option<String>,
+    export_report: Option<String>,
     latency_report: Option<String>,
     latency_samples: u64,
 }
@@ -58,6 +59,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--review-report" => out.review_report = Some(value()?),
             "--stay-open" => out.stay_open = true,
             "--timings" => out.timings = Some(value()?),
+            "--export-report" => out.export_report = Some(value()?),
             "--latency-report" if cfg!(feature = "latency") => {
                 out.latency_report = Some(value()?);
             }
@@ -80,11 +82,17 @@ fn parse(args: &[String]) -> Result<Args, String> {
     if out.timings.is_some() && out.review_report.is_none() {
         return Err("--timings needs --review-report".into());
     }
+    if out.export_report.is_some() && out.review_report.is_none() {
+        return Err("--export-report needs --review-report".into());
+    }
     Ok(out)
 }
 
 fn main() {
     let start = *START.get_or_init(Instant::now);
+    // The system text size is read while GPUI starts, ready for the first
+    // frame (#118).
+    blueprint_ui::text_scale::prefetch();
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&raw) {
         Ok(a) => a,
@@ -116,6 +124,7 @@ fn main() {
         let review_report = args.review_report.clone();
         let stay_open = args.stay_open;
         let timings = args.timings.clone();
+        let export = args.export_report.clone();
         let latency = args.latency_report.clone().map(|path| {
             (
                 path,
@@ -145,7 +154,7 @@ fn main() {
                 window.focus(&focus, cx);
                 pump(ws.clone(), replies, Arc::clone(&service), cx);
                 if let Some(path) = review_report {
-                    report_review(&ws, path, timings, stay_open, cx);
+                    report_review(&ws, path, timings, export, stay_open, cx);
                 }
                 ws
             })
@@ -213,6 +222,7 @@ fn report_review(
     ws: &gpui::Entity<Workspace>,
     path: String,
     timings: Option<String>,
+    export: Option<String>,
     stay_open: bool,
     cx: &mut App,
 ) {
@@ -228,7 +238,11 @@ fn report_review(
         let (Some(map), Some(_)) = (&r.map, &r.layout) else {
             return;
         };
-        if r.mapped != Some(Detail::Full) || w.script_pending() {
+        if r.mapped != Some(Detail::Full)
+            || r.reviewed.is_none()
+            || w.script_pending()
+            || w.marks_pending()
+        {
             return;
         }
         // A code view opened by the script must have its highlighted diff.
@@ -239,8 +253,11 @@ fn report_review(
             return;
         }
         let code_rows = r.code.as_ref().map_or(0, |c| c.rows());
+        // Review progress (#115): changed nodes needing their own mark,
+        // and how many are reviewed.
+        let (reviewed, to_review) = r.reviewed.as_ref().map_or((0, 0), |s| s.progress());
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"reviewed\": {reviewed}, \"to_review\": {to_review}}}\n",
             r.base,
             r.head,
             r.findings,
@@ -251,6 +268,13 @@ fn report_review(
             && let Err(e) = std::fs::write(t, timings_json(&w.timings))
         {
             eprintln!("blueprint: cannot write {t}: {e}");
+            std::process::exit(1);
+        }
+        // The review as Markdown (#116), as `x` copies it.
+        if let Some(e) = &export
+            && let Err(err) = std::fs::write(e, w.export().unwrap_or_default())
+        {
+            eprintln!("blueprint: cannot write {e}: {err}");
             std::process::exit(1);
         }
         if let Err(e) = std::fs::write(&path, json) {

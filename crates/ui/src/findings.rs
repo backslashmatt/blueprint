@@ -3,57 +3,10 @@
 //! then new cycles, then public surface changes, then where the change is
 //! concentrated. Each row leads to a node on the map.
 
-use blueprint_protocol::model::diff::{Diff, Finding, Lines, NodeChange};
-use blueprint_protocol::model::{Level, NodeId};
+use blueprint_protocol::model::diff::Diff;
+pub use blueprint_protocol::model::findings::{CONCENTRATION, Item};
 
 use crate::map::Map;
-
-/// How many of the most changed nodes the list ends with.
-pub const CONCENTRATION: usize = 10;
-
-/// One finding, as the list shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Item {
-    /// A new dependency between two systems or two modules.
-    Dependency {
-        /// The dependent.
-        from: NodeId,
-        /// What it now depends on.
-        to: NodeId,
-    },
-    /// A new dependency cycle.
-    Cycle {
-        /// The level, 1 or 2.
-        level: u8,
-        /// The nodes on the cycle.
-        nodes: Vec<NodeId>,
-    },
-    /// A visible node whose signature or visibility changed.
-    Surface {
-        /// The node.
-        id: NodeId,
-    },
-    /// One of the nodes whose own lines changed most.
-    Concentration {
-        /// The node.
-        id: NodeId,
-        /// Its own changed lines: its rolled-up weight less its children's.
-        lines: Lines,
-    },
-}
-
-impl Item {
-    /// The node Enter shows on the map: the dependent of a dependency, the
-    /// first node of a cycle, the node itself otherwise.
-    #[must_use]
-    pub fn target(&self) -> Option<&NodeId> {
-        match self {
-            Item::Dependency { from, .. } => Some(from),
-            Item::Cycle { nodes, .. } => nodes.first(),
-            Item::Surface { id } | Item::Concentration { id, .. } => Some(id),
-        }
-    }
-}
 
 /// The findings list's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -69,66 +22,10 @@ impl Findings {
     /// same diff, for each node's parent.
     #[must_use]
     pub fn new(diff: &Diff, map: &Map) -> Findings {
-        let mut deps = Vec::new();
-        let mut cycles = Vec::new();
-        // One row per pair of nodes, whatever kinds of edge join them.
-        let mut pairs = std::collections::HashSet::new();
-        for f in &diff.findings {
-            match f {
-                Finding::NewDependency { edge } => {
-                    if pairs.insert((edge.from.clone(), edge.to.clone())) {
-                        deps.push(Item::Dependency {
-                            from: edge.from.clone(),
-                            to: edge.to.clone(),
-                        });
-                    }
-                }
-                Finding::NewCycle { level, nodes, .. } => cycles.push(Item::Cycle {
-                    level: *level,
-                    nodes: nodes.clone(),
-                }),
-            }
+        Findings {
+            items: blueprint_protocol::model::findings::items(diff, map.base(), map.head()),
+            cursor: 0,
         }
-        let surface = diff.nodes.iter().filter_map(|c| match c {
-            NodeChange::Surface { id } => Some(Item::Surface { id: id.clone() }),
-            _ => None,
-        });
-        // Concentration: weights roll up into every ancestor, so ranking
-        // them would list one change at each level. Rank each node by its
-        // own lines (its weight less its children's) instead, below L1.
-        let mut own: std::collections::BTreeMap<NodeId, (u32, u32)> = diff
-            .weights
-            .iter()
-            .map(|w| (w.id.clone(), (w.lines.signature, w.lines.body)))
-            .collect();
-        for w in &diff.weights {
-            if let Some(p) = map.parent(&w.id)
-                && let Some(o) = own.get_mut(&p)
-            {
-                o.0 = o.0.saturating_sub(w.lines.signature);
-                o.1 = o.1.saturating_sub(w.lines.body);
-            }
-        }
-        let mut heavy: Vec<(NodeId, Lines)> = own
-            .into_iter()
-            .filter(|(id, (s, b))| id.level() != Level::System && s + b > 0)
-            .map(|(id, (signature, body))| (id, Lines { signature, body }))
-            .collect();
-        heavy.sort_by(|a, b| {
-            let total = |l: Lines| l.signature + l.body;
-            total(b.1).cmp(&total(a.1)).then_with(|| a.0.cmp(&b.0))
-        });
-        let concentration = heavy
-            .into_iter()
-            .take(CONCENTRATION)
-            .map(|(id, lines)| Item::Concentration { id, lines });
-        let items = deps
-            .into_iter()
-            .chain(cycles)
-            .chain(surface)
-            .chain(concentration)
-            .collect();
-        Findings { items, cursor: 0 }
     }
 
     /// Highlights `item` if the list has it, else the row at `cursor`,
@@ -161,39 +58,10 @@ impl Findings {
     }
 }
 
-/// A node's name, after its system's for anything below L1 ("a › x"), so
-/// that same-named modules of different systems tell apart.
-fn qualified(id: &NodeId, map: &Map) -> String {
-    if id.level() == Level::System {
-        return map.name(id);
-    }
-    let system = NodeId::system(id.system_key().clone());
-    format!("{} › {}", map.name(&system), map.name(id))
-}
-
 /// A row's text, with node names from `map`.
 #[must_use]
 pub fn label(item: &Item, map: &Map) -> String {
-    match item {
-        Item::Dependency { from, to } => {
-            format!(
-                "New dependency: {} → {}",
-                qualified(from, map),
-                qualified(to, map)
-            )
-        }
-        Item::Cycle { level, nodes } => {
-            let names: Vec<String> = nodes.iter().map(|n| qualified(n, map)).collect();
-            format!("New cycle at L{level}: {}", names.join(" → "))
-        }
-        Item::Surface { id } => format!("Public surface changed: {}", qualified(id, map)),
-        Item::Concentration { id, lines } => format!(
-            "Change concentrated in {}: {} lines ({} in signatures)",
-            qualified(id, map),
-            lines.signature + lines.body,
-            lines.signature
-        ),
-    }
+    blueprint_protocol::model::findings::label(item, map.base(), map.head())
 }
 
 #[cfg(test)]
@@ -203,7 +71,7 @@ mod tests {
     use std::sync::Arc;
 
     use blueprint_engine::analyse_deep;
-    use blueprint_protocol::model::{Model, RepoPath};
+    use blueprint_protocol::model::{Level, Model, NodeId, RepoPath};
 
     fn model(files: &[(&str, &str)]) -> Model {
         let map: BTreeMap<RepoPath, Vec<u8>> = files

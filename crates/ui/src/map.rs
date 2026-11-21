@@ -239,6 +239,25 @@ impl Map {
         self.selected.is_some()
     }
 
+    /// The view under `parent` (`None`: the systems), as drilling there
+    /// would show it, without moving: for the outline tree (#117).
+    #[must_use]
+    pub fn view_of(&self, parent: Option<&NodeId>) -> View {
+        view(&self.base, &self.head, &self.status, &self.rolled, parent)
+    }
+
+    /// The base commit's model.
+    #[must_use]
+    pub fn base(&self) -> &Model {
+        &self.base
+    }
+
+    /// The head commit's model.
+    #[must_use]
+    pub fn head(&self) -> &Model {
+        &self.head
+    }
+
     /// A node's parent, from head or else base.
     #[must_use]
     pub fn parent(&self, id: &NodeId) -> Option<NodeId> {
