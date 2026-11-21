@@ -321,6 +321,16 @@ impl ReviewBasis {
     pub fn is_changed(&self, id: &NodeId) -> bool {
         self.index.contains_key(id)
     }
+
+    /// Every changed node with its changed children, each parent before its
+    /// children (reversed, each child before its parents), which id order
+    /// does not always give.
+    pub fn parents_first(&self) -> impl DoubleEndedIterator<Item = (&NodeId, Vec<&NodeId>)> + '_ {
+        self.topo.iter().map(move |&i| {
+            let children = self.children[i].iter().map(|&c| &self.order[c]).collect();
+            (&self.order[i], children)
+        })
+    }
 }
 
 impl ReviewState {
@@ -376,7 +386,8 @@ impl ReviewState {
 /// The indices of a graph given as each node's children, parents before
 /// their children (Kahn's algorithm, smallest index first, so a graph
 /// already in that order keeps it). A cycle, which the model never has,
-/// would leave its nodes out of the passes; they are appended in index order.
+/// would hold back its nodes and everything under them; those are appended
+/// in index order.
 fn topological(children: &[Vec<usize>]) -> Vec<usize> {
     let n = children.len();
     let mut parents = vec![0usize; n];
@@ -796,7 +807,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Mark>(&json).unwrap(), m);
     }
 
-    /// A basis over `ids` in id order, with `children` by index, every node
+    /// A basis over `ids` in that index order, with `children` by index, every node
     /// keyed 1, and `own` marking the nodes only their own mark can review.
     fn basis(ids: &[NodeId], children: Vec<Vec<usize>>, own: Vec<bool>) -> Arc<ReviewBasis> {
         Arc::new(ReviewBasis {
@@ -824,13 +835,16 @@ mod tests {
 
     #[test]
     fn a_child_that_sorts_before_its_moved_parent_is_still_covered() {
-        // P moved to sort last, its unmoved child C first: P > C > D.
+        // The index order puts the child C, and its child D, before their
+        // parent P: the order a moved node's unmoved child can take. P > C > D.
         let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
         let b = basis(
             &[c.clone(), d.clone(), p.clone()],
             vec![vec![1], vec![], vec![0]],
             vec![false, true, true],
         );
+        let order: Vec<&NodeId> = b.parents_first().map(|(n, _)| n).collect();
+        assert_eq!(order, [&p, &c, &d], "parents first");
         let state = b.state([&reviewed_mark(&p)]);
         for n in [&p, &c, &d] {
             assert!(state.is_reviewed(n), "{n:?} is under a reviewed mark");
