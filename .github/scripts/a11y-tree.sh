@@ -58,16 +58,17 @@ for view in list findings map outline code; do
         fi
         group=$!
         stop() { kill -TERM -- -"$group" 2>/dev/null; sleep 1; kill -KILL -- -"$group" 2>/dev/null; }
+        # However this shell ends, the group stops too, a time limit included.
+        trap stop EXIT
+        trap "exit 124" TERM
         if [ "$view" != list ]; then
             for i in $(seq 1 240); do [ -s "$report" ] && break; sleep 0.5; done
             if [ ! -s "$report" ]; then
                 echo "a11y tree ($view): the view did not settle in 120 s" >&2
-                stop; exit 1
+                exit 1
             fi
         fi
-        cd /tmp && "$py" "$here/.github/scripts/a11y_tree.py" "$view" 60; rc=$?
-        stop
-        exit $rc
+        cd /tmp && "$py" "$here/.github/scripts/a11y_tree.py" "$view" 60
     ' _ "$report" "$view" "$keys" "$here" "$app" "$work/repo" "$py" "$log" "$@"; then
         failed=1
         echo "-- the app's output for $view:" >&2
