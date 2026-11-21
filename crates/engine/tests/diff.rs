@@ -197,3 +197,50 @@ fn a_use_that_closes_a_loop_is_a_new_cycle() {
     // The cycle that already existed is not new.
     assert!(crate_diff(&head, &head).findings.is_empty());
 }
+
+/// The diff between an npm package with `base` as its sources and with `head`.
+fn package_diff(base: &[(&str, &str)], head: &[(&str, &str)]) -> Diff {
+    let with = |src: &[(&str, &str)]| {
+        let mut v = vec![("package.json", "{ \"name\": \"web\" }")];
+        v.extend_from_slice(src);
+        model(&v)
+    };
+    diff(&with(base), &with(head))
+}
+
+#[test]
+fn typescript_changes_are_told_apart_as_rust_ones_are() {
+    const A: &str = "src/a.ts";
+    let d = package_diff(
+        &[(A, "export function f(x: number) { return x + 1; }\n")],
+        &[(A, "export function f(x: number) {\n  return x + 2;\n}\n")],
+    );
+    assert_eq!(changes(&d), ["contained L4:npm:#src/a/(functions)/f"]);
+    let d = package_diff(
+        &[(A, "export function f(x: number) {}\nfunction g() {}\n")],
+        &[(A, "export function f(x: string) {}\nfunction g(y) {}\n")],
+    );
+    assert_eq!(
+        changes(&d),
+        [
+            "surface L4:npm:#src/a/(functions)/f",
+            "changed L4:npm:#src/a/(functions)/g",
+        ]
+    );
+    // A class's method moved to another file is a move.
+    let d = package_diff(
+        &[
+            (A, "export class C { m() { return 1; } }\n"),
+            ("src/b.ts", "export class D {}\n"),
+        ],
+        &[
+            (A, "export class C {}\n"),
+            ("src/b.ts", "export class D { m() { return 1; } }\n"),
+        ],
+    );
+    assert!(
+        changes(&d).contains(&"moved L4:npm:#src/a/C/m -> L4:npm:#src/b/D/m".to_owned()),
+        "{:#?}",
+        changes(&d)
+    );
+}

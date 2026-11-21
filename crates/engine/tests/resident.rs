@@ -422,3 +422,39 @@ fn a_name_that_changes_kind_or_owner_reaches_its_callers() {
         );
     }
 }
+
+#[test]
+fn typescript_edits_are_applied_in_place_or_by_item_and_match_a_fresh_build() {
+    let mut tree = files(&[
+        ("web/package.json", "{ \"name\": \"web\" }"),
+        ("web/src/a.ts", "export function f() { return 1; }\n"),
+        ("web/src/b.js", "export class B { m() {} }\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let body = "export function f() {\n  // more\n  return 2;\n}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/a.ts", body),
+        Update::InPlace
+    );
+    let items = "export function f() { return 2; }\nexport function g() {}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/a.ts", items),
+        Update::Items
+    );
+    // Text that would be a `mod` item in Rust does not change a TypeScript
+    // file's module.
+    let modlike = "export class B { m() {} }\n// mod x;\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/b.js", modlike),
+        Update::InPlace
+    );
+    // A new file is a new module.
+    change(
+        &mut r,
+        &mut tree,
+        "web/src/c.tsx",
+        "export const c = () => 1;\n",
+    );
+    delete(&mut r, &mut tree, "web/src/c.tsx");
+}

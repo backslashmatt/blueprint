@@ -45,6 +45,12 @@ const FIXTURE: &[(&str, &str)] = &[
     ),
     ("web/package.json", "{ \"name\": \"web\" }"),
     ("web/src/index.ts", "export const x = 1;\n"),
+    (
+        "web/src/view.tsx",
+        "import { helper } from \"./util\";\nexport class View extends Base {\n  render() { return <div>{helper()}</div>; }\n}\nexport function mount() {}\n",
+    ),
+    ("web/src/util.js", "export function helper() {}\n"),
+    ("web/assets/logo.svg", "<svg/>\n"),
 ];
 
 #[test]
@@ -82,7 +88,15 @@ fn types_functions_and_methods_sit_under_their_modules() {
     has("L4:cargo:core#graph/inner/(functions)/helper");
     // Files no analyser read: one `unknown` component each.
     has("L3:cargo:core#tests%2F/tests%2Fit.rs");
-    has("L3:npm:web#src%2F/src%2Findex.ts");
+    // Each TypeScript or JavaScript file of a package is a module; an
+    // `index` file is its directory's.
+    has("L2:npm:web#src");
+    has("L2:npm:web#src/view");
+    has("L3:npm:web#src/view/View");
+    has("L4:npm:web#src/view/View/render");
+    has("L4:npm:web#src/view/(functions)/mount");
+    has("L4:npm:web#src/util/(functions)/helper");
+    has("L3:npm:web#assets%2F/assets%2Flogo.svg");
     has("L3:unowned:#.%2F/README.md");
 }
 

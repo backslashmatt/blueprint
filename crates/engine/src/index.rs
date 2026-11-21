@@ -14,7 +14,6 @@
 
 use std::path::{Path, PathBuf};
 
-use blueprint_lang_rust::Rust;
 use blueprint_model::lang::{FileFacts, LanguageAnalyser};
 use blueprint_model::{Model, RepoPath, codec};
 use blueprint_store::{KEY_LEN, Key, SegmentWriter, Store, StoreError};
@@ -26,7 +25,7 @@ use crate::l1::Diagnostic;
 /// The version of every analyser's output. Bump it whenever any analyser
 /// would produce a different model for the same files, so that indexes
 /// written by older code are not used.
-pub const ANALYSER_VERSION: u32 = 2;
+pub const ANALYSER_VERSION: u32 = 3;
 
 /// Overrides the cache directory, for tests and for users who keep caches
 /// elsewhere.
@@ -318,7 +317,8 @@ fn name_bytes(analyser: &dyn LanguageAnalyser) -> [u8; 6] {
 }
 
 /// The key for `tree`'s L1–L4 model: the tree id, [`ANALYSER_VERSION`], the
-/// kind, the Rust analyser's version and the codec's format.
+/// kind, the language analysers' versions ([`crate::lang::versions`]) and
+/// the codec's format.
 fn l4_key(tree: ObjectId) -> Option<Key> {
     let mut k = key(tree)?;
     k.0[20..].copy_from_slice(&l4_tail());
@@ -330,7 +330,7 @@ fn l4_tail() -> [u8; KEY_LEN - 20] {
     let mut t = [0u8; KEY_LEN - 20];
     t[..4].copy_from_slice(&ANALYSER_VERSION.to_le_bytes());
     t[4] = KIND_L4_MODEL;
-    t[5..9].copy_from_slice(&Rust.version().to_le_bytes());
+    t[5..9].copy_from_slice(&crate::lang::versions().to_le_bytes());
     t[9..].copy_from_slice(&codec::FORMAT.to_le_bytes()[..KEY_LEN - 29]);
     t
 }
@@ -354,12 +354,13 @@ fn current_version(key: &Key) -> bool {
     match key.0[24] {
         KIND_L1_L2_MODEL => key.0[20..24] == ANALYSER_VERSION.to_le_bytes(),
         KIND_L4_MODEL => key.0[20..] == l4_tail(),
-        // Rust is the only language analyser so far; facts of any other
-        // name are from a version that no longer exists.
+        // Facts of an analyser that no longer exists, or of an older
+        // version of one, are not current.
         KIND_FACTS => {
-            key.0[20..24] == Rust.version().to_le_bytes()
-                && key.0[25..31] == name_bytes(&Rust)
-                && key.0[31] == FACTS_FORMAT
+            key.0[31] == FACTS_FORMAT
+                && crate::lang::ANALYSERS.iter().any(|a| {
+                    key.0[20..24] == a.version().to_le_bytes() && key.0[25..31] == name_bytes(*a)
+                })
         }
         _ => false,
     }
@@ -376,6 +377,7 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blueprint_lang_rust::Rust;
 
     #[test]
     fn keys_hold_the_tree_the_version_and_the_kind() {

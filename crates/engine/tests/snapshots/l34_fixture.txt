@@ -11,7 +11,10 @@ nodes:
   L2:cargo:core#tests%2F  Directory  "tests/"  Unknown  core/tests
   L2:cargo:core#util  Module  "util"  Exact  core/src/util.rs  Private
   L2:npm:web#.%2F  Directory  "./"  Unknown  web
-  L2:npm:web#src%2F  Directory  "src/"  Unknown  web/src
+  L2:npm:web#assets%2F  Directory  "assets/"  Unknown  web/assets
+  L2:npm:web#src  Module  "src"  Exact  web/src/index.ts  Public
+  L2:npm:web#src/util  Module  "src/util"  Exact  web/src/util.js  Public
+  L2:npm:web#src/view  Module  "src/view"  Exact  web/src/view.tsx  Public
   L2:unowned:#.%2F  Directory  "./"  Unknown  
   L3:cargo:core#(bin main)/(functions)  Component  "(functions)"  Exact  core/src/main.rs
   L3:cargo:core#(bin main)/Args  Component  "Args"  Exact  core/src/main.rs  Private  lines 1-1  no-body
@@ -29,7 +32,10 @@ nodes:
   L3:cargo:core#util/impl Foreign  Component  "impl Foreign"  Inferred  core/src/util.rs
   L3:cargo:core#util/impl Graph  Component  "impl Graph"  Inferred  core/src/util.rs
   L3:npm:web#.%2F/package.json  Component  "package.json"  Unknown  web/package.json
-  L3:npm:web#src%2F/src%2Findex.ts  Component  "index.ts"  Unknown  web/src/index.ts
+  L3:npm:web#assets%2F/assets%2Flogo.svg  Component  "logo.svg"  Unknown  web/assets/logo.svg
+  L3:npm:web#src/util/(functions)  Component  "(functions)"  Exact  web/src/util.js
+  L3:npm:web#src/view/(functions)  Component  "(functions)"  Exact  web/src/view.tsx
+  L3:npm:web#src/view/View  Component  "View"  Exact  web/src/view.tsx  Public  lines 2-4
   L3:unowned:#.%2F/Cargo.toml  Component  "Cargo.toml"  Unknown  Cargo.toml
   L3:unowned:#.%2F/README.md  Component  "README.md"  Unknown  README.md
   L4:cargo:core#(bin main)/(functions)/main  Function  "main"  Exact  core/src/main.rs  Private  lines 3-3
@@ -47,6 +53,9 @@ nodes:
   L4:cargo:core#util/(functions)/broken  Function  "broken"  Inferred  core/src/util.rs  Private  lines 12-12
   L4:cargo:core#util/impl Foreign/odd  Function  "odd"  Inferred  core/src/util.rs  Private  lines 8-8
   L4:cargo:core#util/impl Graph/len  Function  "len"  Inferred  core/src/util.rs  Public  lines 4-4
+  L4:npm:web#src/util/(functions)/helper  Function  "helper"  Exact  web/src/util.js  Public  lines 1-1
+  L4:npm:web#src/view/(functions)/mount  Function  "mount"  Exact  web/src/view.tsx  Public  lines 5-5
+  L4:npm:web#src/view/View/render  Function  "render"  Exact  web/src/view.tsx  Public  lines 3-3
 edges:
   L2:cargo:core#util -> L2:cargo:core#graph  DependsOn  Exact  {}
   L3:cargo:core#graph/Graph -> L3:cargo:core#graph/Walk  Implements  Exact  {}

@@ -2,16 +2,9 @@
 //! #93): what `Request::FileDiff` answers and `bp-bench`'s `open_50k_file`
 //! measures.
 
-use blueprint_lang_rust::Rust;
 use blueprint_model::RepoPath;
 use blueprint_model::diff::{DiffRow, FileDiff, FileText, LineSpan, RowKind};
 use blueprint_model::lang::{Highlight, LanguageAnalyser};
-
-/// The analyser that reads `path`, if any, for its highlighting.
-fn analyser_for(path: &RepoPath) -> Option<&'static dyn LanguageAnalyser> {
-    static RUST: Rust = Rust;
-    RUST.handles(path).then_some(&RUST as &dyn LanguageAnalyser)
-}
 
 /// The side-by-side diff of `path` between `base` and `head` bytes (`None`
 /// where the file does not exist). With `highlighted`, each side is also
@@ -26,7 +19,7 @@ pub fn file_diff(
     head: Option<&[u8]>,
     highlighted: bool,
 ) -> FileDiff {
-    let analyser = analyser_for(path).filter(|_| highlighted);
+    let analyser = crate::lang::analyser_for(path).filter(|_| highlighted);
     let (b, h) = (base.unwrap_or_default(), head.unwrap_or_default());
     let (base_text, (head_text, rows)) =
         rayon::join(|| text(b, analyser), || (text(h, analyser), rows(b, h)));
