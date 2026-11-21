@@ -551,11 +551,14 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
         let (commit, _) = Commit::open(&dir, &r.commit).map_err(|e| e.to_string())?;
         let paths = commit.paths();
         let mut resident = Resident::build(&paths, &|p| commit.read(p));
+        // Rust files only, as before TypeScript was analysed (#138), so the
+        // same files are measured; the reference repositories are Rust.
         let analysed: std::collections::BTreeSet<&RepoPath> = resident
             .model()
             .nodes()
             .filter(|n| n.code.is_some())
             .map(|n| &n.source)
+            .filter(|p| p.segments().last().is_some_and(|f| f.ends_with(".rs")))
             .collect();
         let mut by_size: Vec<(usize, RepoPath)> = analysed
             .into_iter()
