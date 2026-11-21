@@ -16,13 +16,18 @@ pub fn highlight(language: &Language, src: &[u8]) -> Vec<Highlight> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let mut cursor = tree.walk();
-    // Depth-first with the cursor: no recursion, whatever the nesting.
-    'walk: loop {
-        let node = cursor.node();
+    // Ancestors come with each node: asking the tree for a parent walks
+    // down from the root, which on deep nesting is quadratic.
+    crate::preorder_with_ancestors(tree.root_node(), |node, ancestors| {
         let whole = class_of_whole(node);
         let leaf = node.child_count() == 0;
-        let class = whole.or_else(|| if leaf { class_of_leaf(node) } else { None });
+        let class = whole.or_else(|| {
+            if leaf {
+                class_of_leaf(node, ancestors)
+            } else {
+                None
+            }
+        });
         if let Some(class) = class
             && let (Ok(start), Ok(end)) = (
                 u32::try_from(node.start_byte()),
@@ -33,18 +38,8 @@ pub fn highlight(language: &Language, src: &[u8]) -> Vec<Highlight> {
             out.push(Highlight { start, end, class });
         }
         // A node coloured whole is not entered.
-        if whole.is_none() && cursor.goto_first_child() {
-            continue;
-        }
-        loop {
-            if cursor.goto_next_sibling() {
-                continue 'walk;
-            }
-            if !cursor.goto_parent() {
-                break 'walk;
-            }
-        }
-    }
+        whole.is_none()
+    });
     out.sort_by_key(|h| (h.start, h.end));
     // Drop anything that starts inside the token before it.
     let mut kept: Vec<Highlight> = Vec::with_capacity(out.len());
@@ -69,7 +64,7 @@ fn class_of_whole(node: Node<'_>) -> Option<TokenClass> {
 }
 
 /// Leaves coloured by their kind and place.
-fn class_of_leaf(node: Node<'_>) -> Option<TokenClass> {
+fn class_of_leaf(node: Node<'_>, ancestors: &[Node<'_>]) -> Option<TokenClass> {
     let kind = node.kind();
     if !node.is_named() {
         // Anonymous leaves are punctuation and keywords; keywords are words.
@@ -80,7 +75,7 @@ fn class_of_leaf(node: Node<'_>) -> Option<TokenClass> {
         "type_identifier" => Some(TokenClass::Type),
         "this" | "super" | "null" | "undefined" => Some(TokenClass::Keyword),
         "identifier" | "property_identifier" => {
-            let parent = node.parent()?;
+            let (&parent, rest) = ancestors.split_last()?;
             let named = |of: Node<'_>, field: &str| {
                 of.child_by_field_name(field)
                     .is_some_and(|c| c.id() == node.id())
@@ -98,7 +93,7 @@ fn class_of_leaf(node: Node<'_>) -> Option<TokenClass> {
                 }
                 "call_expression" if named(parent, "function") => Some(TokenClass::Function),
                 "member_expression" if named(parent, "property") => {
-                    let grand = parent.parent()?;
+                    let grand = *rest.last()?;
                     (grand.kind() == "call_expression" && named_is(grand, "function", parent))
                         .then_some(TokenClass::Function)
                 }

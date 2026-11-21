@@ -11,9 +11,11 @@
 //!
 //! What the model sees:
 //! - **Types (L3):** `class` and `abstract class`, `interface`, `enum`,
-//!   `type`. A class's members are its signature, except its methods, which
-//!   are its body (as for a Rust trait). An interface, enum or type alias is
-//!   all signature.
+//!   `type`. A class's heritage, fields and their types are its signature;
+//!   its methods, field initial values and `static` blocks are its body (as
+//!   a Rust trait's methods are). A method's decorators are the method's
+//!   signature, not the class's. An interface, enum or type alias is all
+//!   signature.
 //! - **Functions (L4):** `function` declarations, and `const f = () => …` or
 //!   `= function …` at module level. Overload signatures before an
 //!   implementation are part of its signature.
@@ -21,7 +23,8 @@
 //!   function.
 //! - **Modules:** `namespace` and `module` blocks give an item's
 //!   [`Item::module`], as inline `mod` does in Rust.
-//! - **Visibility:** at module level, `export` is public and anything else
+//! - **Visibility:** at module level, `export` (also `export { f }` and
+//!   `export default f` later in the file) is public and anything else
 //!   private (`declare` items describe a public surface, so are public); a
 //!   member is public unless `private` or `#name` (private) or `protected`
 //!   (restricted).
@@ -29,6 +32,9 @@
 //!   the first path segment: `import { a as b } from "./x"` gives
 //!   `["./x", "a"]` aliased `b`; also `export … from`, `require("…")` and
 //!   `import("…")`. `extends` and `implements` give [`Reference::Impl`].
+//! - **Calls:** `f()`, and `ns.f()` where `ns` is imported (or bound by a
+//!   `require` at the top of the file); imported names give their import's
+//!   path. Names bound in the function are not calls to the module's.
 //!
 //! Functions nested in function bodies and classes in expressions are not
 //! part of the architecture and are not items.
@@ -111,6 +117,8 @@ struct Out<'s> {
     references: Vec<(usize, Reference)>,
     /// What each imported name stands for, for calls: `["./x", "a"]`.
     imports: HashMap<String, Vec<String>>,
+    /// Names exported by `export { a }` or `export default a`.
+    exported: HashSet<String>,
 }
 
 /// The facts of one file, read with `language`.
@@ -129,6 +137,7 @@ pub fn analyse(language: &Language, src: &[u8]) -> FileFacts {
         items: Vec::new(),
         references: Vec::new(),
         imports: HashMap::new(),
+        exported: HashSet::new(),
     };
     out.references_and_imports(root);
     // Explicit work list of (statement list, namespace, ambient): no
@@ -138,6 +147,13 @@ pub fn analyse(language: &Language, src: &[u8]) -> FileFacts {
         let mut overloads: Vec<Node<'_>> = Vec::new();
         for node in named_children(list) {
             out.statement(node, &module, ambient, &mut overloads, &mut work);
+        }
+    }
+    // `const f = …; export { f }`: public, as `export const f` is.
+    for (_, item) in &mut out.items {
+        let top = item.module.is_empty() && !matches!(item.kind, ItemKind::Method { .. });
+        if top && out.exported.contains(&item.name) {
+            item.visibility = Some(Visibility::Public);
         }
     }
     out.items.sort_by_key(|(start, _)| *start);
@@ -167,6 +183,16 @@ impl Out<'_> {
                 .child_by_field_name("declaration")
                 .or_else(|| node.child_by_field_name("value"))
             {
+                // `export declare …`: the declaration inside.
+                Some(d) if d.kind() == "ambient_declaration" => {
+                    match named_children(d)
+                        .into_iter()
+                        .find(|c| c.kind() != "comment")
+                    {
+                        Some(inner) => (inner, node, true),
+                        None => return,
+                    }
+                }
                 Some(d) => (d, node, true),
                 None => return,
             },
@@ -183,7 +209,11 @@ impl Out<'_> {
             },
             _ => (node, node, false),
         };
-        let ambient = ambient || node.kind() == "ambient_declaration";
+        let ambient = ambient
+            || node.kind() == "ambient_declaration"
+            || node
+                .child_by_field_name("declaration")
+                .is_some_and(|d| d.kind() == "ambient_declaration");
         let vis = if exported || ambient {
             Visibility::Public
         } else {
@@ -198,7 +228,9 @@ impl Out<'_> {
             "function_declaration"
             | "generator_function_declaration"
             | "function_signature"
-            | "function_expression" => {
+            | "function_expression"
+            | "generator_function"
+            | "arrow_function" => {
                 let name = field_text(src, decl, "name").unwrap_or_else(|| "default".into());
                 let pending: Vec<Node<'_>> = std::mem::take(overloads)
                     .into_iter()
@@ -297,6 +329,8 @@ impl Out<'_> {
         let body = func.child_by_field_name("body");
         let mut skip: Vec<Node<'_>> = body.into_iter().collect();
         skip.extend(named.child_by_field_name("name"));
+        // An overload's name is the same name: not hashed either.
+        skip.extend(roots.iter().filter_map(|r| declared_name(*r)));
         let signature_hash = mix(hash(src, roots, &skip), header);
         let first = roots.first().copied().unwrap_or(named);
         let last = roots.last().copied().unwrap_or(named);
@@ -373,11 +407,36 @@ impl Out<'_> {
             .child_by_field_name("body")
             .map(named_children)
             .unwrap_or_default();
-        let methods: Vec<Node<'_>> = members
-            .into_iter()
-            .filter(|m| method_of(*m).is_some())
-            .collect();
-        let body_hash = (!methods.is_empty()).then(|| hash(src, &methods, &[]));
+        // Each member with the decorators just before it (`@Get() m() {}`:
+        // in the grammar they are the class body's children, not the
+        // member's).
+        let mut decorated: Vec<(Vec<Node<'_>>, Node<'_>)> = Vec::new();
+        let mut decorators = Vec::new();
+        for m in members {
+            match m.kind() {
+                "decorator" => decorators.push(m),
+                "comment" => {}
+                _ => decorated.push((std::mem::take(&mut decorators), m)),
+            }
+        }
+        // The class's body: its methods, field initialisers and static
+        // blocks. Its signature: everything else, field types included.
+        let mut body: Vec<Node<'_>> = Vec::new();
+        let mut not_signature: Vec<Node<'_>> = Vec::new();
+        for (decorators, m) in &decorated {
+            match (m.kind(), method_of(*m)) {
+                ("public_field_definition", Some(value)) => body.push(value),
+                (_, Some(_)) => {
+                    not_signature.extend(decorators);
+                    body.push(*m);
+                }
+                ("public_field_definition", None) => body.extend(m.child_by_field_name("value")),
+                ("class_static_block", None) => body.push(*m),
+                _ => {}
+            }
+        }
+        not_signature.extend(&body);
+        let body_hash = (!body.is_empty()).then(|| hash(src, &body, &[]));
         let kind = ItemKind::Type {
             keyword: "class".into(),
         };
@@ -385,7 +444,7 @@ impl Out<'_> {
             decl,
             outer,
             &[outer],
-            &methods,
+            &not_signature,
             module,
             kind,
             vis,
@@ -396,7 +455,7 @@ impl Out<'_> {
             .child_by_field_name("type_parameters")
             .map_or(0, |t| hash(src, &[t], &[]));
         let mut overloads: Vec<Node<'_>> = Vec::new();
-        for m in methods {
+        for (decorators, m) in decorated {
             let Some(func) = method_of(m) else { continue };
             let Some(member) = field_text(src, m, "name") else {
                 continue;
@@ -406,14 +465,18 @@ impl Out<'_> {
                 && func.child_by_field_name("body").is_none()
                 && m.kind() == "method_signature"
             {
+                overloads.extend(decorators);
                 overloads.push(m);
                 continue;
             }
             let pending: Vec<Node<'_>> = std::mem::take(&mut overloads)
                 .into_iter()
-                .filter(|o| field_text(src, *o, "name").as_deref() == Some(member.as_str()))
+                .filter(|o| {
+                    o.kind() == "decorator"
+                        || field_text(src, *o, "name").as_deref() == Some(member.as_str())
+                })
                 .collect();
-            let roots: Vec<Node<'_>> = pending.into_iter().chain([m]).collect();
+            let roots: Vec<Node<'_>> = pending.into_iter().chain(decorators).chain([m]).collect();
             let kind = ItemKind::Method {
                 self_type: name.clone(),
                 r#trait: None,
@@ -477,6 +540,7 @@ impl Out<'_> {
         let src = self.src;
         let mut found: Vec<(usize, Reference)> = Vec::new();
         let mut bound: Vec<(String, Vec<String>)> = Vec::new();
+        let mut exported: HashSet<String> = HashSet::new();
         let mut use_ref = |at: usize, path: Vec<String>, alias: Option<String>| {
             found.push((
                 at,
@@ -487,9 +551,12 @@ impl Out<'_> {
                 },
             ));
         };
-        preorder(root, |n| {
+        preorder_with_ancestors(root, |n, ancestors| {
             match n.kind() {
                 "import_statement" | "export_statement" => {
+                    if n.kind() == "export_statement" && n.child_by_field_name("source").is_none() {
+                        exported_names(src, n, &mut exported);
+                    }
                     let Some(spec) = n
                         .child_by_field_name("source")
                         .map(|s| string_value(src, s))
@@ -501,17 +568,25 @@ impl Out<'_> {
                     let mut any = false;
                     preorder(n, |c| match c.kind() {
                         "import_specifier" | "export_specifier" => {
-                            let name = field_text(src, c, "name").unwrap_or_default();
-                            let alias = field_text(src, c, "alias");
+                            let name = c
+                                .child_by_field_name("name")
+                                .map(|n| name_value(src, n))
+                                .unwrap_or_default();
+                            let alias = c.child_by_field_name("alias").map(|a| name_value(src, a));
                             let path = vec![spec.clone(), name.clone()];
-                            bound.push((alias.clone().unwrap_or(name), path.clone()));
+                            // A re-export binds no name in this file.
+                            if c.kind() == "import_specifier" {
+                                bound.push((alias.clone().unwrap_or(name), path.clone()));
+                            }
                             use_ref(c.start_byte(), path, alias);
                             any = true;
                             false
                         }
                         "namespace_import" | "namespace_export" => {
                             let alias = c.named_child(0).map(|a| text(src, a));
-                            if let Some(a) = &alias {
+                            if let Some(a) =
+                                alias.as_ref().filter(|_| c.kind() == "namespace_import")
+                            {
                                 bound.push((a.clone(), vec![spec.clone()]));
                             }
                             use_ref(c.start_byte(), vec![spec.clone(), "*".into()], alias);
@@ -566,10 +641,9 @@ impl Out<'_> {
                         .filter(|a| a.kind() == "string");
                     if let (true, Some(arg)) = (is_load, arg) {
                         let spec = string_value(src, arg);
-                        // `const x = require("./x")` binds `x`.
-                        if let Some(name) = n
-                            .parent()
-                            .filter(|p| p.kind() == "variable_declarator")
+                        // `const x = require("./x")` at the top of the file
+                        // binds `x`; anywhere else the name is local.
+                        if let Some(name) = top_level_declarator(ancestors)
                             .and_then(|p| p.child_by_field_name("name"))
                             .filter(|p| p.kind() == "identifier")
                         {
@@ -584,6 +658,7 @@ impl Out<'_> {
         });
         self.references.extend(found);
         self.imports.extend(bound);
+        self.exported.extend(exported);
     }
 
     /// The paths a function's body calls, in source order, without repeats:
@@ -596,6 +671,9 @@ impl Out<'_> {
     fn calls(&self, func: Node<'_>, body: Node<'_>) -> Vec<Vec<String>> {
         let src = self.src;
         let mut locals: HashSet<String> = HashSet::new();
+        if matches!(func.kind(), "function_expression" | "generator_function") {
+            locals.extend(field_text(src, func, "name"));
+        }
         for field in ["parameters", "parameter"] {
             if let Some(p) = func.child_by_field_name(field) {
                 bind(src, p, &mut locals);
@@ -610,6 +688,18 @@ impl Out<'_> {
                 if let Some(p) = n.child_by_field_name("name") {
                     bind(src, p, &mut locals);
                 }
+                true
+            }
+            // `for (const g of gs)`: `g` is local.
+            "for_in_statement" => {
+                if let Some(p) = n.child_by_field_name("left") {
+                    bind(src, p, &mut locals);
+                }
+                true
+            }
+            // A function or class expression's own name is local to it.
+            "function_expression" | "generator_function" | "class" => {
+                locals.extend(field_text(src, n, "name"));
                 true
             }
             "formal_parameters" | "catch_clause" => {
@@ -744,11 +834,11 @@ fn segments(src: &[u8], node: Node<'_>) -> Vec<String> {
 /// Adds every identifier a parameter list or pattern binds to `names`.
 /// Type annotations and default values bind nothing.
 fn bind(src: &[u8], pattern: Node<'_>, names: &mut HashSet<String>) {
-    preorder(pattern, |n| match n.kind() {
+    preorder_with_ancestors(pattern, |n, ancestors| match n.kind() {
         "type_annotation" | "statement_block" => false,
         "identifier" | "shorthand_property_identifier_pattern" => {
             // A default value (`x = d`, `{ a = d }`) is read, not bound.
-            let is_default = n.parent().is_some_and(|p| {
+            let is_default = ancestors.last().is_some_and(|p| {
                 let field = match p.kind() {
                     "required_parameter" | "optional_parameter" => "value",
                     "assignment_pattern" | "object_assignment_pattern" => "right",
@@ -812,10 +902,11 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 /// FNV-1a over the leaf tokens of `roots`, in order, skipping comments and
 /// the subtrees in `skip`, with a separator after each token.
 fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
+    let skip: HashSet<usize> = skip.iter().map(Node::id).collect();
     let mut h = FNV_OFFSET;
     for root in roots {
         preorder(*root, |n| {
-            if n.kind() == "comment" || skip.iter().any(|s| s.id() == n.id()) {
+            if n.kind() == "comment" || skip.contains(&n.id()) {
                 return false;
             }
             if n.child_count() == 0 {
@@ -834,4 +925,90 @@ fn mix(a: u64, b: u64) -> u64 {
     b.to_le_bytes()
         .iter()
         .fold(a, |h, x| (h ^ u64::from(*x)).wrapping_mul(FNV_PRIME))
+}
+
+/// The name a declaration, or the declaration an `export` holds, declares.
+fn declared_name(node: Node<'_>) -> Option<Node<'_>> {
+    let decl = match node.kind() {
+        "export_statement" => node.child_by_field_name("declaration")?,
+        _ => node,
+    };
+    decl.child_by_field_name("name")
+}
+
+/// The names `export { a, b as c }` (no `from`) and `export default a`
+/// make public: `a` and `b`, as declared.
+fn exported_names(src: &[u8], export: Node<'_>, out: &mut HashSet<String>) {
+    if let Some(v) = export
+        .child_by_field_name("value")
+        .filter(|v| v.kind() == "identifier")
+    {
+        out.insert(text(src, v));
+    }
+    preorder(export, |c| {
+        if c.kind() == "export_specifier" {
+            out.extend(c.child_by_field_name("name").map(|n| name_value(src, n)));
+            return false;
+        }
+        true
+    });
+}
+
+/// An import or export name, without quotes when it is a string
+/// (`import { "a-b" as c }`).
+fn name_value(src: &[u8], node: Node<'_>) -> String {
+    match node.kind() {
+        "string" => string_value(src, node),
+        _ => text(src, node),
+    }
+}
+
+/// The declarator a node is the value of, if that declaration is a
+/// statement of the file itself (`const x = …` or `export const x = …`),
+/// from the node's ancestors, nearest last.
+fn top_level_declarator<'t>(ancestors: &[Node<'t>]) -> Option<Node<'t>> {
+    let [.., outer, decl, declarator] = ancestors else {
+        return None;
+    };
+    if declarator.kind() != "variable_declarator"
+        || !matches!(decl.kind(), "lexical_declaration" | "variable_declaration")
+    {
+        return None;
+    }
+    let top = match outer.kind() {
+        "program" => true,
+        "export_statement" => ancestors.len() == 4 && ancestors[0].kind() == "program",
+        _ => false,
+    };
+    top.then_some(*declarator)
+}
+
+/// As [`preorder`], also giving `visit` the node's ancestors, nearest
+/// last, without asking the tree for parents (each such lookup walks down
+/// from the root).
+pub(crate) fn preorder_with_ancestors<'t>(
+    root: Node<'t>,
+    mut visit: impl FnMut(Node<'t>, &[Node<'t>]) -> bool,
+) {
+    let mut cursor = root.walk();
+    let mut ancestors: Vec<Node<'t>> = Vec::new();
+    loop {
+        let node = cursor.node();
+        if visit(node, &ancestors) && cursor.goto_first_child() {
+            ancestors.push(node);
+            continue;
+        }
+        loop {
+            if cursor.node().id() == root.id() {
+                return;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+            ancestors.pop();
+        }
+    }
 }

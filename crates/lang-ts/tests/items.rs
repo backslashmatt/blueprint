@@ -198,12 +198,29 @@ fn body_and_signature_changes_are_told_apart_and_names_are_not_hashed() {
 
 #[test]
 fn a_classes_fields_are_its_surface_and_its_methods_its_body() {
-    let base = item("export class C { x = 1; m() { return 1; } }", "C");
-    let field = item("export class C { x = 2; m() { return 1; } }", "C");
-    let method = item("export class C { x = 1; m() { return 2; } }", "C");
-    assert_ne!(base.signature_hash, field.signature_hash);
+    let base = item("export class C { x: number = 1; m() { return 1; } }", "C");
+    let typed = item("export class C { x: string = 1; m() { return 1; } }", "C");
+    let init = item("export class C { x: number = 2; m() { return 1; } }", "C");
+    let method = item("export class C { x: number = 1; m() { return 2; } }", "C");
+    // A field's type is surface; its initial value, like a method, is body.
+    assert_ne!(base.signature_hash, typed.signature_hash);
+    assert_eq!(base.signature_hash, init.signature_hash);
+    assert_ne!(base.body_hash, init.body_hash);
     assert_eq!(base.signature_hash, method.signature_hash);
     assert_ne!(base.body_hash, method.body_hash);
+    let block = item("export class C { static { a(); } }", "C");
+    let block2 = item("export class C { static { b(); } }", "C");
+    assert_eq!(block.signature_hash, block2.signature_hash);
+    // A function-valued field's type is the class's surface.
+    let h = item(
+        "export class C { h: (a: number) => void = (a) => {}; }",
+        "C",
+    );
+    let h2 = item(
+        "export class C { h: (a: string) => void = (a) => {}; }",
+        "C",
+    );
+    assert_ne!(h.signature_hash, h2.signature_hash);
     // A class's type parameters are part of each method's surface.
     let m = item("class C<T> { m() {} }", "m");
     let bound = item("class C<T extends string> { m() {} }", "m");
@@ -323,5 +340,92 @@ fn hostile_input_never_panics() {
         let analyser: &dyn LanguageAnalyser = if round % 2 == 0 { &TypeScript } else { &Tsx };
         let _ = analyser.analyse(&path("a.ts"), s.as_bytes());
         let _ = analyser.highlight(s.as_bytes());
+    }
+}
+
+#[test]
+fn export_declare_items_are_read_as_public() {
+    let f = ts("export declare function f(): void;\nexport declare class K { m(): void }\n");
+    let names: Vec<&str> = f.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["f", "K", "m"]);
+    assert!(
+        f.items
+            .iter()
+            .all(|i| i.visibility == Some(Visibility::Public))
+    );
+}
+
+#[test]
+fn a_methods_decorators_are_its_surface() {
+    let a = ts("export class C { @Get('/a') m() {} }");
+    let b = ts("export class C { @Get('/b') m() {} }");
+    assert_ne!(
+        by_name(&a, "m").signature_hash,
+        by_name(&b, "m").signature_hash
+    );
+    assert_eq!(
+        by_name(&a, "C").signature_hash,
+        by_name(&b, "C").signature_hash
+    );
+    assert_eq!(by_name(&a, "m").lines, (1, 1));
+}
+
+#[test]
+fn names_that_are_not_imports_or_items_give_no_invented_call() {
+    let p = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+    // A re-export binds no name here.
+    let f = ts(
+        "export { a as b } from './x';\nexport * as ns from './y';\nfunction b() {}\nexport function k() { b(); ns.q(); }\n",
+    );
+    assert_eq!(by_name(&f, "k").calls, vec![p(&["b"])]);
+    // A `require` in a function binds a name in that function only.
+    let f = ts("function a() { const db = require('./a'); }\nexport function k() { db.x(); }\n");
+    assert!(
+        by_name(&f, "k").calls.is_empty(),
+        "{:?}",
+        by_name(&f, "k").calls
+    );
+    // Loop variables and a function expression's own name are local.
+    let f = ts("function g() {}\nexport function k(fs) { for (const g of fs) g(); }\n");
+    assert!(by_name(&f, "k").calls.is_empty());
+    let f = ts("function h() {}\nexport const k = function h() { h(); };\n");
+    assert!(by_name(&f, "k").calls.is_empty());
+    // `import { "a-b" as c }`: the name without its quotes.
+    let f = ts("import { \"a-b\" as c } from './x';\nexport function k() { c(); }\n");
+    assert_eq!(by_name(&f, "k").calls, vec![p(&["./x", "a-b"])]);
+}
+
+#[test]
+fn renaming_an_overloaded_function_keeps_its_hashes() {
+    let a = ts("export function f(a: string): void;\nexport function f(a: any) {}\n");
+    let b = ts("export function g(a: string): void;\nexport function g(a: any) {}\n");
+    assert_eq!(a.items[0].signature_hash, b.items[0].signature_hash);
+}
+
+#[test]
+fn names_exported_later_and_default_arrows_are_public_items() {
+    let f = ts(
+        "const f = () => 1;\nfunction g() {}\nfunction h() {}\nexport { f };\nexport default g;\n",
+    );
+    assert_eq!(by_name(&f, "f").visibility, Some(Visibility::Public));
+    assert_eq!(by_name(&f, "g").visibility, Some(Visibility::Public));
+    assert_eq!(by_name(&f, "h").visibility, Some(Visibility::Private));
+    let d = ts("export default async () => { go(); };\n");
+    assert_eq!(d.items.len(), 1);
+    assert_eq!(d.items[0].name, "default");
+}
+
+#[test]
+fn large_and_deep_inputs_take_linear_time() {
+    use std::time::Instant;
+    let deep = format!("function f() {{ {}", "{ a; ".repeat(50_000));
+    let methods = format!("class C {{ {} }}", "m() {} ".repeat(30_000));
+    for src in [deep, methods] {
+        let start = Instant::now();
+        let _ = ts(&src);
+        let _ = TypeScript.highlight(src.as_bytes());
+        // Well over the time a linear pass takes in a debug build, and
+        // well under what the quadratic one took (80 s for 0.5 MB).
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
     }
 }
