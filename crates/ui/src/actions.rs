@@ -16,6 +16,8 @@ pub enum Scope {
     Findings,
     /// The map of a review.
     Map,
+    /// The outline tree of a review (#117).
+    Outline,
     /// The code diff of one file.
     Code,
     /// Any review: the map, the code, or one that failed.
@@ -124,6 +126,60 @@ pub const ACTIONS: &[ActionDef] = &[
         "Findings: open the map at the systems",
         Scope::Findings,
         &["m"],
+    ),
+    a(
+        "map.outline",
+        "Map: the outline tree (the map as a list)",
+        Scope::Map,
+        &["o"],
+    ),
+    a(
+        "outline.up",
+        "Outline: previous row",
+        Scope::Outline,
+        &["up"],
+    ),
+    a(
+        "outline.down",
+        "Outline: next row",
+        Scope::Outline,
+        &["down"],
+    ),
+    a(
+        "outline.first",
+        "Outline: first row",
+        Scope::Outline,
+        &["home"],
+    ),
+    a(
+        "outline.last",
+        "Outline: last row",
+        Scope::Outline,
+        &["end"],
+    ),
+    a(
+        "outline.expand",
+        "Outline: expand, or go to the first child",
+        Scope::Outline,
+        &["right"],
+    ),
+    a(
+        "outline.collapse",
+        "Outline: collapse, or go to the parent",
+        Scope::Outline,
+        &["left"],
+    ),
+    a(
+        "outline.show",
+        "Outline: show the node on the map",
+        Scope::Outline,
+        &["enter"],
+    ),
+    a(
+        "outline.map",
+        "Outline: back to the map, at the highlighted node",
+        Scope::Outline,
+        &["o", "escape"],
     ),
     a(
         "map.findings",

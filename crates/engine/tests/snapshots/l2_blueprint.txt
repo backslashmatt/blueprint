@@ -86,9 +86,13 @@ nodes:
   L2:cargo:crates/ui#layout/tests  Module  "layout::tests"  Exact  crates/ui/src/layout.rs  Private
   L2:cargo:crates/ui#map  Module  "map"  Exact  crates/ui/src/map.rs  Public
   L2:cargo:crates/ui#map/tests  Module  "map::tests"  Exact  crates/ui/src/map.rs  Private
+  L2:cargo:crates/ui#outline  Module  "outline"  Exact  crates/ui/src/outline.rs  Public
+  L2:cargo:crates/ui#outline/tests  Module  "outline::tests"  Exact  crates/ui/src/outline.rs  Private
   L2:cargo:crates/ui#review_list  Module  "review_list"  Exact  crates/ui/src/review_list.rs  Public
   L2:cargo:crates/ui#review_list/tests  Module  "review_list::tests"  Exact  crates/ui/src/review_list.rs  Private
   L2:cargo:crates/ui#tests  Module  "tests"  Exact  crates/ui/src/lib.rs  Private
+  L2:cargo:crates/ui#text_scale  Module  "text_scale"  Exact  crates/ui/src/text_scale.rs  Public
+  L2:cargo:crates/ui#text_scale/tests  Module  "text_scale::tests"  Exact  crates/ui/src/text_scale.rs  Private
   L2:cargo:crates/ui#workspace  Module  "workspace"  Exact  crates/ui/src/workspace.rs  Public
   L2:cargo:crates/ui#workspace/tests  Module  "workspace::tests"  Exact  crates/ui/src/workspace.rs  Private
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
