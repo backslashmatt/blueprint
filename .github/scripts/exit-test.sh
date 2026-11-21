@@ -34,9 +34,10 @@ export BLUEPRINT_DATA_DIR="$work/data"
 #   m,enter,tab,r         on the map, drill into the selected node, select the next
 #                         node there and mark it
 #   x                     export the review to the clipboard
-#   c,pagedown,n          open the selected node's code, page down, next change
+#   c,pagedown            open the selected node's code and page down (the code
+#                         is a new file, one change, so there is no next one)
 note=c,h,e,c,k,e,d,space,b,y,space,k,e,y,b,o,a,r,d
-keys="home,b,down,h,enter,r,e,$note,enter,down,down,down,down,r,m,enter,tab,r,x,c,pagedown,n"
+keys="home,b,down,h,enter,r,e,$note,enter,down,down,down,down,r,m,enter,tab,r,x,c,pagedown"
 timeout 300 "$@" "$here/$app" "$work/repo" --script "$keys" \
     --review-report "$here/exit-review.json" --export-report "$here/exit-review.md"
 cat "$here/exit-review.json"
@@ -58,7 +59,7 @@ need(report.get("marks") == 3, f"three marks made by r (got {report.get('marks')
 need(report.get("notes") == 1, f"one note typed (got {report.get('notes')})")
 need(report.get("code_rows", 0) > 0, "the code view open on a diff (c)")
 need(report.get("code_cursor", 0) > report.get("code_opened_at", 0),
-     "the code cursor moved on from where it opened (pagedown, n)")
+     "the code cursor moved on from where it opened (pagedown)")
 need(export.startswith("## Blueprint review"), "the review copied by x")
 need("checked by keyboard" in export, "the typed note in the export")
 need(export.count("\n### Reviewed\n") == 1, "a Reviewed section in the export")
