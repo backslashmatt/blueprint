@@ -91,6 +91,50 @@ impl CodeView {
         self.detail = Some(detail);
     }
 
+    /// What a screen reader announces for the view (#118): the file, the
+    /// node, and the row under the cursor with its lines on both sides.
+    #[must_use]
+    pub fn a11y_label(&self) -> String {
+        let head = format!("Code of {} in {}", self.title, self.path);
+        if let Some(e) = &self.error {
+            return format!("{head}: cannot open: {e}");
+        }
+        let Some(diff) = &self.diff else {
+            return format!("{head}: loading");
+        };
+        let Some(row) = diff.rows.get(self.cursor) else {
+            return format!("{head}: no rows");
+        };
+        fn line(
+            text: &blueprint_protocol::model::diff::FileText,
+            n: Option<u32>,
+        ) -> Option<(u32, &str)> {
+            n.and_then(|n| text.lines.get(n as usize).map(|l| (n, l.trim())))
+        }
+        let what = match row.kind {
+            RowKind::Same => "unchanged",
+            RowKind::Changed => "changed",
+            RowKind::Removed => "removed",
+            RowKind::Added => "added",
+        };
+        let sides = match (line(&diff.base, row.base), line(&diff.head, row.head)) {
+            (Some((b, _)), Some((h, ht))) if row.kind == RowKind::Same => {
+                format!("line {} in base, {} in head: {ht}", b + 1, h + 1)
+            }
+            (Some((b, bt)), Some((h, ht))) => {
+                format!("base line {}: {bt} | head line {}: {ht}", b + 1, h + 1)
+            }
+            (Some((b, bt)), None) => format!("base line {}: {bt}", b + 1),
+            (None, Some((h, ht))) => format!("head line {}: {ht}", h + 1),
+            (None, None) => String::new(),
+        };
+        format!(
+            "{head}. Row {} of {}, {what}: {sides}",
+            self.cursor + 1,
+            diff.rows.len()
+        )
+    }
+
     /// The number of rows.
     #[must_use]
     pub fn rows(&self) -> usize {
@@ -158,6 +202,7 @@ fn focus(rows: &[DiffRow], lines: Option<(u32, u32)>, in_base: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blueprint_protocol::model::diff::FileText;
 
     fn row(base: Option<u32>, head: Option<u32>, kind: RowKind) -> DiffRow {
         DiffRow { base, head, kind }
@@ -239,5 +284,42 @@ mod tests {
         assert_eq!(page_rows(0.0, 18.0), None);
         assert_eq!(page_rows(640.0, 0.0), None);
         assert_eq!(page_rows(f32::NAN, 18.0), None);
+    }
+
+    #[test]
+    fn the_screen_reader_label_names_the_file_and_reads_the_row() {
+        let mut v = CodeView::new("src/a.rs".into(), "f".into(), None, false);
+        assert_eq!(v.a11y_label(), "Code of f in src/a.rs: loading");
+        let text = |lines: &[&str]| FileText {
+            lines: lines.iter().map(|l| (*l).to_string()).collect(),
+            highlights: vec![Vec::new(); lines.len()],
+        };
+        let diff = FileDiff {
+            base: text(&["fn f() {", "    old();"]),
+            head: text(&["fn f() {", "    new();"]),
+            rows: vec![
+                DiffRow {
+                    base: Some(0),
+                    head: Some(0),
+                    kind: RowKind::Same,
+                },
+                DiffRow {
+                    base: Some(1),
+                    head: Some(1),
+                    kind: RowKind::Changed,
+                },
+            ],
+        };
+        v.receive(Detail::Full, Arc::new(diff));
+        v.cursor = 0;
+        assert_eq!(
+            v.a11y_label(),
+            "Code of f in src/a.rs. Row 1 of 2, unchanged: line 1 in base, 1 in head: fn f() {"
+        );
+        v.cursor = 1;
+        assert_eq!(
+            v.a11y_label(),
+            "Code of f in src/a.rs. Row 2 of 2, changed: base line 2: old(); | head line 2: new();"
+        );
     }
 }

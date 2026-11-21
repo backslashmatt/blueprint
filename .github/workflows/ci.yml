@@ -311,7 +311,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb openbox \
+            at-spi2-core gir1.2-atspi-2.0 python3-gi dbus
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-app-exit-test
@@ -328,6 +329,11 @@ jobs:
             echo
             cat exit-review.md
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: every view labelled for screen readers, read through AT-SPI (#118)
+        run: |
+          .github/scripts/a11y-tree.sh \
+            1169157cbbb84878313606449cb3d59b71b9e2df 9786f409587a9a0295377c9a6c790808106d54a2 \
+            spikes/gpui/xvfb-run.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

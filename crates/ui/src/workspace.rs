@@ -2154,7 +2154,20 @@ fn side(
 
 /// The code view: a header, then the rows, of which only those on screen
 /// are built (§4).
-fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> gpui::Div {
+fn code_view(
+    code: &CodeView,
+    scroll: &UniformListScrollHandle,
+    dark: bool,
+) -> gpui::Stateful<gpui::Div> {
+    // For a screen reader: the file, the node and the row under the cursor (#118).
+    let named = |d: gpui::Div| {
+        // The window's active item, as the map and list rows are, so each
+        // move of the cursor is read out.
+        d.id("code")
+            .role(Role::Document)
+            .aria_active_descendant()
+            .aria_label(code.a11y_label())
+    };
     let state = match (&code.error, code.detail) {
         (Some(e), _) => format!("cannot open: {e}"),
         (None, None) => "loading…".to_string(),
@@ -2166,7 +2179,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
         code.path, code.title
     ));
     let Some(diff) = code.diff.clone() else {
-        return div().flex().flex_col().flex_1().child(header);
+        return named(div().flex().flex_col().flex_1().child(header));
     };
     let cursor = code.cursor;
     let column = code.column;
@@ -2209,7 +2222,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
         .min_h(rems(2.25))
         .on_scroll(|_, _, cx| cx.stop_propagation())
         .child(list);
-    div().flex().flex_col().flex_1().child(header).child(list)
+    named(div().flex().flex_col().flex_1().child(header).child(list))
 }
 
 #[cfg(test)]
