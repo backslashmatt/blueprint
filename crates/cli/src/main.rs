@@ -20,6 +20,7 @@ usage: bp model <dir> [--rev <rev>] [--level 1|2|3|4] [--json]
        bp index <repo> [--rev <rev>] [--level 2|4]
        bp diff <repo> <base> <head> [--json]
        bp review <repo> <base> <head> [--mark <node> [--note <text>] | --unmark <node>] [--json]
+       bp review export <repo> <base> <head>
        bp --version
        bp --help
 
@@ -36,6 +37,10 @@ commands:
   review <repo> <base> <head>
                 Print each changed node of the diff and whether it is reviewed
                 (docs/cli.md), after storing a mark if one is given
+
+  review export <repo> <base> <head>
+                Print the review as Markdown, for a pull request comment: the
+                same text the app copies with `x`
 
 options for diff:
   --json        Print the diff as JSON (docs/diff-json.md) instead of text
@@ -95,6 +100,12 @@ enum Command {
         head: String,
         change: Option<MarkChange>,
         json: bool,
+    },
+    /// `bp review export`.
+    Export {
+        path: PathBuf,
+        base: String,
+        head: String,
     },
 }
 
@@ -212,6 +223,18 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 rev: rev.unwrap_or_else(|| "HEAD".into()),
                 deep,
             })
+        }
+        "review" if rest.first().is_some_and(|a| a == "export") => {
+            match <[String; 3]>::try_from(rest[1..].to_vec()) {
+                Ok([path, base, head]) if !path.starts_with('-') => Ok(Command::Export {
+                    path: PathBuf::from(path),
+                    base,
+                    head,
+                }),
+                _ => Err(
+                    "review export needs a repository, a base revision and a head revision".into(),
+                ),
+            }
         }
         "review" => {
             let (mut json, mut mark, mut unmark, mut note) = (false, None, None, None);
@@ -384,6 +407,7 @@ fn main() -> ExitCode {
             change,
             json,
         } => review(&path, &base, &head, change.as_ref(), json),
+        Command::Export { path, base, head } => review_export(&path, &base, &head),
     };
     if std::env::var_os(PEAK_RSS_ENV).is_some() {
         report_peak_rss();
@@ -643,6 +667,64 @@ fn review(
     ExitCode::SUCCESS
 }
 
+/// `bp review export`: the review as Markdown (#116), from the stored marks.
+fn review_export(path: &Path, base: &str, head: &str) -> ExitCode {
+    use blueprint_engine::reviews::Reviews;
+    use blueprint_model::review::{ReviewState, export};
+    let fail = |e: &dyn std::fmt::Display| {
+        eprintln!("bp: {}: {e}", path.display());
+        ExitCode::from(EXIT_FAILURE)
+    };
+    let (index, warnings) = commits::existing_index(path);
+    warn_index(&warnings);
+    let d = match commits::diff_commits(path, base, head, index.as_ref()) {
+        Ok(d) => d,
+        Err(e) => return fail(&e),
+    };
+    warn(&d.base.1);
+    warn(&d.head.1);
+    if let Some(e) = &d.weight_error {
+        return fail(&format!(
+            "change weight not computed, so marks cannot be matched: {e}"
+        ));
+    }
+    let reviews = match Reviews::open(path) {
+        Ok(r) => r,
+        Err(e) => return fail(&e),
+    };
+    if let Some(w) = reviews.warning() {
+        eprintln!("warning: {w}");
+    }
+    // The full commit ids, as the app shows them.
+    let resolve = |rev: &str| -> Result<String, String> {
+        let repo = blueprint_engine::git::Repo::open(path).map_err(|e| e.to_string())?;
+        repo.resolve(rev)
+            .map(|c| c.to_string())
+            .map_err(|e| e.to_string())
+    };
+    let (base_commit, head_commit) = match (resolve(base), resolve(head)) {
+        (Ok(b), Ok(h)) => (b, h),
+        (Err(e), _) | (_, Err(e)) => return fail(&e),
+    };
+    let state = ReviewState::new(&d.diff, &d.base.0, &d.head.0, reviews.marks());
+    let text = export(
+        &state,
+        &d.diff,
+        &d.base.0,
+        &d.head.0,
+        &base_commit,
+        &head_commit,
+    );
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if let Err(e) = out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        return fail(&format!("cannot write the review: {e}"));
+    }
+    std::mem::forget(d);
+    std::mem::forget(index);
+    ExitCode::SUCCESS
+}
+
 fn warn_index(warnings: &[String]) {
     for w in warnings {
         eprintln!("warning: {w}");
@@ -858,8 +940,18 @@ mod tests {
                 json: true
             })
         );
+        assert_eq!(
+            parse(&args(&["review", "export", "r", "a", "b"])),
+            Ok(Command::Export {
+                path: "r".into(),
+                base: "a".into(),
+                head: "b".into(),
+            })
+        );
         for bad in [
-            &["review", "r", "a"][..],
+            &["review", "export", "r", "a"][..],
+            &["review", "export", "r", "a", "b", "--json"],
+            &["review", "r", "a"],
             &["review", "r", "a", "b", "--mark"],
             &["review", "r", "a", "b", "--mark", "n", "--unmark", "n"],
             &["review", "r", "a", "b", "--note", "x"],

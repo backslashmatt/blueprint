@@ -998,7 +998,7 @@ fn cold_start(app: &Path, base_app: Option<&Path>) -> Result<Measurement, Error>
 /// checkout, drill down three levels and back, open a node's code, scroll
 /// it, then move about the map, pan and zoom it, each key pressed once the
 /// last one's effect is painted.
-const UI_SCRIPT: &str = "down,up,enter,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace";
+const UI_SCRIPT: &str = "down,up,enter,m,enter,enter,enter,backspace,enter,c,pagedown,pagedown,down,n,p,right,escape,tab,right,left,down,up,-,ctrl-right,ctrl-down,=,=,0,backspace";
 
 /// Sessions measured, after one unmeasured session that indexes the
 /// checkout.

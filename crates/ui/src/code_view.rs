@@ -8,8 +8,20 @@ use std::sync::Arc;
 use blueprint_protocol::Detail;
 use blueprint_protocol::model::diff::{DiffRow, FileDiff, RowKind};
 
-/// Rows a page key moves.
+/// Rows a page key moves until the window has been measured.
 pub const PAGE: usize = 30;
+
+/// Rows a page key moves in a list `height` pixels tall whose rows are
+/// `row` pixels, both as last laid out: a screenful less a row, so no row
+/// is passed over unseen. `None` until the list has been laid out.
+#[must_use]
+pub fn page_rows(height: f32, row: f32) -> Option<usize> {
+    if !(row > 0.0 && height > 0.0 && height.is_finite()) {
+        return None;
+    }
+    let rows = (height / row).floor();
+    Some(if rows < 2.0 { 1 } else { rows as usize - 1 })
+}
 
 /// Characters a left or right key scrolls.
 pub const COLUMNS: usize = 8;
@@ -34,6 +46,8 @@ pub struct CodeView {
     pub detail: Option<Detail>,
     /// The row under the cursor.
     pub cursor: usize,
+    /// Rows a page key moves: set from the window on every frame.
+    pub page: usize,
     /// Why the diff could not be had, if it could not.
     pub error: Option<String>,
 }
@@ -56,6 +70,7 @@ impl CodeView {
             diff: None,
             detail: None,
             cursor: 0,
+            page: PAGE,
             error: None,
         }
     }
@@ -85,8 +100,8 @@ impl CodeView {
         let to = match key {
             "up" => self.cursor.saturating_sub(1),
             "down" => (self.cursor + 1).min(last),
-            "pageup" => self.cursor.saturating_sub(PAGE),
-            "pagedown" => (self.cursor + PAGE).min(last),
+            "pageup" => self.cursor.saturating_sub(self.page),
+            "pagedown" => (self.cursor + self.page).min(last),
             "home" => 0,
             "end" => last,
             "left" | "right" => {
@@ -206,5 +221,19 @@ mod tests {
         v.key("pageup");
         assert_eq!(v.cursor, 0);
         assert!(!v.key("x"));
+    }
+
+    #[test]
+    fn a_page_is_a_screenful_less_a_row() {
+        // 640 px of 18 px rows shows 35 whole rows.
+        assert_eq!(page_rows(640.0, 18.0), Some(34));
+        // The same list at twice the text size.
+        assert_eq!(page_rows(640.0, 36.0), Some(16));
+        // A list too short for two rows still moves.
+        assert_eq!(page_rows(30.0, 36.0), Some(1));
+        // Not laid out yet.
+        assert_eq!(page_rows(0.0, 18.0), None);
+        assert_eq!(page_rows(640.0, 0.0), None);
+        assert_eq!(page_rows(f32::NAN, 18.0), None);
     }
 }

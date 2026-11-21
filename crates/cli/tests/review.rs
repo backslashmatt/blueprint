@@ -174,3 +174,42 @@ fn marking_a_node_that_did_not_change_fails() {
         "{err}"
     );
 }
+
+#[test]
+fn the_export_is_markdown_of_the_stored_review() {
+    let dir = repo("export", &[BASE, HEAD]);
+    bp_review(
+        &dir,
+        "HEAD~1",
+        "HEAD",
+        &["--mark", F, "--note", "bounds checked"],
+    );
+    let text = bp_review_export(&dir);
+    assert!(text.starts_with("## Blueprint review: `"), "{text}");
+    assert!(text.contains("Reviewed 1 of 2 changes"), "{text}");
+    let reviewed = text.split("### Reviewed").nth(1).unwrap_or_default();
+    assert!(reviewed.contains("(L4): bounds checked"), "{text}");
+    let open = text.split("### Still to review").nth(1).unwrap_or_default();
+    assert!(open.contains("`app › g` (L4)"), "{text}");
+    // The same stored state, the same text.
+    assert_eq!(bp_review_export(&dir), text);
+}
+
+fn bp_review_export(dir: &Path) -> String {
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let out = Command::new(env!("CARGO_BIN_EXE_bp"))
+        .args(["review", "export", dir.to_str().unwrap(), "HEAD~1", "HEAD"])
+        .env("BLUEPRINT_CACHE_DIR", tmp.join("bp-review-cache"))
+        .env(
+            "BLUEPRINT_DATA_DIR",
+            tmp.join(format!("bp-review-data-{}", std::process::id())),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}

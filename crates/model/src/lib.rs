@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod codec;
 pub mod diff;
+pub mod findings;
 pub mod graph;
 pub mod lang;
 pub mod review;

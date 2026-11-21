@@ -12,8 +12,12 @@
 pub enum Scope {
     /// The review list.
     List,
+    /// The findings list of a review (#114).
+    Findings,
     /// The map of a review.
     Map,
+    /// The outline tree of a review (#117).
+    Outline,
     /// The code diff of one file.
     Code,
     /// Any review: the map, the code, or one that failed.
@@ -86,6 +90,102 @@ pub const ACTIONS: &[ActionDef] = &[
         "Review list: review base against head",
         Scope::List,
         &["enter"],
+    ),
+    a(
+        "findings.up",
+        "Findings: previous finding",
+        Scope::Findings,
+        &["up"],
+    ),
+    a(
+        "findings.down",
+        "Findings: next finding",
+        Scope::Findings,
+        &["down"],
+    ),
+    a(
+        "findings.first",
+        "Findings: first finding",
+        Scope::Findings,
+        &["home"],
+    ),
+    a(
+        "findings.last",
+        "Findings: last finding",
+        Scope::Findings,
+        &["end"],
+    ),
+    a(
+        "findings.show",
+        "Findings: show the finding on the map",
+        Scope::Findings,
+        &["enter"],
+    ),
+    a(
+        "findings.map",
+        "Findings: open the map at the systems",
+        Scope::Findings,
+        &["m"],
+    ),
+    a(
+        "map.outline",
+        "Map: the outline tree (the map as a list)",
+        Scope::Map,
+        &["o"],
+    ),
+    a(
+        "outline.up",
+        "Outline: previous row",
+        Scope::Outline,
+        &["up"],
+    ),
+    a(
+        "outline.down",
+        "Outline: next row",
+        Scope::Outline,
+        &["down"],
+    ),
+    a(
+        "outline.first",
+        "Outline: first row",
+        Scope::Outline,
+        &["home"],
+    ),
+    a(
+        "outline.last",
+        "Outline: last row",
+        Scope::Outline,
+        &["end"],
+    ),
+    a(
+        "outline.expand",
+        "Outline: expand, or go to the first child",
+        Scope::Outline,
+        &["right"],
+    ),
+    a(
+        "outline.collapse",
+        "Outline: collapse, or go to the parent",
+        Scope::Outline,
+        &["left"],
+    ),
+    a(
+        "outline.show",
+        "Outline: show the node on the map",
+        Scope::Outline,
+        &["enter"],
+    ),
+    a(
+        "outline.map",
+        "Outline: back to the map, at the highlighted node",
+        Scope::Outline,
+        &["o", "escape"],
+    ),
+    a(
+        "map.findings",
+        "Map: back to the findings",
+        Scope::Map,
+        &["f"],
     ),
     a(
         "map.drill_down",
@@ -208,6 +308,24 @@ pub const ACTIONS: &[ActionDef] = &[
         "Review: back to the review list",
         Scope::Review,
         &["escape"],
+    ),
+    a(
+        "review.export",
+        "Review: copy the review as Markdown (for a pull request comment)",
+        Scope::Review,
+        &["x"],
+    ),
+    a(
+        "review.note",
+        "Review: write a note on the node (the selected node, the finding's, or the code's)",
+        Scope::Review,
+        &["e"],
+    ),
+    a(
+        "review.reviewed",
+        "Review: mark reviewed, or not (the selected node, the finding's, or the code's)",
+        Scope::Review,
+        &["r"],
     ),
 ];
 
@@ -432,7 +550,11 @@ mod tests {
     #[test]
     fn the_palette_follows_the_screen_and_its_key_closes_it() {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
-        assert_eq!(p.matches.len(), 2, "back to the list, open a repository");
+        assert_eq!(
+            p.matches.len(),
+            5,
+            "back to the list, export, note, mark reviewed, open a repository"
+        );
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
         assert_eq!(p.key("f1"), PaletteEffect::Close);
@@ -499,7 +621,10 @@ mod tests {
         let map = [Scope::Map, Scope::Review, Scope::Global];
         let ids: Vec<_> = search(&map, "code").iter().map(|a| a.id).collect();
         assert_eq!(&ids[..2], ["map.drill_down", "map.code"]);
-        let ids: Vec<_> = search(&map, "back to").iter().map(|a| a.id).collect();
+        let ids: Vec<_> = search(&map, "back to the list")
+            .iter()
+            .map(|a| a.id)
+            .collect();
         assert_eq!(ids.first(), Some(&"review.back"));
     }
 }
