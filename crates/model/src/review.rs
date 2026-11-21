@@ -75,7 +75,8 @@ pub fn fingerprints(model: &Model) -> HashMap<NodeId, u64> {
 pub struct ReviewState {
     basis: Arc<ReviewBasis>,
     marks: HashMap<NodeId, Mark>,
-    reviewed: BTreeSet<NodeId>,
+    /// By the basis's index of each changed node.
+    reviewed: Vec<bool>,
 }
 
 /// What a review state depends on besides the marks: each changed node's
@@ -84,9 +85,15 @@ pub struct ReviewState {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewBasis {
     keys: HashMap<NodeId, u64>,
-    /// Each changed node and ancestor of one, with its changed children.
-    changed: BTreeMap<NodeId, Vec<NodeId>>,
-    own_mark: BTreeSet<NodeId>,
+    /// Each changed node and ancestor of one, ordered by id: parents before
+    /// children, as ids order by level first. A node's place here is its
+    /// index below.
+    order: Vec<NodeId>,
+    index: HashMap<NodeId, usize>,
+    /// By index: the node's changed children, as indices.
+    children: Vec<Vec<usize>>,
+    /// By index: whether only the node's own mark can make it reviewed.
+    own_mark: Vec<bool>,
 }
 
 impl ReviewState {
@@ -213,23 +220,34 @@ impl ReviewBasis {
             h.u64(if b == id { 0 } else { digest(b) });
             keys.insert(id.clone(), h.finish());
         }
-        let mut own_mark = BTreeSet::new();
-        for (id, children) in &changed {
-            if children.is_empty() || own_change.contains(id) || own_lines(id, children) {
-                own_mark.insert(id.clone());
-            }
-        }
-        let changed = changed
-            .into_iter()
+        let own_mark: Vec<bool> = changed
+            .iter()
             .map(|(id, children)| {
-                let mut c: Vec<NodeId> = children.into_iter().map(|(c, _)| c).collect();
+                children.is_empty() || own_change.contains(id) || own_lines(id, children)
+            })
+            .collect();
+        let order: Vec<NodeId> = changed.keys().cloned().collect();
+        let index: HashMap<NodeId, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
+        let children = changed
+            .into_values()
+            .map(|children| {
+                let mut c: Vec<usize> = children
+                    .into_iter()
+                    .filter_map(|(c, _)| index.get(&c).copied())
+                    .collect();
                 c.dedup();
-                (id, c)
+                c
             })
             .collect();
         ReviewBasis {
             keys,
-            changed,
+            order,
+            index,
+            children,
             own_mark,
         }
     }
@@ -244,23 +262,30 @@ impl ReviewBasis {
             .filter(|m| self.keys.get(&m.node) == Some(&m.key))
             .map(|m| (m.node.clone(), m.clone()))
             .collect();
-        // Parents sort before children (level first): a node marked
-        // reviewed covers every changed node under it.
-        let mut covered: HashSet<&NodeId> = HashSet::new();
-        for (id, children) in &self.changed {
-            if covered.contains(id) || marks.get(id).is_some_and(|m| m.reviewed) {
-                covered.extend(children);
+        // By index throughout: this runs on every mark the reviewer makes,
+        // on the UI thread, so it touches no ids (#125, the 16 ms budget).
+        let n = self.order.len();
+        let mut marked = vec![false; n];
+        for m in marks.values().filter(|m| m.reviewed) {
+            if let Some(&i) = self.index.get(&m.node) {
+                marked[i] = true;
+            }
+        }
+        // Parents come before children: a node marked reviewed covers every
+        // changed node under it.
+        let mut covered = vec![false; n];
+        for i in 0..n {
+            if covered[i] || marked[i] {
+                for &c in &self.children[i] {
+                    covered[c] = true;
+                }
             }
         }
         // In reverse every child is settled before its parent.
-        let mut reviewed = BTreeSet::new();
-        for (id, children) in self.changed.iter().rev() {
-            let marked = marks.get(id).is_some_and(|m| m.reviewed);
-            let rolls_up =
-                !self.own_mark.contains(id) && children.iter().all(|c| reviewed.contains(c));
-            if marked || covered.contains(id) || rolls_up {
-                reviewed.insert(id.clone());
-            }
+        let mut reviewed = vec![false; n];
+        for i in (0..n).rev() {
+            let rolls_up = !self.own_mark[i] && self.children[i].iter().all(|&c| reviewed[c]);
+            reviewed[i] = marked[i] || covered[i] || rolls_up;
         }
         ReviewState {
             basis: Arc::clone(self),
@@ -277,20 +302,20 @@ impl ReviewBasis {
 
     /// Every changed node, and every ancestor of one, ordered by id.
     pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
-        self.changed.keys()
+        self.order.iter()
     }
 
     /// Whether only `id`'s own mark can make it reviewed: it has no changed
     /// children, or changed itself (see [`ReviewState`]).
     #[must_use]
     pub fn needs_own_mark(&self, id: &NodeId) -> bool {
-        self.own_mark.contains(id)
+        self.index.get(id).is_some_and(|&i| self.own_mark[i])
     }
 
     /// Whether `id` changed, itself or below it.
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {
-        self.changed.contains_key(id)
+        self.index.contains_key(id)
     }
 }
 
@@ -321,7 +346,7 @@ impl ReviewState {
     /// Whether `id` is reviewed, by its own mark or by roll-up.
     #[must_use]
     pub fn is_reviewed(&self, id: &NodeId) -> bool {
-        self.reviewed.contains(id)
+        self.basis.index.get(id).is_some_and(|&i| self.reviewed[i])
     }
 
     /// The mark on `id` that applies to this change, if any.
@@ -337,8 +362,10 @@ impl ReviewState {
     #[must_use]
     pub fn progress(&self) -> (usize, usize) {
         let own = &self.basis.own_mark;
-        let done = own.iter().filter(|id| self.reviewed.contains(*id)).count();
-        (done, own.len())
+        let done = (0..own.len())
+            .filter(|&i| own[i] && self.reviewed[i])
+            .count();
+        (done, own.iter().filter(|&&o| o).count())
     }
 }
 
