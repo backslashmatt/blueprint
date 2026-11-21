@@ -85,12 +85,13 @@ pub struct ReviewState {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewBasis {
     keys: HashMap<NodeId, u64>,
-    /// Each changed node and ancestor of one, ordered by id, which puts
-    /// parents before children as ids order by level first. (Not always: a
-    /// moved node's unmoved child can sort before its new parent, as it did
-    /// before this was kept by index.) A node's place here is its index
-    /// below.
+    /// Each changed node and ancestor of one, ordered by id. A node's place
+    /// here is its index below. Id order mostly puts parents first, as ids
+    /// order by level, but not always: a moved node's unmoved child can sort
+    /// before its new parent. So the passes use `topo`.
     order: Vec<NodeId>,
+    /// Every index, parents before their children.
+    topo: Vec<usize>,
     index: HashMap<NodeId, usize>,
     /// By index: the node's changed children, as indices.
     children: Vec<Vec<usize>>,
@@ -234,7 +235,7 @@ impl ReviewBasis {
             .enumerate()
             .map(|(i, id)| (id.clone(), i))
             .collect();
-        let children = changed
+        let children: Vec<Vec<usize>> = changed
             .into_values()
             .map(|children| {
                 let mut c: Vec<usize> = children
@@ -247,6 +248,7 @@ impl ReviewBasis {
             .collect();
         ReviewBasis {
             keys,
+            topo: topological(&children),
             order,
             index,
             children,
@@ -273,10 +275,10 @@ impl ReviewBasis {
                 marked[i] = true;
             }
         }
-        // Parents come before children: a node marked reviewed covers every
+        // Parents before children: a node marked reviewed covers every
         // changed node under it.
         let mut covered = vec![false; n];
-        for i in 0..n {
+        for &i in &self.topo {
             if covered[i] || marked[i] {
                 for &c in &self.children[i] {
                     covered[c] = true;
@@ -285,7 +287,7 @@ impl ReviewBasis {
         }
         // In reverse every child is settled before its parent.
         let mut reviewed = vec![false; n];
-        for i in (0..n).rev() {
+        for &i in self.topo.iter().rev() {
             let rolls_up = !self.own_mark[i] && self.children[i].iter().all(|&c| reviewed[c]);
             reviewed[i] = marked[i] || covered[i] || rolls_up;
         }
@@ -369,6 +371,38 @@ impl ReviewState {
             .count();
         (done, own.iter().filter(|&&o| o).count())
     }
+}
+
+/// The indices of a graph given as each node's children, parents before
+/// their children (Kahn's algorithm, smallest index first, so a graph
+/// already in that order keeps it). A cycle, which the model never has,
+/// would leave its nodes out of the passes; they are appended in index order.
+fn topological(children: &[Vec<usize>]) -> Vec<usize> {
+    let n = children.len();
+    let mut parents = vec![0usize; n];
+    for cs in children {
+        for &c in cs {
+            parents[c] += 1;
+        }
+    }
+    let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..n)
+        .filter(|&i| parents[i] == 0)
+        .map(std::cmp::Reverse)
+        .collect();
+    let mut out = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while let Some(std::cmp::Reverse(i)) = ready.pop() {
+        out.push(i);
+        placed[i] = true;
+        for &c in &children[i] {
+            parents[c] -= 1;
+            if parents[c] == 0 {
+                ready.push(std::cmp::Reverse(c));
+            }
+        }
+    }
+    out.extend((0..n).filter(|&i| !placed[i]));
+    out
 }
 
 /// 64-bit FNV-1a, with each field length-prefixed so fields cannot run together.
@@ -760,5 +794,67 @@ mod tests {
         };
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<Mark>(&json).unwrap(), m);
+    }
+
+    /// A basis over `ids` in id order, with `children` by index, every node
+    /// keyed 1, and `own` marking the nodes only their own mark can review.
+    fn basis(ids: &[NodeId], children: Vec<Vec<usize>>, own: Vec<bool>) -> Arc<ReviewBasis> {
+        Arc::new(ReviewBasis {
+            keys: ids.iter().map(|i| (i.clone(), 1)).collect(),
+            topo: topological(&children),
+            order: ids.to_vec(),
+            index: ids
+                .iter()
+                .enumerate()
+                .map(|(n, i)| (i.clone(), n))
+                .collect(),
+            children,
+            own_mark: own,
+        })
+    }
+
+    fn reviewed_mark(node: &NodeId) -> Mark {
+        Mark {
+            node: node.clone(),
+            key: 1,
+            reviewed: true,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_child_that_sorts_before_its_moved_parent_is_still_covered() {
+        // P moved to sort last, its unmoved child C first: P > C > D.
+        let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), d.clone(), p.clone()],
+            vec![vec![1], vec![], vec![0]],
+            vec![false, true, true],
+        );
+        let state = b.state([&reviewed_mark(&p)]);
+        for n in [&p, &c, &d] {
+            assert!(state.is_reviewed(n), "{n:?} is under a reviewed mark");
+        }
+    }
+
+    #[test]
+    fn a_moved_parent_rolls_up_from_a_child_that_sorts_before_it() {
+        let (c, p) = (id(&["a", "c"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), p.clone()],
+            vec![vec![], vec![0]],
+            vec![true, false],
+        );
+        let state = b.state([&reviewed_mark(&c)]);
+        assert!(state.is_reviewed(&p), "its only changed child is reviewed");
+        assert_eq!(state.progress(), (1, 1));
+    }
+
+    #[test]
+    fn the_pass_order_puts_parents_first_and_keeps_an_ordered_graph() {
+        assert_eq!(topological(&[vec![1], vec![2], vec![]]), vec![0, 1, 2]);
+        assert_eq!(topological(&[vec![], vec![2], vec![0]]), vec![1, 2, 0]);
+        // A cycle cannot happen, but its nodes are still visited.
+        assert_eq!(topological(&[vec![1], vec![0]]), vec![0, 1]);
     }
 }
