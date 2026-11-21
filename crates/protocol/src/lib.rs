@@ -15,8 +15,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// Version of the protocol. Bumped on any incompatible change; 1 added the
-/// model types (`docs/model-json.md`), 2 the requests and responses.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// model types (`docs/model-json.md`), 2 the requests and responses, 3 review
+/// marks.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The architecture model types, re-exported so front ends depend on
 /// `protocol` only (REQUIREMENTS §5.3).
@@ -24,6 +25,7 @@ pub use blueprint_model as model;
 
 use blueprint_model::Model;
 use blueprint_model::diff::{Diff, FileDiff};
+use blueprint_model::review::Mark;
 
 /// Chosen by the front end; echoed in the [`Reply`].
 pub type RequestId = u64;
@@ -75,6 +77,16 @@ pub enum Request {
         /// The last line, inclusive.
         last: u32,
     },
+    /// Every review mark stored for the open repository (DR 0011); the
+    /// front end works out which apply to the change it shows.
+    Marks,
+    /// Stores one review mark, replacing any on the same node and key. Never
+    /// superseded: a mark sent is a mark written, even if the reviewer has
+    /// opened another repository since.
+    Mark {
+        /// The mark.
+        mark: Mark,
+    },
 }
 
 /// Requests in the same lane supersede each other; requests in different
@@ -89,6 +101,9 @@ pub enum Lane {
     Diff,
     /// [`Request::Source`] and [`Request::FileDiff`].
     Source,
+    /// [`Request::Marks`] and [`Request::Mark`]. A newer request supersedes
+    /// an older [`Request::Marks`], never a [`Request::Mark`].
+    Review,
 }
 
 impl Request {
@@ -100,6 +115,7 @@ impl Request {
             Request::Model { .. } => Lane::Model,
             Request::Diff { .. } => Lane::Diff,
             Request::Source { .. } | Request::FileDiff { .. } => Lane::Source,
+            Request::Marks | Request::Mark { .. } => Lane::Review,
         }
     }
 }
@@ -221,6 +237,21 @@ pub enum Response {
         detail: Detail,
         /// Its diff; a side is empty where the file does not exist.
         diff: Arc<FileDiff>,
+    },
+    /// The answer to [`Request::Marks`].
+    Marks {
+        /// Every stored mark, ordered by node.
+        marks: Vec<Mark>,
+        /// Why stored marks were lost, if they were (a damaged file).
+        warning: Option<String>,
+    },
+    /// The answer to [`Request::Mark`]: the mark is stored.
+    Marked {
+        /// The mark, as sent.
+        mark: Mark,
+        /// Why stored marks were lost when they were loaded to add this
+        /// one, if they were (a damaged file, moved aside).
+        warning: Option<String>,
     },
     /// A newer request in the same lane replaced this one before it finished.
     Superseded,

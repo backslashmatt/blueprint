@@ -507,3 +507,111 @@ fn requests_sent_from_many_threads_each_get_one_final_reply() {
         }
     }
 }
+
+#[test]
+fn marks_are_stored_per_repository_and_never_superseded() {
+    use blueprint_model::review::Mark;
+    use blueprint_model::{Ecosystem, NodeId, RepoPath, SystemKey};
+    let data = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("service-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    blueprint_engine::reviews::set_data_root(data);
+    let (one, two) = (repo("marks-one", &[BASE]), repo("marks-two", &[BASE]));
+    let (service, rx) = start();
+    let mark = |key: u64| Mark {
+        node: NodeId::system(SystemKey {
+            ecosystem: Ecosystem::Cargo,
+            dir: RepoPath::parse("a").unwrap(),
+        }),
+        key,
+        reviewed: true,
+        note: Some(format!("note {key}")),
+    };
+    let mut others = Vec::new();
+
+    // Two marks, then another repository at once: both marks still land
+    // in the first repository, each answered.
+    service.send(
+        1,
+        Request::Open {
+            path: one.display().to_string(),
+        },
+    );
+    service.send(2, Request::Mark { mark: mark(1) });
+    service.send(3, Request::Mark { mark: mark(2) });
+    service.send(
+        4,
+        Request::Open {
+            path: two.display().to_string(),
+        },
+    );
+    for id in [2, 3] {
+        let r = until_last(&rx, id, &mut others);
+        assert!(matches!(r[..], [Response::Marked { .. }]), "{id}: {r:?}");
+    }
+    service.send(5, Request::Marks);
+    let r = until_last(&rx, 5, &mut others);
+    let [
+        Response::Marks {
+            marks,
+            warning: None,
+        },
+    ] = &r[..]
+    else {
+        panic!("{r:?}");
+    };
+    assert!(
+        marks.is_empty(),
+        "the second repository has none: {marks:?}"
+    );
+
+    service.send(
+        6,
+        Request::Open {
+            path: one.display().to_string(),
+        },
+    );
+    service.send(7, Request::Marks);
+    let r = until_last(&rx, 7, &mut others);
+    let [Response::Marks { marks, .. }] = &r[..] else {
+        panic!("{r:?}");
+    };
+    assert_eq!(marks, &[mark(1), mark(2)]);
+
+    // A damaged file: the first Mark says the earlier marks were lost.
+    let file = blueprint_engine::reviews::Reviews::location(&two).unwrap();
+    std::fs::write(&file, b"{ damaged").unwrap();
+    service.send(
+        8,
+        Request::Open {
+            path: two.display().to_string(),
+        },
+    );
+    service.send(9, Request::Mark { mark: mark(3) });
+    let r = until_last(&rx, 9, &mut others);
+    let [
+        Response::Marked {
+            warning: Some(w), ..
+        },
+    ] = &r[..]
+    else {
+        panic!("{r:?}");
+    };
+    assert!(w.contains("damaged"), "{w}");
+
+    // No file is written for a path that is not a repository.
+    let not_repo = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("service-not-a-repo-{}", std::process::id()));
+    std::fs::create_dir_all(&not_repo).unwrap();
+    service.send(
+        10,
+        Request::Open {
+            path: not_repo.display().to_string(),
+        },
+    );
+    service.send(11, Request::Mark { mark: mark(4) });
+    let r = until_last(&rx, 11, &mut others);
+    assert!(failed(&r[0]).is_some(), "{r:?}");
+    let stray = blueprint_engine::reviews::Reviews::location(&not_repo).unwrap();
+    assert!(!stray.exists());
+}

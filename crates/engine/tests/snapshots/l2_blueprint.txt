@@ -62,6 +62,7 @@ nodes:
   L2:cargo:crates/model#codec  Module  "codec"  Exact  crates/model/src/codec.rs  Public
   L2:cargo:crates/model#codec/tests  Module  "codec::tests"  Exact  crates/model/src/codec.rs  Private
   L2:cargo:crates/model#diff  Module  "diff"  Exact  crates/model/src/diff.rs  Public
+  L2:cargo:crates/model#findings  Module  "findings"  Exact  crates/model/src/findings.rs  Public
   L2:cargo:crates/model#graph  Module  "graph"  Exact  crates/model/src/graph.rs  Public
   L2:cargo:crates/model#graph/tests  Module  "graph::tests"  Exact  crates/model/src/graph.rs  Private
   L2:cargo:crates/model#lang  Module  "lang"  Exact  crates/model/src/lang.rs  Public
@@ -79,13 +80,19 @@ nodes:
   L2:cargo:crates/ui#code_view  Module  "code_view"  Exact  crates/ui/src/code_view.rs  Public
   L2:cargo:crates/ui#code_view/tests  Module  "code_view::tests"  Exact  crates/ui/src/code_view.rs  Private
   L2:cargo:crates/ui#examples%2F  Directory  "examples/"  Unknown  crates/ui/examples
+  L2:cargo:crates/ui#findings  Module  "findings"  Exact  crates/ui/src/findings.rs  Public
+  L2:cargo:crates/ui#findings/tests  Module  "findings::tests"  Exact  crates/ui/src/findings.rs  Private
   L2:cargo:crates/ui#layout  Module  "layout"  Exact  crates/ui/src/layout.rs  Public
   L2:cargo:crates/ui#layout/tests  Module  "layout::tests"  Exact  crates/ui/src/layout.rs  Private
   L2:cargo:crates/ui#map  Module  "map"  Exact  crates/ui/src/map.rs  Public
   L2:cargo:crates/ui#map/tests  Module  "map::tests"  Exact  crates/ui/src/map.rs  Private
+  L2:cargo:crates/ui#outline  Module  "outline"  Exact  crates/ui/src/outline.rs  Public
+  L2:cargo:crates/ui#outline/tests  Module  "outline::tests"  Exact  crates/ui/src/outline.rs  Private
   L2:cargo:crates/ui#review_list  Module  "review_list"  Exact  crates/ui/src/review_list.rs  Public
   L2:cargo:crates/ui#review_list/tests  Module  "review_list::tests"  Exact  crates/ui/src/review_list.rs  Private
   L2:cargo:crates/ui#tests  Module  "tests"  Exact  crates/ui/src/lib.rs  Private
+  L2:cargo:crates/ui#text_scale  Module  "text_scale"  Exact  crates/ui/src/text_scale.rs  Public
+  L2:cargo:crates/ui#text_scale/tests  Module  "text_scale::tests"  Exact  crates/ui/src/text_scale.rs  Private
   L2:cargo:crates/ui#workspace  Module  "workspace"  Exact  crates/ui/src/workspace.rs  Public
   L2:cargo:crates/ui#workspace/tests  Module  "workspace::tests"  Exact  crates/ui/src/workspace.rs  Private
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public

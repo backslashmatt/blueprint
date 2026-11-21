@@ -5,10 +5,12 @@
 //! [`ReviewState`] from them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{Diff, Lines, NodeChange};
+use crate::findings::{self, Item};
 use crate::{Model, Node, NodeId};
 
 /// Bumped whenever [`fingerprints`] or [`ReviewState::key`] would give a
@@ -60,24 +62,48 @@ pub fn fingerprints(model: &Model) -> HashMap<NodeId, u64> {
 
 /// Which changed nodes are reviewed, from the marks a reviewer made.
 ///
-/// A node is reviewed when it is marked reviewed, or when every changed
+/// A node is reviewed when it, or a node above it, is marked reviewed:
+/// reviewing a module reviews what is in it. It is also reviewed when every changed
 /// child is reviewed and nothing in the node itself changed apart from its
 /// children: no lines of its own (its weight less its children's), and no
 /// move, rename or surface change of its own. A changed node with no changed
 /// children is reviewed only by its own mark.
+///
+/// Built in two steps: a [`ReviewBasis`] once per diff, which reads both
+/// models, then [`ReviewBasis::state`] for each set of marks, which only
+/// visits changed nodes, so a front end can apply a mark at once.
 #[derive(Debug, Clone, Default)]
 pub struct ReviewState {
-    keys: HashMap<NodeId, u64>,
-    changed: BTreeSet<NodeId>,
-    own_mark: BTreeSet<NodeId>,
+    basis: Arc<ReviewBasis>,
     marks: HashMap<NodeId, Mark>,
-    reviewed: BTreeSet<NodeId>,
+    /// By the basis's index of each changed node.
+    reviewed: Vec<bool>,
+}
+
+/// What a review state depends on besides the marks: each changed node's
+/// key, its changed children, and whether only its own mark can make it
+/// reviewed.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewBasis {
+    keys: HashMap<NodeId, u64>,
+    /// Each changed node and ancestor of one, ordered by id. A node's place
+    /// here is its index below. Id order mostly puts parents first, as ids
+    /// order by level, but not always: a moved node's unmoved child can sort
+    /// before its new parent. So the passes use `topo`.
+    order: Vec<NodeId>,
+    /// Every index, parents before their children.
+    topo: Vec<usize>,
+    index: HashMap<NodeId, usize>,
+    /// By index: the node's changed children, as indices.
+    children: Vec<Vec<usize>>,
+    /// By index: whether only the node's own mark can make it reviewed.
+    own_mark: Vec<bool>,
 }
 
 impl ReviewState {
     /// The state of `diff` between `base` and `head`, given every mark
-    /// stored for the repository. Marks whose key no longer matches, because
-    /// the node's change is not the one that was marked, are ignored.
+    /// stored for the repository: [`ReviewBasis::new`], then
+    /// [`ReviewBasis::state`].
     #[must_use]
     pub fn new<'a>(
         diff: &Diff,
@@ -85,6 +111,21 @@ impl ReviewState {
         head: &Model,
         marks: impl IntoIterator<Item = &'a Mark>,
     ) -> ReviewState {
+        Arc::new(ReviewBasis::new(diff, base, head)).state(marks)
+    }
+
+    /// What this state was computed from.
+    #[must_use]
+    pub fn basis(&self) -> &Arc<ReviewBasis> {
+        &self.basis
+    }
+}
+
+impl ReviewBasis {
+    /// The basis of `diff` between `base` and `head`: one pass over each
+    /// model.
+    #[must_use]
+    pub fn new(diff: &Diff, base: &Model, head: &Model) -> ReviewBasis {
         let (base_fp, head_fp) = (fingerprints(base), fingerprints(head));
         // Each changed node's base id, for the nodes whose id changed.
         let mut base_id: HashMap<NodeId, NodeId> = HashMap::new();
@@ -183,32 +224,76 @@ impl ReviewState {
             h.u64(if b == id { 0 } else { digest(b) });
             keys.insert(id.clone(), h.finish());
         }
+        let own_mark: Vec<bool> = changed
+            .iter()
+            .map(|(id, children)| {
+                children.is_empty() || own_change.contains(id) || own_lines(id, children)
+            })
+            .collect();
+        let order: Vec<NodeId> = changed.keys().cloned().collect();
+        let index: HashMap<NodeId, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
+        let children: Vec<Vec<usize>> = changed
+            .into_values()
+            .map(|children| {
+                let mut c: Vec<usize> = children
+                    .into_iter()
+                    .filter_map(|(c, _)| index.get(&c).copied())
+                    .collect();
+                c.dedup();
+                c
+            })
+            .collect();
+        ReviewBasis {
+            keys,
+            topo: topological(&children),
+            order,
+            index,
+            children,
+            own_mark,
+        }
+    }
+
+    /// The state given every mark stored for the repository. Marks whose
+    /// key no longer matches, because the node's change is not the one that
+    /// was marked, are ignored.
+    #[must_use]
+    pub fn state<'a>(self: &Arc<Self>, marks: impl IntoIterator<Item = &'a Mark>) -> ReviewState {
         let marks: HashMap<NodeId, Mark> = marks
             .into_iter()
-            .filter(|m| keys.get(&m.node) == Some(&m.key))
+            .filter(|m| self.keys.get(&m.node) == Some(&m.key))
             .map(|m| (m.node.clone(), m.clone()))
             .collect();
-
-        // Children sort after parents (level first), so in reverse every
-        // child is settled before its parent.
-        let mut reviewed = BTreeSet::new();
-        let mut own_mark = BTreeSet::new();
-        for (id, children) in changed.iter().rev() {
-            let needs_own =
-                children.is_empty() || own_change.contains(id) || own_lines(id, children);
-            if needs_own {
-                own_mark.insert(id.clone());
-            }
-            let marked = marks.get(id).is_some_and(|m| m.reviewed);
-            let rolls_up = !needs_own && children.iter().all(|(c, _)| reviewed.contains(c));
-            if marked || rolls_up {
-                reviewed.insert(id.clone());
+        // By index throughout: this runs on every mark the reviewer makes,
+        // on the UI thread, so it touches no ids (#125, the 16 ms budget).
+        let n = self.order.len();
+        let mut marked = vec![false; n];
+        for m in marks.values().filter(|m| m.reviewed) {
+            if let Some(&i) = self.index.get(&m.node) {
+                marked[i] = true;
             }
         }
+        // Parents before children: a node marked reviewed covers every
+        // changed node under it.
+        let mut covered = vec![false; n];
+        for &i in &self.topo {
+            if covered[i] || marked[i] {
+                for &c in &self.children[i] {
+                    covered[c] = true;
+                }
+            }
+        }
+        // In reverse every child is settled before its parent.
+        let mut reviewed = vec![false; n];
+        for &i in self.topo.iter().rev() {
+            let rolls_up = !self.own_mark[i] && self.children[i].iter().all(|&c| reviewed[c]);
+            reviewed[i] = marked[i] || covered[i] || rolls_up;
+        }
         ReviewState {
-            keys,
-            changed: changed.into_keys().collect(),
-            own_mark,
+            basis: Arc::clone(self),
             marks,
             reviewed,
         }
@@ -220,16 +305,79 @@ impl ReviewState {
         self.keys.get(id).copied()
     }
 
+    /// Every changed node, and every ancestor of one, ordered by id.
+    pub fn changed(&self) -> impl DoubleEndedIterator<Item = &NodeId> {
+        self.order.iter()
+    }
+
+    /// Whether only `id`'s own mark can make it reviewed: it has no changed
+    /// children, or changed itself (see [`ReviewState`]).
+    #[must_use]
+    pub fn needs_own_mark(&self, id: &NodeId) -> bool {
+        self.index.get(id).is_some_and(|&i| self.own_mark[i])
+    }
+
     /// Whether `id` changed, itself or below it.
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {
-        self.changed.contains(id)
+        self.index.contains_key(id)
+    }
+
+    /// Every changed node, ordered by id, with its changed children.
+    pub fn entries(&self) -> impl DoubleEndedIterator<Item = (&NodeId, Vec<&NodeId>)> + '_ {
+        self.order
+            .iter()
+            .zip(&self.children)
+            .map(move |(id, cs)| (id, cs.iter().map(|&c| &self.order[c]).collect()))
+    }
+
+    /// The changed children of `id`: none if `id` did not change.
+    #[must_use]
+    pub fn children_of(&self, id: &NodeId) -> Vec<&NodeId> {
+        self.index.get(id).map_or_else(Vec::new, |&i| {
+            self.children[i].iter().map(|&c| &self.order[c]).collect()
+        })
+    }
+
+    /// Every changed node with its changed children, each parent before its
+    /// children (reversed, each child before its parents), which id order
+    /// does not always give.
+    pub fn parents_first(&self) -> impl DoubleEndedIterator<Item = (&NodeId, Vec<&NodeId>)> + '_ {
+        self.topo.iter().map(move |&i| {
+            let children = self.children[i].iter().map(|&c| &self.order[c]).collect();
+            (&self.order[i], children)
+        })
+    }
+}
+
+impl ReviewState {
+    /// See [`ReviewBasis::key`].
+    #[must_use]
+    pub fn key(&self, id: &NodeId) -> Option<u64> {
+        self.basis.key(id)
+    }
+
+    /// See [`ReviewBasis::changed`].
+    pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
+        self.basis.changed()
+    }
+
+    /// See [`ReviewBasis::needs_own_mark`].
+    #[must_use]
+    pub fn needs_own_mark(&self, id: &NodeId) -> bool {
+        self.basis.needs_own_mark(id)
+    }
+
+    /// See [`ReviewBasis::is_changed`].
+    #[must_use]
+    pub fn is_changed(&self, id: &NodeId) -> bool {
+        self.basis.is_changed(id)
     }
 
     /// Whether `id` is reviewed, by its own mark or by roll-up.
     #[must_use]
     pub fn is_reviewed(&self, id: &NodeId) -> bool {
-        self.reviewed.contains(id)
+        self.basis.index.get(id).is_some_and(|&i| self.reviewed[i])
     }
 
     /// The mark on `id` that applies to this change, if any.
@@ -244,13 +392,45 @@ impl ReviewState {
     /// changed node is reviewed.
     #[must_use]
     pub fn progress(&self) -> (usize, usize) {
-        let done = self
-            .own_mark
-            .iter()
-            .filter(|id| self.reviewed.contains(*id))
+        let own = &self.basis.own_mark;
+        let done = (0..own.len())
+            .filter(|&i| own[i] && self.reviewed[i])
             .count();
-        (done, self.own_mark.len())
+        (done, own.iter().filter(|&&o| o).count())
     }
+}
+
+/// The indices of a graph given as each node's children, parents before
+/// their children (Kahn's algorithm, smallest index first, so a graph
+/// already in that order keeps it). A cycle, which the model never has,
+/// would hold back its nodes and everything under them; those are appended
+/// in index order.
+fn topological(children: &[Vec<usize>]) -> Vec<usize> {
+    let n = children.len();
+    let mut parents = vec![0usize; n];
+    for cs in children {
+        for &c in cs {
+            parents[c] += 1;
+        }
+    }
+    let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..n)
+        .filter(|&i| parents[i] == 0)
+        .map(std::cmp::Reverse)
+        .collect();
+    let mut out = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while let Some(std::cmp::Reverse(i)) = ready.pop() {
+        out.push(i);
+        placed[i] = true;
+        for &c in &children[i] {
+            parents[c] -= 1;
+            if parents[c] == 0 {
+                ready.push(std::cmp::Reverse(c));
+            }
+        }
+    }
+    out.extend((0..n).filter(|&i| !placed[i]));
+    out
 }
 
 /// 64-bit FNV-1a, with each field length-prefixed so fields cannot run together.
@@ -276,6 +456,180 @@ impl Fnv {
     fn finish(&self) -> u64 {
         self.0
     }
+}
+
+impl ReviewState {
+    /// Whether a finding is reviewed: its node is, or for a cycle, every
+    /// changed node on it is (an unchanged one has nothing to review).
+    #[must_use]
+    pub fn is_finding_reviewed(&self, item: &Item) -> bool {
+        match item {
+            Item::Cycle { nodes, .. } => {
+                let mut changed = nodes.iter().filter(|n| self.is_changed(n)).peekable();
+                changed.peek().is_some() && changed.all(|n| self.is_reviewed(n))
+            }
+            _ => item.target().is_some_and(|t| self.is_reviewed(t)),
+        }
+    }
+}
+
+/// The review of `diff` from `base_commit` to `head_commit` as Markdown, for
+/// a pull request comment (#116): the findings in order, ticked where
+/// reviewed; the reviewed nodes, each at the highest level reviewed; what is
+/// still to review, at the highest level nothing has been reviewed under;
+/// and every note. The app and `bp review export` both print this.
+#[must_use]
+pub fn export(
+    state: &ReviewState,
+    diff: &Diff,
+    base: &Model,
+    head: &Model,
+    base_commit: &str,
+    head_commit: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let basis = &state.basis;
+    let short = |c: &str| c.chars().take(10).collect::<String>();
+    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A name as a code span on one line: rendered literally, never a
+    // mention, link or HTML.
+    let code = |name: String| format!("`{}`", one_line(&name).replace('`', "'"));
+    let node = |id: &NodeId| {
+        format!(
+            "{} (L{})",
+            code(findings::qualified(id, base, head)),
+            id.level().number()
+        )
+    };
+    // A reviewer's note as text: no HTML or comments, no mentions.
+    let text = |t: &str| {
+        one_line(t)
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('@', "&#64;")
+    };
+    // Each changed node's changed parents: a moved node has two.
+    let mut parents: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
+    for (id, children) in basis.entries() {
+        for c in children {
+            parents.entry(c).or_default().push(id);
+        }
+    }
+    // Whether anything under each node is reviewed (children before parents).
+    let mut touched: HashSet<&NodeId> = HashSet::new();
+    for (id, children) in basis.parents_first().rev() {
+        if children
+            .iter()
+            .any(|&c| state.is_reviewed(c) || touched.contains(c))
+        {
+            touched.insert(id);
+        }
+    }
+
+    let (done, total) = state.progress();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "## Blueprint review: `{}` → `{}`\n",
+        short(base_commit),
+        short(head_commit)
+    );
+    let _ = writeln!(
+        out,
+        "Base `{base_commit}`, head `{head_commit}`. Reviewed {done} of {total} changes that need their own review.\n"
+    );
+
+    out.push_str("### Findings\n\n");
+    let items = findings::items(diff, base, head);
+    if items.is_empty() {
+        out.push_str("None.\n");
+    }
+    for (n, item) in items.iter().enumerate() {
+        let tick = if state.is_finding_reviewed(item) {
+            "✓"
+        } else {
+            "☐"
+        };
+        let _ = writeln!(
+            out,
+            "{}. {tick} {}",
+            n + 1,
+            findings::label_quoted(item, base, head, &code)
+        );
+    }
+
+    let mut noted: HashSet<&NodeId> = HashSet::new();
+    let note = |id: &NodeId| state.mark(id).and_then(|m| m.note.as_deref()).map(text);
+    out.push_str("\n### Reviewed\n\n");
+    let mut any = false;
+    for id in basis.changed() {
+        let top = state.is_reviewed(id)
+            && !parents
+                .get(id)
+                .is_some_and(|ps| ps.iter().any(|p| state.is_reviewed(p)));
+        if top {
+            any = true;
+            let _ = match note(id) {
+                Some(n) => {
+                    noted.insert(id);
+                    writeln!(out, "- {}: {n}", node(id))
+                }
+                None => writeln!(out, "- {}", node(id)),
+            };
+        }
+    }
+    if !any {
+        out.push_str("Nothing yet.\n");
+    }
+
+    out.push_str("\n### Still to review\n\n");
+    let mut open: Vec<String> = Vec::new();
+    let mut stack: Vec<&NodeId> = basis
+        .changed()
+        .filter(|id| !parents.contains_key(id))
+        .rev()
+        .collect();
+    // A moved node is under two parents: listed once.
+    let mut seen: HashSet<&NodeId> = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) || state.is_reviewed(id) {
+            continue;
+        }
+        if !touched.contains(id) {
+            open.push(format!("- {}", node(id)));
+            continue;
+        }
+        // Partly reviewed: its own change, if any, then what is open below.
+        if basis.needs_own_mark(id) {
+            open.push(format!("- {}: its own change", node(id)));
+        }
+        stack.extend(basis.children_of(id).into_iter().rev());
+    }
+    if open.is_empty() {
+        out.push_str("Nothing: every change is reviewed.\n");
+    }
+    for line in open {
+        let _ = writeln!(out, "{line}");
+    }
+
+    let notes: Vec<(&NodeId, String)> = basis
+        .changed()
+        .filter(|id| !noted.contains(id))
+        .filter_map(|id| note(id).map(|n| (id, n)))
+        .collect();
+    if !notes.is_empty() {
+        out.push_str("\n### Notes\n\n");
+        for (id, n) in notes {
+            let status = if state.is_reviewed(id) {
+                "reviewed"
+            } else {
+                "not reviewed"
+            };
+            let _ = writeln!(out, "- {} ({status}): {n}", node(id));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -408,6 +762,24 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_on_a_parent_covers_everything_changed_under_it() {
+        let (base, head, diff) = (model(1, 2, None, 0), model(10, 20, None, 0), diff(1));
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        let m = mark(&blank, &["m"]);
+        let state = ReviewState::new(&diff, &base, &head, [&m]);
+        for p in [
+            &["m"][..],
+            &["m", "c"],
+            &["m", "c", "f"],
+            &["m", "c", "g"],
+            &[],
+        ] {
+            assert!(state.is_reviewed(&id(p)), "{p:?}");
+        }
+        assert_eq!(state.progress(), (3, 3), "c's own change too");
+    }
+
+    #[test]
     fn a_change_of_the_parents_own_needs_its_own_mark() {
         let (base, head) = (model(1, 2, None, 0), model(10, 20, None, 0));
         let own_lines = diff(1);
@@ -531,8 +903,7 @@ mod tests {
         assert_eq!(state.progress(), (1, 1));
     }
 
-    #[test]
-    fn a_type_moved_to_another_module_is_one_node_under_its_head_id() {
+    fn moved_type() -> (Model, Model, Diff) {
         // m::c with f and g moves to n::c; n exists on both sides.
         let mut base = Model::default();
         let mut head = Model::default();
@@ -569,6 +940,12 @@ mod tests {
             ],
             ..Diff::default()
         };
+        (base, head, diff)
+    }
+
+    #[test]
+    fn a_type_moved_to_another_module_is_one_node_under_its_head_id() {
+        let (base, head, diff) = moved_type();
         let blank = ReviewState::new(&diff, &base, &head, &[]);
         for gone in [&["m", "c"][..], &["m", "c", "f"], &["m", "c", "g"]] {
             assert!(!blank.is_changed(&id(gone)), "{gone:?} is reviewed as n's");
@@ -615,6 +992,67 @@ mod tests {
     }
 
     #[test]
+    fn the_export_lists_findings_reviewed_nodes_what_is_open_and_notes() {
+        let (base, head, diff) = (model(1, 2, None, 0), model(10, 20, None, 0), diff(0));
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        let mut f = mark(&blank, &["m", "c", "f"]);
+        f.note = Some("bounds\nchecked".into());
+        let mut g = mark(&blank, &["m", "c", "g"]);
+        g.reviewed = false;
+        g.note = Some("why 20? <!-- @team".into());
+        let state = ReviewState::new(&diff, &base, &head, [&f, &g]);
+        let text = export(
+            &state,
+            &diff,
+            &base,
+            &head,
+            "0123456789abcdef",
+            "fedcba9876543210",
+        );
+        let expected = "\
+## Blueprint review: `0123456789` → `fedcba9876`
+
+Base `0123456789abcdef`, head `fedcba9876543210`. Reviewed 1 of 2 changes that need their own review.
+
+### Findings
+
+1. ☐ Change concentrated in `a › g`: 3 lines (0 in signatures)
+2. ✓ Change concentrated in `a › f`: 2 lines (0 in signatures)
+
+### Reviewed
+
+- `a › f` (L4): bounds checked
+
+### Still to review
+
+- `a › g` (L4)
+
+### Notes
+
+- `a › g` (L4) (not reviewed): why 20? &lt;!-- &#64;team
+";
+        assert_eq!(text, expected, "{text}");
+    }
+
+    #[test]
+    fn the_export_lists_a_moved_node_once() {
+        let (base, head, diff) = moved_type();
+        let blank = ReviewState::new(&diff, &base, &head, &[]);
+        // Something under the moved type is reviewed, so both its old and
+        // its new module are partly reviewed and walked into.
+        let f = mark(&blank, &["n", "c", "f"]);
+        let state = ReviewState::new(&diff, &base, &head, [&f]);
+        let text = export(&state, &diff, &base, &head, "b", "h");
+        let open = text.split("### Still to review").nth(1).unwrap_or_default();
+        assert_eq!(
+            open.matches("`a › c` (L3): its own change").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(open.matches("`a › g` (L4)").count(), 1, "{text}");
+    }
+
+    #[test]
     fn marks_round_trip_as_json() {
         let m = Mark {
             node: id(&["m", "c"]),
@@ -624,5 +1062,94 @@ mod tests {
         };
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<Mark>(&json).unwrap(), m);
+    }
+
+    /// A basis over `ids` in that index order, with `children` by index, every node
+    /// keyed 1, and `own` marking the nodes only their own mark can review.
+    fn basis(ids: &[NodeId], children: Vec<Vec<usize>>, own: Vec<bool>) -> Arc<ReviewBasis> {
+        Arc::new(ReviewBasis {
+            keys: ids.iter().map(|i| (i.clone(), 1)).collect(),
+            topo: topological(&children),
+            order: ids.to_vec(),
+            index: ids
+                .iter()
+                .enumerate()
+                .map(|(n, i)| (i.clone(), n))
+                .collect(),
+            children,
+            own_mark: own,
+        })
+    }
+
+    fn reviewed_mark(node: &NodeId) -> Mark {
+        Mark {
+            node: node.clone(),
+            key: 1,
+            reviewed: true,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_child_that_sorts_before_its_moved_parent_is_still_covered() {
+        // The index order puts the child C, and its child D, before their
+        // parent P: the order a moved node's unmoved child can take. P > C > D.
+        let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), d.clone(), p.clone()],
+            vec![vec![1], vec![], vec![0]],
+            vec![false, true, true],
+        );
+        let order: Vec<&NodeId> = b.parents_first().map(|(n, _)| n).collect();
+        assert_eq!(order, [&p, &c, &d], "parents first");
+        let state = b.state([&reviewed_mark(&p)]);
+        for n in [&p, &c, &d] {
+            assert!(state.is_reviewed(n), "{n:?} is under a reviewed mark");
+        }
+    }
+
+    #[test]
+    fn a_moved_parent_rolls_up_from_a_child_that_sorts_before_it() {
+        let (c, p) = (id(&["a", "c"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), p.clone()],
+            vec![vec![], vec![0]],
+            vec![true, false],
+        );
+        let state = b.state([&reviewed_mark(&c)]);
+        assert!(state.is_reviewed(&p), "its only changed child is reviewed");
+        assert_eq!(state.progress(), (1, 1));
+    }
+
+    #[test]
+    fn the_pass_order_puts_parents_first_and_keeps_an_ordered_graph() {
+        assert_eq!(topological(&[vec![1], vec![2], vec![]]), vec![0, 1, 2]);
+        assert_eq!(topological(&[vec![], vec![2], vec![0]]), vec![1, 2, 0]);
+        // A cycle cannot happen, but its nodes are still visited.
+        assert_eq!(topological(&[vec![1], vec![0]]), vec![0, 1]);
+    }
+
+    #[test]
+    fn the_export_walks_into_a_moved_parent_that_sorts_after_its_child() {
+        // P > C > D, with C and D first in index order; only D is reviewed.
+        let (c, d, p) = (id(&["a", "c"]), id(&["a", "c", "d"]), id(&["z"]));
+        let b = basis(
+            &[c.clone(), d.clone(), p.clone()],
+            vec![vec![1], vec![], vec![0]],
+            vec![true, true, true],
+        );
+        let state = b.state([&reviewed_mark(&d)]);
+        let (model, diff) = (Model::default(), Diff::default());
+        let text = export(&state, &diff, &model, &model, "b", "h");
+        let open = text.split("### Still to review").nth(1).unwrap_or_default();
+        let open = open.split("###").next().unwrap_or_default();
+        // P and C are partly reviewed: each is listed for its own change,
+        // and D, which is reviewed, is not listed at all.
+        assert_eq!(open.matches(": its own change").count(), 2, "{text}");
+        assert_eq!(
+            open.lines().filter(|l| l.starts_with("- ")).count(),
+            2,
+            "{text}"
+        );
     }
 }
