@@ -159,7 +159,7 @@ then press ↓ and ↑ alternately, 60 times in all, in the review list; the app
 
 ## Options for tests and benchmarks
 
-- `--export-report <file>` (with `--review-report`): writes the review's Markdown export to `<file>` when the report is written, as `x` would copy it.
+- `--export-report <file>` (with `--review-report`): writes to `<file>`, when the report is written, the Markdown the last `x` copied in the open review; the file is empty if `x` was not pressed there. The review report also gives `marks` and `notes`: of the marks made in this session, how many leave a node reviewed and how many carry a note; and `code_opened_at` and `code_cursor`, the code view's row when its diff arrived and now.
 
 | Option | What it does |
 |---|---|
