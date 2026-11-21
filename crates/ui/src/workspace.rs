@@ -183,6 +183,8 @@ pub struct Workspace {
     mark_requests: HashMap<RequestId, Mark>,
     /// The system text size (#118).
     text_scale: f32,
+    /// The Markdown the last `x` copied, for `--export-report` (#119).
+    copied: Option<String>,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -232,6 +234,7 @@ impl Workspace {
             marks_request: None,
             mark_requests: HashMap::new(),
             text_scale: crate::text_scale::get(),
+            copied: None,
         };
         if let Some(path) = path {
             w.open(path);
@@ -793,7 +796,8 @@ impl Workspace {
             Scope::Review if id == "review.note" => self.open_note(),
             Scope::Review if id == "review.export" => match self.export() {
                 Some(text) => {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                    self.copied = Some(text);
                     self.notice = Some("The review is on the clipboard as Markdown.".into());
                 }
                 None => {
@@ -877,6 +881,22 @@ impl Workspace {
                     .into(),
             );
         }
+    }
+
+    /// The Markdown the last `x` (review.export) put on the clipboard, if
+    /// it was pressed.
+    #[must_use]
+    pub fn copied(&self) -> Option<&str> {
+        self.copied.as_deref()
+    }
+
+    /// The marks the reviewer made in this session that mark a node
+    /// reviewed, and the notes among all of them.
+    #[must_use]
+    pub fn mark_counts(&self) -> (usize, usize) {
+        let reviewed = self.marks.iter().filter(|m| m.reviewed).count();
+        let notes = self.marks.iter().filter(|m| m.note.is_some()).count();
+        (reviewed, notes)
     }
 
     /// The review as Markdown (#116), once its review state is known: the

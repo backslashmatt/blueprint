@@ -256,8 +256,10 @@ fn report_review(
         // Review progress (#115): changed nodes needing their own mark,
         // and how many are reviewed.
         let (reviewed, to_review) = r.reviewed.as_ref().map_or((0, 0), |s| s.progress());
+        // The marks made (each `r` that marked a node) and notes typed (#119).
+        let (marks, notes) = w.mark_counts();
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"reviewed\": {reviewed}, \"to_review\": {to_review}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"reviewed\": {reviewed}, \"to_review\": {to_review}, \"marks\": {marks}, \"notes\": {notes}}}\n",
             r.base,
             r.head,
             r.findings,
@@ -270,9 +272,10 @@ fn report_review(
             eprintln!("blueprint: cannot write {t}: {e}");
             std::process::exit(1);
         }
-        // The review as Markdown (#116), as `x` copies it.
+        // The review as Markdown (#116), exactly as the last `x` copied it;
+        // empty if `x` was never pressed, so a test sees the key's effect.
         if let Some(e) = &export
-            && let Err(err) = std::fs::write(e, w.export().unwrap_or_default())
+            && let Err(err) = std::fs::write(e, w.copied().unwrap_or_default())
         {
             eprintln!("blueprint: cannot write {e}: {err}");
             std::process::exit(1);

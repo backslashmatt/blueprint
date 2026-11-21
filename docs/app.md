@@ -159,7 +159,7 @@ then press ↓ and ↑ alternately, 60 times in all, in the review list; the app
 
 ## Options for tests and benchmarks
 
-- `--export-report <file>` (with `--review-report`): writes the review's Markdown export to `<file>` when the report is written, as `x` would copy it.
+- `--export-report <file>` (with `--review-report`): writes to `<file>`, when the report is written, the Markdown the last `x` copied; the file is empty if `x` was not pressed. The review report also gives `marks` (marks made reviewed) and `notes` (notes typed).
 
 | Option | What it does |
 |---|---|

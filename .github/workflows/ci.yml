@@ -284,8 +284,9 @@ jobs:
 
   exit-test:
     # The M4 exit test (REQUIREMENTS §6, #119): a review of one of the agent's own pull
-    # requests (#120, the findings view), end to end with the keyboard only, exported as
-    # Markdown. It keeps the keyboard-only review path from regressing.
+    # requests (#120, the findings view, as squash-merged into main: 1169157..9786f40), end
+    # to end with the keyboard only, exported as Markdown. It keeps the keyboard-only review
+    # path from regressing.
     name: M4 exit test (keyboard-only review, ubuntu-24.04)
     runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
@@ -319,8 +320,9 @@ jobs:
         run: cargo build --release --locked -p blueprint-app
       - name: review #120 by keyboard and export it
         run: |
-          xvfb-run -a -s "-screen 0 1280x800x24" .github/scripts/exit-test.sh \
-            1169157cbbb84878313606449cb3d59b71b9e2df 9786f409587a9a0295377c9a6c790808106d54a2
+          .github/scripts/exit-test.sh \
+            1169157cbbb84878313606449cb3d59b71b9e2df 9786f409587a9a0295377c9a6c790808106d54a2 \
+            spikes/gpui/xvfb-run.sh
           {
             echo "### M4 exit test: the exported review of #120"
             echo
