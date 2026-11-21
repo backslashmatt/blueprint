@@ -41,7 +41,9 @@ EXPECT = {
     "findings": ("list", "Findings", "list item"),
     "map": ("panel", "Map of", None),
     "outline": ("tree", "Outline of the map", "tree item"),
-    "code": (None, "Code of ", None),
+    # A document named for the node, whose name reads a row: so the diff
+    # arrived (not "loading" or "cannot open").
+    "code": ("document frame", "Code of ", None),
 }
 
 
@@ -52,6 +54,10 @@ def check(view, tree):
         problems.append('a window named "Blueprint"')
     if not any(n.startswith(name) and (role is None or r == role) for _, r, n in tree):
         problems.append(f'a {role or "node"} whose name starts "{name}"')
+    if view == "code" and not any(
+        r == role and n.startswith(name) and ". Row " in n for _, r, n in tree
+    ):
+        problems.append("the code view reading a row of its diff")
     if item:
         items = [n for _, r, n in tree if r == item]
         if not items:

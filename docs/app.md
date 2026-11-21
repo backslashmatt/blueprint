@@ -130,7 +130,7 @@ Blueprint works with the keyboard alone, and with a screen reader (#118, §5.5):
 - **Screen readers.** The app exposes its screens to the platform's accessibility API (AccessKit through GPUI):
   - the window is named *Blueprint*;
   - the review list, the findings and the outline are named lists, and the outline is a tree;
-  - the code view is a document named for the node and file, and its name reads the row under the cursor: its place, whether it changed, and its line on each side;
+  - the code view is a document named for the node and file, and its name reads the row under the cursor: its place, whether it changed, and its line on each side. It is the window's active item, so each move of the cursor is read out;
   - each row is read without its cursor mark, says whether it is the highlighted row and its place in the list, and for the outline, its level and whether it is expanded;
   - the highlighted row, or the map, is the focused window's active item, so moving the cursor is read out;
   - the map is a named region whose label says where it is, how many nodes it shows, and the selected node's change, review state and edges;

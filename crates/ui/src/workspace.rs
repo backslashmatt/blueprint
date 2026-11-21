@@ -2161,8 +2161,11 @@ fn code_view(
 ) -> gpui::Stateful<gpui::Div> {
     // For a screen reader: the file, the node and the row under the cursor (#118).
     let named = |d: gpui::Div| {
+        // The window's active item, as the map and list rows are, so each
+        // move of the cursor is read out.
         d.id("code")
             .role(Role::Document)
+            .aria_active_descendant()
             .aria_label(code.a11y_label())
     };
     let state = match (&code.error, code.detail) {

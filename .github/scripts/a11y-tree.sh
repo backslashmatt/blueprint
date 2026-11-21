@@ -39,7 +39,8 @@ for view in list findings map outline code; do
     report="$work/$view.json"
     # Past the list, the review report is written once the view has settled;
     # the window stays open for the tree to be read.
-    if ! timeout 180 dbus-run-session -- bash -c '
+    log="$work/$view.log"
+    if ! timeout 300 dbus-run-session -- bash -c '
         set -u
         /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 &
         sleep 1
@@ -47,19 +48,30 @@ for view in list findings map outline code; do
             dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
                 org.freedesktop.DBus.Properties.Set string:org.a11y.Status string:$p variant:boolean:true >/dev/null
         done
-        report=$1 view=$2 keys=$3 here=$4 app=$5 repo=$6 py=$7; shift 7
+        report=$1 view=$2 keys=$3 here=$4 app=$5 repo=$6 py=$7 log=$8; shift 8
+        # Its own process group (setsid), so the wrapper, the app, Xvfb and
+        # the window manager all stop together at the end.
         if [ "$view" = list ]; then
-            "$@" "$here/$app" "$repo" --script "$keys" >/dev/null 2>&1 &
+            setsid "$@" "$here/$app" "$repo" --script "$keys" >"$log" 2>&1 &
         else
-            "$@" "$here/$app" "$repo" --script "$keys" --review-report "$report" --stay-open >/dev/null 2>&1 &
-            for i in $(seq 1 240); do [ -s "$report" ] && break; sleep 0.5; done
+            setsid "$@" "$here/$app" "$repo" --script "$keys" --review-report "$report" --stay-open >"$log" 2>&1 &
         fi
-        app_pid=$!
+        group=$!
+        stop() { kill -TERM -- -"$group" 2>/dev/null; sleep 1; kill -KILL -- -"$group" 2>/dev/null; }
+        if [ "$view" != list ]; then
+            for i in $(seq 1 240); do [ -s "$report" ] && break; sleep 0.5; done
+            if [ ! -s "$report" ]; then
+                echo "a11y tree ($view): the view did not settle in 120 s" >&2
+                stop; exit 1
+            fi
+        fi
         cd /tmp && "$py" "$here/.github/scripts/a11y_tree.py" "$view" 60; rc=$?
-        kill $app_pid 2>/dev/null
+        stop
         exit $rc
-    ' _ "$report" "$view" "$keys" "$here" "$app" "$work/repo" "$py" "$@"; then
+    ' _ "$report" "$view" "$keys" "$here" "$app" "$work/repo" "$py" "$log" "$@"; then
         failed=1
+        echo "-- the app's output for $view:" >&2
+        tail -20 "$log" >&2 || true
     fi
 done
 [ $failed = 0 ] && echo "a11y tree: every view is labelled"
