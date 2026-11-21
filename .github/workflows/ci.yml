@@ -33,7 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
+        shell: bash
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
       - run: cargo fmt --all --check
 
   test:
@@ -53,7 +60,13 @@ jobs:
           fetch-depth: 2
       - name: Install toolchain from rust-toolchain.toml
         shell: bash
-        run: rustup toolchain install
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
       - name: Install the app's libraries and a headless display (see docs/building.md)
         if: runner.os == 'Linux'
         run: |
@@ -148,7 +161,13 @@ jobs:
           fetch-depth: 2
       - name: Install toolchain from rust-toolchain.toml
         shell: bash
-        run: rustup toolchain install
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-app
@@ -171,7 +190,14 @@ jobs:
         with:
           fetch-depth: 2
       - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
+        shell: bash
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
       - name: Install the app's libraries and a headless compositor
         run: |
           sudo apt-get update -q
@@ -207,7 +233,14 @@ jobs:
         with:
           fetch-depth: 2
       - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
+        shell: bash
+        # A self-hosted runner's service may not have ~/.cargo/bin on its PATH (#122).
+        run: |
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
       - name: Install the app's libraries, a headless display and xdotool
         run: |
           sudo apt-get update -q
