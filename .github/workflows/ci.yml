@@ -125,7 +125,7 @@ jobs:
       - name: app review by command palette
         shell: bash
         run: |
-          keys=end,b,home,h,f1,b,a,s,e,space,a,g,enter,enter,f1,o,p,e,n,space,t,h,e,enter
+          keys=end,b,home,h,f1,b,a,s,e,space,a,g,enter,m,enter,f1,o,p,e,n,space,t,h,e,enter
           if [ "$RUNNER_OS" = Linux ]; then
             timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script $keys --review-report palette.json
           else
@@ -143,10 +143,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p screenshots
-          timeout 600 .github/scripts/screenshot.sh screenshots/map-systems.png 240 target/debug/blueprint . --script end,b,home,h,enter
-          timeout 600 .github/scripts/screenshot.sh screenshots/map-drilled.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter
-          timeout 600 .github/scripts/screenshot.sh screenshots/code.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter,c
-          timeout 600 .github/scripts/screenshot.sh screenshots/palette.png 240 target/debug/blueprint . --script end,b,home,h,enter,enter,f1,c,o,d,e
+          timeout 600 .github/scripts/screenshot.sh screenshots/findings.png 240 target/debug/blueprint . --script end,b,home,h,enter
+          timeout 600 .github/scripts/screenshot.sh screenshots/map-systems.png 240 target/debug/blueprint . --script end,b,home,h,enter,m
+          timeout 600 .github/scripts/screenshot.sh screenshots/map-drilled.png 240 target/debug/blueprint . --script end,b,home,h,enter,m,enter
+          timeout 600 .github/scripts/screenshot.sh screenshots/code.png 240 target/debug/blueprint . --script end,b,home,h,enter,m,enter,c
+          timeout 600 .github/scripts/screenshot.sh screenshots/palette.png 240 target/debug/blueprint . --script end,b,home,h,enter,m,enter,f1,c,o,d,e
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
@@ -325,7 +326,7 @@ jobs:
           fi
       - name: app review by command palette
         run: |
-          timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script end,b,home,h,f1,b,a,s,e,space,a,g,enter,enter,f1,o,p,e,n,space,t,h,e,enter --review-report palette.json
+          timeout 300 spikes/gpui/xvfb-run.sh target/debug/blueprint . --script end,b,home,h,f1,b,a,s,e,space,a,g,enter,m,enter,f1,o,p,e,n,space,t,h,e,enter --review-report palette.json
           cat palette.json
           if grep -q '"base": "\([0-9a-f]*\)", "head": "\1"' palette.json; then
             echo "the palette chose the same commit as base and head"; exit 1

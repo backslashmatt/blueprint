@@ -226,6 +226,37 @@ impl Map {
         });
     }
 
+    /// Shows `id` in its view, drilled down to its parent, and selects it.
+    /// Returns whether the node was found (in head, else in base).
+    pub fn reveal(&mut self, id: &NodeId) -> bool {
+        let Some(chain) = chain(&self.head, id).or_else(|| chain(&self.base, id)) else {
+            return false;
+        };
+        // The chain runs from the node up; the path runs down to its parent.
+        self.path = chain.iter().skip(1).rev().cloned().collect();
+        self.rebuild();
+        self.selected = self.view.nodes.iter().position(|n| &n.id == id);
+        self.selected.is_some()
+    }
+
+    /// A node's parent, from head or else base.
+    #[must_use]
+    pub fn parent(&self, id: &NodeId) -> Option<NodeId> {
+        self.head
+            .node(id)
+            .or_else(|| self.base.node(id))
+            .and_then(|n| n.parent.clone())
+    }
+
+    /// A node's name, from head or else base; its id if neither has it.
+    #[must_use]
+    pub fn name(&self, id: &NodeId) -> String {
+        self.head
+            .node(id)
+            .or_else(|| self.base.node(id))
+            .map_or_else(|| id.to_string(), |n| n.name.clone())
+    }
+
     /// The breadcrumb: the names of the nodes drilled into.
     #[must_use]
     pub fn breadcrumb(&self) -> Vec<String> {
@@ -590,6 +621,35 @@ mod tests {
         assert!(!empty.drill_down());
         empty.cycle(true);
         assert_eq!(empty.selected, None);
+    }
+
+    #[test]
+    fn reveal_drills_to_a_nodes_parent_and_selects_it() {
+        let mut m = review();
+        let id = m
+            .view
+            .nodes
+            .iter()
+            .find(|n| n.name == "a")
+            .map(|n| n.id.clone());
+        let Some(a) = id else {
+            panic!("a is a system");
+        };
+        m.selected = m.view.nodes.iter().position(|n| n.id == a);
+        assert!(m.drill_down());
+        let inner = m.view.nodes.first().map(|n| n.id.clone());
+        let Some(inner) = inner else {
+            panic!("a has children");
+        };
+        m.drill_up();
+        assert!(m.path.is_empty());
+        assert!(m.reveal(&inner));
+        assert_eq!(m.path, vec![a.clone()]);
+        assert_eq!(
+            m.selected.and_then(|i| m.view.nodes.get(i)).map(|n| &n.id),
+            Some(&inner)
+        );
+        assert_eq!(m.name(&a), "a");
     }
 
     #[test]

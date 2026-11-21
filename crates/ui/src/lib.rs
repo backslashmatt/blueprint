@@ -6,6 +6,7 @@ use gpui::WindowAppearance;
 
 pub mod actions;
 pub mod code_view;
+pub mod findings;
 pub mod layout;
 pub mod map;
 pub mod review_list;
