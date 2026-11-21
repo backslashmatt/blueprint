@@ -24,8 +24,11 @@ git -C "$work/repo" update-ref refs/heads/a-base "$base"
 git -C "$work/repo" update-ref refs/heads/b-head "$head"
 git -C "$work/repo" symbolic-ref HEAD refs/heads/b-head
 
+# Paths the app is given: on Windows (Git Bash) in the platform's own form.
+native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
+
 # Review marks go to a fresh data directory, not the runner's.
-export BLUEPRINT_DATA_DIR="$work/data"
+export BLUEPRINT_DATA_DIR="$(native "$work/data")"
 
 # The session, by keys alone:
 #   home,b,down,h,enter   choose base and head; the review opens on its findings
@@ -38,12 +41,16 @@ export BLUEPRINT_DATA_DIR="$work/data"
 #                         is a new file, one change, so there is no next one)
 note=c,h,e,c,k,e,d,space,b,y,space,k,e,y,b,o,a,r,d
 keys="home,b,down,h,enter,r,e,$note,enter,down,down,down,down,r,m,enter,tab,r,x,c,pagedown"
-timeout 300 "$@" "$here/$app" "$work/repo" --script "$keys" \
-    --review-report "$here/exit-review.json" --export-report "$here/exit-review.md"
+timeout 300 "$@" "$here/$app" "$(native "$work/repo")" --script "$keys" \
+    --review-report "$(native "$here/exit-review.json")" \
+    --export-report "$(native "$here/exit-review.md")"
 cat "$here/exit-review.json"
 
 # Every step must have had its effect.
-python3 - "$here/exit-review.json" "$here/exit-review.md" "$base" "$head" <<'PY'
+# Windows runners name the interpreter `python`.
+py=python3
+python3 --version >/dev/null 2>&1 || py=python
+"$py" - "$here/exit-review.json" "$here/exit-review.md" "$base" "$head" <<'PY'
 import json, sys
 report = json.load(open(sys.argv[1]))
 export = open(sys.argv[2], encoding="utf-8").read()
