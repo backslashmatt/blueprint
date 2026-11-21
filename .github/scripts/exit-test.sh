@@ -6,7 +6,8 @@
 # Writes exit-review.json (the app's review report) and exit-review.md (what `x`
 # copied), and fails unless every step of the session had its effect.
 set -eu
-base=$1 head=$2
+# Full ids, as the review report gives them.
+base=$(git rev-parse --verify "$1^{commit}") head=$(git rev-parse --verify "$2^{commit}")
 shift 2
 app=${APP:-target/release/blueprint}
 here=$(pwd)
@@ -41,17 +42,23 @@ timeout 300 "$@" "$here/$app" "$work/repo" --script "$keys" \
 cat "$here/exit-review.json"
 
 # Every step must have had its effect.
-python3 - "$here/exit-review.json" "$here/exit-review.md" <<'PY'
+python3 - "$here/exit-review.json" "$here/exit-review.md" "$base" "$head" <<'PY'
 import json, sys
 report = json.load(open(sys.argv[1]))
 export = open(sys.argv[2], encoding="utf-8").read()
+base, head = sys.argv[3], sys.argv[4]
 problems = []
 def need(ok, what):
     if not ok:
         problems.append(what)
+need((report.get("base"), report.get("head")) == (base, head),
+     f"the review of {base[:10]}..{head[:10]} chosen by home,b,down,h")
+need(f"Base `{base}`, head `{head}`" in export, "the export of that review")
 need(report.get("marks") == 3, f"three marks made by r (got {report.get('marks')})")
 need(report.get("notes") == 1, f"one note typed (got {report.get('notes')})")
 need(report.get("code_rows", 0) > 0, "the code view open on a diff (c)")
+need(report.get("code_cursor", 0) > report.get("code_opened_at", 0),
+     "the code cursor moved on from where it opened (pagedown, n)")
 need(export.startswith("## Blueprint review"), "the review copied by x")
 need("checked by keyboard" in export, "the typed note in the export")
 need(export.count("\n### Reviewed\n") == 1, "a Reviewed section in the export")

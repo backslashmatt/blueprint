@@ -183,8 +183,12 @@ pub struct Workspace {
     mark_requests: HashMap<RequestId, Mark>,
     /// The system text size (#118).
     text_scale: f32,
-    /// The Markdown the last `x` copied, for `--export-report` (#119).
+    /// The Markdown the last `x` copied in the open review, for
+    /// `--export-report` (#119).
     copied: Option<String>,
+    /// The marks made in this session (by `r` or a note), by node and key:
+    /// the latest of each, for the review report's counts (#119).
+    made: HashMap<(NodeId, u64), Mark>,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -235,6 +239,7 @@ impl Workspace {
             mark_requests: HashMap::new(),
             text_scale: crate::text_scale::get(),
             copied: None,
+            made: HashMap::new(),
         };
         if let Some(path) = path {
             w.open(path);
@@ -246,6 +251,8 @@ impl Workspace {
     /// asks for its refs. The engine drops its work on the previous one.
     pub fn open(&mut self, path: &str) {
         self.list = None;
+        self.copied = None;
+        self.made.clear();
         self.marks.clear();
         self.marks_request = None;
         self.mark_requests.clear();
@@ -883,19 +890,19 @@ impl Workspace {
         }
     }
 
-    /// The Markdown the last `x` (review.export) put on the clipboard, if
-    /// it was pressed.
+    /// The Markdown the last `x` (review.export) put on the clipboard in the
+    /// open review, if it was pressed there.
     #[must_use]
     pub fn copied(&self) -> Option<&str> {
         self.copied.as_deref()
     }
 
-    /// The marks the reviewer made in this session that mark a node
-    /// reviewed, and the notes among all of them.
+    /// Of the marks made in this session (not those loaded from storage),
+    /// how many leave a node marked reviewed, and how many carry a note.
     #[must_use]
     pub fn mark_counts(&self) -> (usize, usize) {
-        let reviewed = self.marks.iter().filter(|m| m.reviewed).count();
-        let notes = self.marks.iter().filter(|m| m.note.is_some()).count();
+        let reviewed = self.made.values().filter(|m| m.reviewed).count();
+        let notes = self.made.values().filter(|m| m.note.is_some()).count();
         (reviewed, notes)
     }
 
@@ -996,6 +1003,8 @@ impl Workspace {
 
     /// Applies `mark` at once and sends it to the engine to store.
     fn store_mark(&mut self, mark: Mark) {
+        self.made
+            .insert((mark.node.clone(), mark.key), mark.clone());
         self.marks
             .retain(|m| !(m.node == mark.node && m.key == mark.key));
         self.marks.push(mark.clone());
@@ -1120,6 +1129,8 @@ impl Workspace {
                 .scroll_to_item(list.cursor, ScrollStrategy::Nearest);
         }
         if let Effect::Review { base, head } = effect {
+            // A new review: nothing of it is copied yet.
+            self.copied = None;
             self.list = Some(list.clone());
             let id = self.request(Request::Diff {
                 base: base.clone(),

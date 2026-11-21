@@ -253,13 +253,15 @@ fn report_review(
             return;
         }
         let code_rows = r.code.as_ref().map_or(0, |c| c.rows());
+        // Where the code cursor started and is now: moved by its keys (#119).
+        let (code_opened_at, code_cursor) = r.code.as_ref().map_or((0, 0), |c| (c.opened_at, c.cursor));
         // Review progress (#115): changed nodes needing their own mark,
         // and how many are reviewed.
         let (reviewed, to_review) = r.reviewed.as_ref().map_or((0, 0), |s| s.progress());
         // The marks made (each `r` that marked a node) and notes typed (#119).
         let (marks, notes) = w.mark_counts();
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"reviewed\": {reviewed}, \"to_review\": {to_review}, \"marks\": {marks}, \"notes\": {notes}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"code_opened_at\": {code_opened_at}, \"code_cursor\": {code_cursor}, \"reviewed\": {reviewed}, \"to_review\": {to_review}, \"marks\": {marks}, \"notes\": {notes}}}\n",
             r.base,
             r.head,
             r.findings,

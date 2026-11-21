@@ -46,6 +46,8 @@ pub struct CodeView {
     pub detail: Option<Detail>,
     /// The row under the cursor.
     pub cursor: usize,
+    /// The row the cursor was put on when the diff first arrived.
+    pub opened_at: usize,
     /// Rows a page key moves: set from the window on every frame.
     pub page: usize,
     /// Why the diff could not be had, if it could not.
@@ -70,6 +72,7 @@ impl CodeView {
             diff: None,
             detail: None,
             cursor: 0,
+            opened_at: 0,
             page: PAGE,
             error: None,
         }
@@ -82,6 +85,7 @@ impl CodeView {
         let first = self.diff.is_none();
         if first {
             self.cursor = focus(&diff.rows, self.lines, self.lines_in_base);
+            self.opened_at = self.cursor;
         }
         self.diff = Some(diff);
         self.detail = Some(detail);
