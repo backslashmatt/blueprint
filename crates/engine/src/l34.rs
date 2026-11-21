@@ -119,7 +119,10 @@ pub(crate) fn run(
     let mut wanted = Vec::new();
     let mut plain = Vec::new();
     for (path, place) in placed {
-        match (&place.module, crate::lang::analyser_for(path)) {
+        match (
+            &place.module,
+            crate::lang::analyser_in(path, place.system.ecosystem),
+        ) {
             (Some(module), Some(_)) => wanted.push((path, place, module)),
             _ => plain.push((path, place)),
         }
@@ -142,7 +145,8 @@ pub(crate) fn run(
     let fresh: Vec<Parsed<'_>> = sources
         .into_par_iter()
         .filter_map(|(path, place, module, bytes)| {
-            let facts = crate::lang::analyser_for(path)?.analyse(path, &bytes);
+            let analyser = crate::lang::analyser_in(path, place.system.ecosystem)?;
+            let facts = analyser.analyse(path, &bytes);
             Some((path, place, module, facts))
         })
         .collect();

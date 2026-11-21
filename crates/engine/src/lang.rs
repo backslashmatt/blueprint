@@ -2,8 +2,8 @@
 
 use blueprint_lang_rust::Rust;
 use blueprint_lang_ts::{Tsx, TypeScript};
-use blueprint_model::RepoPath;
 use blueprint_model::lang::LanguageAnalyser;
+use blueprint_model::{Ecosystem, RepoPath};
 
 /// Every analyser, in the order they are asked whether they handle a file.
 pub static ANALYSERS: [&dyn LanguageAnalyser; 3] = [&Rust, &TypeScript, &Tsx];
@@ -12,6 +12,21 @@ pub static ANALYSERS: [&dyn LanguageAnalyser; 3] = [&Rust, &TypeScript, &Tsx];
 #[must_use]
 pub fn analyser_for(path: &RepoPath) -> Option<&'static dyn LanguageAnalyser> {
     ANALYSERS.iter().copied().find(|a| a.handles(path))
+}
+
+/// The analyser that reads the file at `path` as part of a system of
+/// `ecosystem`: Rust in a Cargo package, TypeScript and JavaScript in an npm
+/// or Nx package. A `.js` file a Rust module reaches with `#[path]` is not
+/// read as JavaScript: its system's L2 pass and edges are Rust's.
+#[must_use]
+pub fn analyser_in(path: &RepoPath, ecosystem: Ecosystem) -> Option<&'static dyn LanguageAnalyser> {
+    let a = analyser_for(path)?;
+    let rust = a.name() == Rust.name();
+    match ecosystem {
+        Ecosystem::Cargo => rust.then_some(a),
+        Ecosystem::Npm | Ecosystem::Nx => (!rust).then_some(a),
+        _ => None,
+    }
 }
 
 /// The analyser named `name` (its [`LanguageAnalyser::name`]).
@@ -59,5 +74,11 @@ mod tests {
         for a in ANALYSERS {
             assert!(by_name(a.name()).is_some());
         }
+        // Each system's own language only.
+        let within = |s: &str, e| analyser_in(&p(s), e).map(|a| a.name());
+        assert_eq!(within("src/gen.js", Ecosystem::Cargo), None);
+        assert_eq!(within("src/lib.rs", Ecosystem::Cargo), Some("rust"));
+        assert_eq!(within("src/lib.rs", Ecosystem::Npm), None);
+        assert_eq!(within("src/a.ts", Ecosystem::Nx), Some("ts"));
     }
 }
