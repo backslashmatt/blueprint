@@ -14,8 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use blueprint_lang_rust::Rust;
-use blueprint_model::lang::LanguageAnalyser;
 use blueprint_model::{Model, RepoPath};
 use rayon::prelude::*;
 
@@ -41,7 +39,7 @@ pub struct Resident {
     model: Model,
     diags: Vec<Diagnostic>,
     state: l34::State,
-    /// The L2 shape of every analysed Rust file.
+    /// The L2 shape of every analysed file.
     shapes: HashMap<RepoPath, Shape>,
 }
 
@@ -107,10 +105,10 @@ impl Resident {
     fn update_in_place(&mut self, path: &RepoPath, read: Read<'_>) -> Option<Update> {
         let old = self.shapes.get(path)?;
         let bytes = read(path)?;
-        if l2::shape(&bytes) != *old {
+        if file_shape(path, &bytes) != *old {
             return None;
         }
-        let facts = Rust.analyse(path, &bytes);
+        let facts = crate::lang::analyser_for(path)?.analyse(path, &bytes);
         match l34::update_body(&mut self.model, &mut self.state, path, facts.clone()) {
             Ok(()) => Some(Update::InPlace),
             Err(l34::NotBody::NotAnalysed) => None,
@@ -137,8 +135,18 @@ fn shapes(
     bytes
         .into_par_iter()
         .map(|(p, b)| {
-            let shape = l2::shape(&b);
+            let shape = file_shape(&p, &b);
             (p, shape)
         })
         .collect()
+}
+
+/// What of a file's contents its L2 placement depends on: a Rust file's
+/// `mod` items; nothing for other languages, whose modules are their paths.
+fn file_shape(path: &RepoPath, bytes: &[u8]) -> Shape {
+    if crate::lang::is_rust(path) {
+        l2::shape(bytes)
+    } else {
+        l2::shape(b"")
+    }
 }

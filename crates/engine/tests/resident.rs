@@ -422,3 +422,77 @@ fn a_name_that_changes_kind_or_owner_reaches_its_callers() {
         );
     }
 }
+
+#[test]
+fn typescript_edits_are_applied_in_place_or_by_item_and_match_a_fresh_build() {
+    let mut tree = files(&[
+        ("web/package.json", "{ \"name\": \"web\" }"),
+        ("web/src/a.ts", "export function f() { return 1; }\n"),
+        ("web/src/b.js", "export class B { m() {} }\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let body = "export function f() {\n  // more\n  return 2;\n}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/a.ts", body),
+        Update::InPlace
+    );
+    let items = "export function f() { return 2; }\nexport function g() {}\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/a.ts", items),
+        Update::Items
+    );
+    // Text that would be a `mod` item in Rust does not change a TypeScript
+    // file's module.
+    let modlike = "export class B { m() {} }\n// mod x;\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "web/src/b.js", modlike),
+        Update::InPlace
+    );
+    // A new file is a new module.
+    change(
+        &mut r,
+        &mut tree,
+        "web/src/c.tsx",
+        "export const c = () => 1;\n",
+    );
+    delete(&mut r, &mut tree, "web/src/c.tsx");
+}
+
+#[test]
+fn a_js_file_a_rust_module_reaches_is_rusts_and_gives_no_javascript_facts() {
+    let mut tree = files(&[
+        ("Cargo.toml", "[package]\nname = \"c\"\n"),
+        (
+            "src/lib.rs",
+            "#[path = \"gen.js\"]\nmod gen;\npub fn top() {}\n",
+        ),
+        (
+            "src/gen.js",
+            "export function a() { b(); }\nfunction b() {}\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    assert!(
+        !r.model()
+            .nodes()
+            .any(|n| String::from(n.id.clone()).contains("gen/")),
+        "no JavaScript items in a Rust module"
+    );
+    assert!(calls(&r).is_empty(), "{:?}", calls(&r));
+    // Its `mod` items are the Rust module tree's, so an edit that adds one
+    // must match a fresh build.
+    change(
+        &mut r,
+        &mut tree,
+        "src/gen.js",
+        "mod inner;\nexport function a() {}\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "src/gen.js",
+        "// \u{ff}\nexport function a() {}\n",
+    );
+}

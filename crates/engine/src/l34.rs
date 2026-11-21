@@ -1,14 +1,17 @@
 //! L3–L4 analysis (DR 0008): types, groups of functions, and functions, from
 //! each language analyser's per-file facts, placed under the L2 modules.
 //!
-//! - **Analysed files** (Rust files the module tree reached): each type is an
-//!   L3 component; free functions sit under their module's `(functions)`
+//! - **Analysed files** (files an L2 pass made modules of: Rust files the
+//!   module tree reached, TypeScript and JavaScript files of a package):
+//!   each type is an L3 component; free functions sit under their module's `(functions)`
 //!   component; methods sit under their type when it is in the same crate,
 //!   otherwise under an `impl <Type>` component in the impl's module.
-//! - **Other files** (other languages, and Rust outside the module tree):
+//! - **Other files** (languages with no analyser, and files no L2 pass
+//!   reached):
 //!   one L3 component per file, `unknown`, with no L4 (§3.4).
 //!
-//! Edges between them come from the analysers' references ([`edges`]).
+//! Edges between them come from the analysers' references ([`edges`]); so
+//! far only Rust's references are resolved (#139).
 //!
 //! Ids follow DR 0008: an L3 id is its module's path plus the item name, and
 //! an L4 id its component's path plus the function's name, with `<Trait>::`
@@ -16,8 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use blueprint_lang_rust::Rust;
-use blueprint_model::lang::{FileFacts, Item, ItemKind, LanguageAnalyser, Reference};
+use blueprint_model::lang::{FileFacts, Item, ItemKind, Reference};
 use blueprint_model::{
     Code, Confidence, EdgeKey, EdgeKind, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey,
     Visibility,
@@ -114,12 +116,14 @@ pub(crate) fn run(
     model: &mut Model,
     keep: bool,
 ) -> (Vec<Diagnostic>, Option<State>) {
-    let rust = Rust;
     let mut wanted = Vec::new();
     let mut plain = Vec::new();
     for (path, place) in placed {
-        match &place.module {
-            Some(module) if rust.handles(path) => wanted.push((path, place, module)),
+        match (
+            &place.module,
+            crate::lang::analyser_in(path, place.system.ecosystem),
+        ) {
+            (Some(module), Some(_)) => wanted.push((path, place, module)),
             _ => plain.push((path, place)),
         }
     }
@@ -140,7 +144,11 @@ pub(crate) fn run(
     }
     let fresh: Vec<Parsed<'_>> = sources
         .into_par_iter()
-        .map(|(path, place, module, bytes)| (path, place, module, rust.analyse(path, &bytes)))
+        .filter_map(|(path, place, module, bytes)| {
+            let analyser = crate::lang::analyser_in(path, place.system.ecosystem)?;
+            let facts = analyser.analyse(path, &bytes);
+            Some((path, place, module, facts))
+        })
         .collect();
     for (path, _, _, facts) in &fresh {
         parsed(path, facts);
@@ -339,7 +347,7 @@ impl State {
 /// Why [`update_body`] could not update a file alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotBody {
-    /// The file was not analysed: not Rust, or no module tree reached it.
+    /// The file was not analysed: no analyser reads it, or no L2 pass reached it.
     NotAnalysed,
     /// Its items, references or parse state changed, so other files' nodes
     /// or edges can change too.

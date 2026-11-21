@@ -3,6 +3,8 @@
 //!
 //! - **Rust:** the module tree of each Cargo package, from `src/lib.rs` and
 //!   `src/main.rs`, following `mod` declarations ([`rust`]).
+//! - **TypeScript and JavaScript:** each file of an npm or Nx package is a
+//!   module, named by its path ([`ts`]).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -13,6 +15,7 @@
 
 mod lexer;
 pub mod rust;
+pub mod ts;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,8 +33,9 @@ pub const UNOWNED_NAME: &str = "(unowned)";
 pub struct Placement {
     /// The system that owns it.
     pub system: SystemKey,
-    /// The Rust module it is, if a module tree reached it; otherwise it is
-    /// shown by directory.
+    /// The module it is, if its language's L2 pass reached it (a Rust
+    /// module tree, or an npm package's file); otherwise it is shown by
+    /// directory.
     pub module: Option<Vec<String>>,
 }
 
@@ -98,10 +102,14 @@ fn run(
 
     for (id, key) in &systems {
         let files: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
-        let reached = if key.ecosystem == Ecosystem::Cargo {
-            rust::analyse_crate(id, key, &files, read, model, &mut diags, placed.is_some())
-        } else {
-            None
+        let reached = match key.ecosystem {
+            Ecosystem::Cargo => {
+                rust::analyse_crate(id, key, &files, read, model, &mut diags, placed.is_some())
+            }
+            Ecosystem::Npm | Ecosystem::Nx => {
+                ts::analyse_package(id, key, &files, model, &mut diags)
+            }
+            _ => None,
         };
         // Whatever the module tree did not reach (tests, benches, examples,
         // build scripts, docs, files behind unparsed macros) still shows up,

@@ -158,6 +158,9 @@ pub(super) fn add(
     // start a later path. Recording only those keeps this cheap.
     let mut imports: Imports = HashMap::new();
     for (_, place, file_module, facts) in parsed {
+        if !resolved(&place.system) {
+            continue;
+        }
         add_imports(&mut imports, &place.system, file_module, facts);
     }
     let index = Index::build(b.model);
@@ -224,6 +227,14 @@ pub(super) fn add(
         },
         kept,
     ))
+}
+
+/// Whether references from files of `system` are resolved into edges. Only
+/// Rust's are, so far: TypeScript and JavaScript files give no edges until
+/// their specifiers are resolved (#139), since a missing edge is better than
+/// an invented one (§2.3).
+fn resolved(system: &SystemKey) -> bool {
+    system.ecosystem == Ecosystem::Cargo
 }
 
 /// One file's direct edges, each with the surest confidence the file gives
@@ -540,6 +551,9 @@ impl Resolver<'_> {
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
     ) -> Vec<(EdgeKey, Confidence)> {
+        if !resolved(system) {
+            return Vec::new();
+        }
         let mut found: Vec<(EdgeKey, Confidence)> = self
             .file_calls(system, file_module, facts, node)
             .into_iter()
@@ -603,6 +617,9 @@ impl Resolver<'_> {
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
     ) -> Vec<EdgeKey> {
+        if !resolved(system) {
+            return Vec::new();
+        }
         // What each module of this file imports, for its calls.
         let mut local: HashMap<&[String], HashMap<&str, &[String]>> = HashMap::new();
         let mut globs: HashMap<&[String], Vec<&[String]>> = HashMap::new();

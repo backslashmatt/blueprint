@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-use blueprint_lang_rust::Rust;
 use blueprint_model::lang::FileFacts;
 use blueprint_model::{Model, RepoPath};
 
@@ -141,13 +140,14 @@ pub struct Deep {
     pub model: Model,
     /// Its diagnostics, every level's.
     pub diags: Vec<Diagnostic>,
-    /// The facts of every file that had to be parsed, by blob.
-    pub parsed: Vec<(ObjectId, FileFacts)>,
+    /// The facts of every file that had to be parsed, by blob, with the
+    /// name of the analyser that read it.
+    pub parsed: Vec<(ObjectId, &'static str, FileFacts)>,
     /// How many files' facts came from the index.
     pub reused: usize,
 }
 
-/// The L1–L4 model of `source`, with each Rust file's facts taken from
+/// The L1–L4 model of `source`, with each analysed file's facts taken from
 /// `index` when it has them for the file's blob.
 #[must_use]
 pub fn deep_at(source: &Commit, index: Option<&Index>) -> Deep {
@@ -160,7 +160,8 @@ pub fn deep_at(source: &Commit, index: Option<&Index>) -> Deep {
     };
     let reused = std::sync::atomic::AtomicUsize::new(0);
     let cached = |p: &RepoPath| {
-        let facts = index?.get_facts(&Rust, blob(p)?)?;
+        let analyser = crate::lang::analyser_for(p)?;
+        let facts = index?.get_facts(analyser, blob(p)?)?;
         reused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(facts)
     };
@@ -170,8 +171,8 @@ pub fn deep_at(source: &Commit, index: Option<&Index>) -> Deep {
         &|p| source.read(p),
         &cached,
         &mut |p, facts| {
-            if let Some(b) = blob(p) {
-                parsed.push((b, facts.clone()));
+            if let (Some(b), Some(a)) = (blob(p), crate::lang::analyser_for(p)) {
+                parsed.push((b, a.name(), facts.clone()));
             }
         },
     );
@@ -230,7 +231,11 @@ pub fn index_l4(path: &Path, rev: &str) -> Result<IndexedL4, String> {
             "{rev}: some files could not be read, so not every file's facts are stored"
         ));
     }
-    let stored = index.put_facts(&Rust, deep.parsed.iter().map(|(b, f)| (*b, f)))?;
+    let mut stored = 0;
+    for analyser in crate::lang::ANALYSERS {
+        let mine = deep.parsed.iter().filter(|(_, a, _)| *a == analyser.name());
+        stored += index.put_facts(analyser, mine.map(|(b, _, f)| (*b, f)))?;
+    }
     if stored == 0 && !deep.parsed.is_empty() {
         return Err(format!(
             "{rev}: facts not stored: its object ids are not SHA-1"
