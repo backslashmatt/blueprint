@@ -86,9 +86,11 @@ pub struct ReviewState {
 #[derive(Debug, Clone, Default)]
 pub struct ReviewBasis {
     keys: HashMap<NodeId, u64>,
-    /// Each changed node and ancestor of one, ordered by id: parents before
-    /// children, as ids order by level first. A node's place here is its
-    /// index below.
+    /// Each changed node and ancestor of one, ordered by id, which puts
+    /// parents before children as ids order by level first. (Not always: a
+    /// moved node's unmoved child can sort before its new parent, as it did
+    /// before this was kept by index.) A node's place here is its index
+    /// below.
     order: Vec<NodeId>,
     index: HashMap<NodeId, usize>,
     /// By index: the node's changed children, as indices.
