@@ -1433,14 +1433,14 @@ impl Workspace {
                         r.changed
                     ))
                     .child(div().text_color(rgb(theme.muted)).child(if r.outline.is_some() {
-                        "Outline: the map as a tree. ↑↓ Home End move, → expand, ← collapse, Enter show on the map, o or Esc the map, r reviewed, e note, x export, F1 all actions.".to_owned()
+                        "Outline: the map as a tree. ↑↓ Home End move, → expand, ← collapse, Enter show on the map, o or Esc the map, r mark ✓ reviewed, e note, x export, F1 all actions.".to_owned()
                     } else if r.on_map || r.list.is_none() || r.map.is_none() {
                         format!(
-                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, o outline, r reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
+                        "{place}. Arrows or Tab select, Enter drill down (or open the code of a leaf), c code, o outline, r mark ✓ reviewed, e note, x export, Backspace up, {pan}+arrows pan, = - 0 zoom, f findings, Esc back to the list, F1 all actions.",
                         pan = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
                         )
                     } else {
-                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r reviewed, e note, x export, m the map, Esc back to the list, F1 all actions.".to_owned()
+                        "Findings, the review's starting point. ↑↓ Home End choose, Enter show on the map, r mark ✓ reviewed, e note, x export, m the map, Esc back to the list, F1 all actions.".to_owned()
                     }));
                 // The note on the node `r` and `e` act on, if it has one.
                 let note = self.review_target().and_then(|t| {
@@ -1513,6 +1513,9 @@ fn findings_view<E: ParentElement>(
         .map(|(i, item)| {
             let mark = if i == list.cursor { "›" } else { " " };
             let done = reviewed.is_some_and(|r| r.is_finding_reviewed(item));
+            // The help line above shows ✓ too, so its glyph is shaped when
+            // the view opens: on Windows the first ✓ needs a font fallback
+            // that took 22 ms, over the 16 ms input budget, inside `r`.
             let check = if done { "✓" } else { " " };
             format!("{mark} {check} {}", findings::label(item, map))
         })
@@ -1907,7 +1910,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
         (None, Some(Detail::Full)) => format!("{} rows", code.rows()),
     };
     let header = div().child(format!(
-        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, Backspace back to the map.",
+        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, r mark ✓ reviewed, Backspace back to the map.",
         code.path, code.title
     ));
     let Some(diff) = code.diff.clone() else {
