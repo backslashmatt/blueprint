@@ -15,8 +15,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, FocusHandle, HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window,
-    div, px, rgb, uniform_list,
+    div, px, rems, rgb, uniform_list,
 };
+use gpui::{Role, StatefulInteractiveElement};
 
 use crate::Theme;
 use crate::actions::{self, Palette, PaletteEffect, Scope};
@@ -165,6 +166,9 @@ pub struct Workspace {
     frame_started: std::time::Instant,
     /// When the last frame finished painting, while keys are timed.
     painted: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    /// The map's area as last laid out: what is left of the window below
+    /// the header, at whatever text size.
+    map_size: Rc<std::cell::Cell<Option<(f32, f32)>>>,
     /// A message about the last action that went wrong outside the engine
     /// (the folder dialog), shown above the screen until the next key.
     pub notice: Option<String>,
@@ -177,6 +181,8 @@ pub struct Workspace {
     marks_request: Option<RequestId>,
     /// Marks sent to be stored and not yet answered.
     mark_requests: HashMap<RequestId, Mark>,
+    /// The system text size (#118).
+    text_scale: f32,
     /// Bumped for every layout asked for; only the newest is kept.
     layout_generation: u64,
 }
@@ -217,6 +223,7 @@ impl Workspace {
             pending: None,
             timings: Vec::new(),
             painted: Rc::default(),
+            map_size: Rc::default(),
             press_wanted: false,
             frame_started: std::time::Instant::now(),
             seeds: HashMap::new(),
@@ -224,6 +231,7 @@ impl Workspace {
             marks: Vec::new(),
             marks_request: None,
             mark_requests: HashMap::new(),
+            text_scale: crate::text_scale::get(),
         };
         if let Some(path) = path {
             w.open(path);
@@ -1134,9 +1142,27 @@ impl Workspace {
         let Some(key) = code_key(id) else {
             return;
         };
-        if let Some(code) = review.code.as_mut()
-            && code.key(key)
+        let Some(code) = review.code.as_mut() else {
+            return;
+        };
+        // Page keys move a screenful of the rows as last laid out, at
+        // whatever text size and window height.
         {
+            // As last laid out: the list's own height, and its content's
+            // height over its rows.
+            let size = self.code_scroll.0.borrow().last_item_size;
+            let rows = code.rows().max(1) as f32;
+            let (height, row) = size.map_or((0.0, 0.0), |s| {
+                (
+                    f32::from(s.item.height),
+                    f32::from(s.contents.height) / rows,
+                )
+            });
+            if let Some(page) = crate::code_view::page_rows(height, row) {
+                code.page = page;
+            }
+        }
+        if code.key(key) {
             self.code_scroll
                 .scroll_to_item(code.cursor, ScrollStrategy::Nearest);
         }
@@ -1172,6 +1198,8 @@ impl Workspace {
             && !node.source.is_empty()
         {
             let (base, head) = (review.base.clone(), review.head.clone());
+            // Its rows are measured afresh, not taken from the last file's.
+            self.code_scroll = UniformListScrollHandle::new();
             review.code = Some(CodeView::new(
                 node.source.clone(),
                 node.name.clone(),
@@ -1260,6 +1288,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_started = std::time::Instant::now();
+        // Text and row heights are in rems, so they follow the system's
+        // text size.
+        window.set_rem_size(px(crate::text_scale::BASE_REM * self.text_scale));
         let timed = self.timed;
         let painted = Rc::clone(&self.painted);
         let screen = self.render_screen(window, cx);
@@ -1311,6 +1342,10 @@ impl Workspace {
         }
         let root = div()
             .id("workspace")
+            // A role, so focus is reported here and the highlighted row
+            // below is announced as its active item (#118).
+            .role(Role::Application)
+            .aria_label("Blueprint")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
@@ -1329,10 +1364,20 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .p_6()
+            // At large text sizes the header and lists can be taller than
+            // the window: the screen then scrolls rather than clipping.
+            .overflow_y_scroll()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
         let root = match &self.notice {
-            Some(n) => root.child(div().text_color(rgb(theme.muted)).child(n.clone())),
+            Some(n) => root.child(
+                div()
+                    .id("notice")
+                    .role(Role::Alert)
+                    .aria_label(n.clone())
+                    .text_color(rgb(theme.muted))
+                    .child(n.clone()),
+            ),
             None => root,
         };
         let root = match &self.palette {
@@ -1398,15 +1443,40 @@ impl Workspace {
                 // Only the rows in view are built; the cursor's row is
                 // scrolled into view as it moves.
                 root.child(div().text_color(rgb(theme.muted)).child(header))
-                    .child(
-                        uniform_list("review-list", lines.len(), move |range, _, _| {
-                            range
-                                .map(|i| div().h(px(22.0)).child(lines[i].clone()))
-                                .collect()
+                    .child(a11y_list(
+                        "review-list-a11y",
+                        "Commits",
+                        Role::List,
+                        uniform_list("review-list", lines.len(), {
+                            let cursor = list.cursor;
+                            move |range, _, _| {
+                                let n = lines.len();
+                                range
+                                    .map(|i| {
+                                        list_item(
+                                            i,
+                                            (i + 1, n),
+                                            &lines[i],
+                                            i == cursor,
+                                            Role::ListItem,
+                                        )
+                                        .h(rems(1.375))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(lines[i].clone())
+                                    })
+                                    .collect()
+                            }
                         })
                         .track_scroll(&self.scroll)
                         .flex_1(),
-                    )
+                    ))
+                    // Rows end in an ellipsis when they do not fit, so the
+                    // chosen one is also given in full, wrapped (#118).
+                    .when_some(list.rows.get(list.cursor), |d, row| {
+                        d.child(format!("Selected: {}", row.label()))
+                    })
             }
             Screen::Review(r) => {
                 let state = match r.detail {
@@ -1474,21 +1544,106 @@ impl Workspace {
                 }
                 match (&r.map, &r.layout) {
                     (Some(map), Some(l)) => {
-                        let size = window.viewport_size();
-                        root.child(canvas(
-                            map,
-                            r.reviewed.as_ref(),
-                            l,
-                            r.camera,
-                            (f32::from(size.width), f32::from(size.height)),
-                            dark,
-                        ))
+                        // The map fills what the header leaves, measured as
+                        // laid out; before the first layout, an estimate.
+                        let size = self.map_size.get().unwrap_or_else(|| {
+                            let v = window.viewport_size();
+                            let rem = f32::from(window.rem_size());
+                            (
+                                f32::from(v.width) - 3.0 * rem,
+                                f32::from(v.height) - 10.0 * rem,
+                            )
+                        });
+                        let measured = Rc::clone(&self.map_size);
+                        root.child(
+                            div()
+                                .id("map")
+                                .role(Role::Group)
+                                .aria_active_descendant()
+                                .aria_label(outline::map_label(map, r.reviewed.as_ref()))
+                                .relative()
+                                .flex_1()
+                                // Room for a few boxes at any text size; the
+                                // screen scrolls to it if the header is tall.
+                                .min_h(rems(12.0))
+                                .w_full()
+                                .overflow_hidden()
+                                .child(
+                                    gpui::canvas(
+                                        move |b, window, _| {
+                                            let now =
+                                                (f32::from(b.size.width), f32::from(b.size.height));
+                                            // A refresh while drawing is dropped, so
+                                            // the redraw at the measured size is
+                                            // asked for once this frame is done.
+                                            if measured.replace(Some(now)) != Some(now) {
+                                                window.on_next_frame(|w, _| w.refresh());
+                                            }
+                                        },
+                                        |_, (), _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(canvas(map, r.reviewed.as_ref(), l, r.camera, size, dark)),
+                        )
                     }
                     _ => root,
                 }
             }
         }
     }
+}
+
+/// A list (or tree) as assistive technology sees it (#118): a named
+/// container with a role, holding the virtualised rows.
+fn a11y_list(
+    id: &'static str,
+    name: &'static str,
+    role: Role,
+    rows: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(role)
+        .aria_label(name)
+        .flex()
+        .flex_col()
+        .flex_1()
+        // At least two rows stay in view however much text is above, at
+        // any text size; the screen scrolls if that leaves too little.
+        .min_h(rems(3.0))
+        // The wheel scrolls the list, not the screen around it: the list's
+        // own handler runs first, then the event stops here.
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .child(rows)
+}
+
+/// One row of a list for assistive technology: its text without the
+/// cursor mark, whether it is the highlighted row, and where it is in the
+/// list (only the rows on screen are built).
+fn list_item(
+    i: usize,
+    (position, size): (usize, usize),
+    text: &str,
+    selected: bool,
+    role: Role,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(i)
+        .role(role)
+        .aria_label(row_label(text))
+        .aria_selected(selected)
+        .when(selected, |d| d.aria_active_descendant())
+        .aria_position_in_set(position)
+        .aria_size_of_set(size)
+}
+
+/// A row's text as it is read out: without the cursor mark and the tree's
+/// expand marks drawn in front of it.
+fn row_label(text: &str) -> String {
+    text.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '›' | '▸' | '▾'))
+        .to_owned()
 }
 
 /// The findings list (#114) under the header: one row per finding, the
@@ -1520,15 +1675,35 @@ fn findings_view<E: ParentElement>(
             format!("{mark} {check} {}", findings::label(item, map))
         })
         .collect();
-    root.child(
+    let cursor = list.cursor;
+    // Rows end in an ellipsis when they do not fit, so the chosen one is
+    // also given in full, wrapped (#118).
+    let selected = list
+        .items
+        .get(cursor)
+        .map(|item| format!("Selected: {}", findings::label(item, map)));
+    root.child(a11y_list(
+        "findings-a11y",
+        "Findings",
+        Role::List,
         uniform_list("findings", rows.len(), move |range, _, _| {
+            let n = rows.len();
             range
-                .map(|i| div().h(px(24.0)).child(rows[i].clone()))
+                .map(|i| {
+                    list_item(i, (i + 1, n), &rows[i], i == cursor, Role::ListItem)
+                        .h(rems(1.5))
+                        // One line per row, at any text size or width.
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(rows[i].clone())
+                })
                 .collect()
         })
         .track_scroll(scroll)
         .flex_1(),
-    )
+    ))
+    .children(selected)
 }
 
 /// The outline tree (#117): one indented row per node shown, with its
@@ -1562,15 +1737,41 @@ fn outline_view<E: ParentElement>(
             )
         })
         .collect();
-    root.child(
+    let tree: Vec<(usize, Option<bool>)> = o
+        .rows
+        .iter()
+        .map(|r| (r.depth, r.node.has_children.then_some(r.expanded)))
+        .collect();
+    let cursor = o.cursor;
+    let places = outline::sibling_positions(&o.rows);
+    // Deep or long rows end in an ellipsis, so the chosen one is also
+    // given in full, wrapped (#118).
+    let selected = rows
+        .get(cursor)
+        .map(|r| format!("Selected: {}", r.trim_start_matches(['›', ' ', '▸', '▾'])));
+    root.child(a11y_list(
+        "outline-a11y",
+        "Outline of the map",
+        Role::Tree,
         uniform_list("outline", rows.len(), move |range, _, _| {
             range
-                .map(|i| div().h(px(22.0)).whitespace_nowrap().child(rows[i].clone()))
+                .map(|i| {
+                    let (depth, expanded) = tree[i];
+                    list_item(i, places[i], &rows[i], i == cursor, Role::TreeItem)
+                        .aria_level(depth + 1)
+                        .when_some(expanded, |d, e| d.aria_expanded(e))
+                        .h(rems(1.375))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(rows[i].clone())
+                })
                 .collect()
         })
         .track_scroll(scroll)
         .flex_1(),
-    )
+    ))
+    .children(selected)
 }
 
 /// The code view key an action stands for.
@@ -1705,11 +1906,25 @@ fn fill(status: Status, dark: bool) -> u32 {
     }
 }
 
+/// A node's outline: the selection, "something inside changed", or plain.
+/// Each is 3:1 against the background and every fill (WCAG 1.4.11): for an
+/// Inside node, which shares the quiet fill, the outline is the only cue.
+fn border_colour(selected: bool, status: Status, dark: bool) -> u32 {
+    match (selected, status == Status::Inside, dark) {
+        (true, _, false) => 0x1864ab,
+        (true, _, true) => 0x74c0fc,
+        (false, true, false) => 0xb35c00,
+        (false, true, true) => 0xf08c00,
+        (false, false, false) => 0x6c757d,
+        (false, false, true) => 0x9aa1a8,
+    }
+}
+
 fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     match (status, dark) {
         (EdgeStatus::Added, _) => 0x2f9e44,
         (EdgeStatus::Removed, _) => 0xe03131,
-        (EdgeStatus::Unchanged, false) => 0xadb5bd,
+        (EdgeStatus::Unchanged, false) => 0x80888f,
         (EdgeStatus::Unchanged, true) => 0x5c636a,
     }
 }
@@ -1722,11 +1937,11 @@ fn canvas(
     reviewed: Option<&ReviewState>,
     l: &Layout,
     camera: Camera,
-    viewport: (f32, f32),
+    area: (f32, f32),
     dark: bool,
 ) -> gpui::Div {
     let m = Metrics::default();
-    let (vw, vh) = (viewport.0, (viewport.1 - 120.0).max(100.0));
+    let (vw, vh) = (area.0.max(1.0), area.1.max(1.0));
     let centre = map
         .selected
         .and_then(|i| l.nodes.get(i))
@@ -1770,15 +1985,7 @@ fn canvas(
             continue;
         }
         let selected = map.selected == Some(i);
-        let border = if selected {
-            0x1c7ed6
-        } else if node.status == Status::Inside {
-            0xf08c00
-        } else if dark {
-            0x495057
-        } else {
-            0xced4da
-        };
+        let border = border_colour(selected, node.status, dark);
         // Reviewed nodes (#115) carry a check: a mark, not only a colour.
         let done = reviewed.is_some_and(|r| r.is_reviewed(&node.id));
         let mut label = if done {
@@ -1826,9 +2033,9 @@ fn mono_font() -> &'static str {
 
 fn token_colour(class: TokenClass, dark: bool) -> u32 {
     match (class, dark) {
-        (TokenClass::Keyword, false) => 0x8250df,
+        (TokenClass::Keyword, false) => 0x6f42c1,
         (TokenClass::Keyword, true) => 0xd2a8ff,
-        (TokenClass::Type, false) => 0x0a7a7a,
+        (TokenClass::Type, false) => 0x066767,
         (TokenClass::Type, true) => 0x56d4dd,
         (TokenClass::Function, false) => 0x0550ae,
         (TokenClass::Function, true) => 0x79c0ff,
@@ -1836,8 +2043,22 @@ fn token_colour(class: TokenClass, dark: bool) -> u32 {
         (TokenClass::String, true) => 0xa5d6a7,
         (TokenClass::Number, false) => 0x953800,
         (TokenClass::Number, true) => 0xffa657,
-        (TokenClass::Comment, false) => 0x6e7781,
-        (TokenClass::Comment, true) => 0x8b949e,
+        (TokenClass::Comment, false) => 0x57606a,
+        (TokenClass::Comment, true) => 0xa3adb8,
+    }
+}
+
+/// The code view's line numbers.
+fn line_number_colour(dark: bool) -> u32 {
+    if dark { 0x9da7b3 } else { 0x59636e }
+}
+
+/// The code view's row tints: removed, added, and the cursor's row.
+fn row_tints(dark: bool) -> (u32, u32, u32) {
+    if dark {
+        (0x3d1d1d, 0x1d3d24, 0x2d333b)
+    } else {
+        (0xffebe9, 0xe6ffec, 0xeaeef2)
     }
 }
 
@@ -1892,9 +2113,9 @@ fn side(
         .collect();
     cell.child(
         div()
-            .w(px(48.0))
+            .w(rems(3.0))
             .flex_none()
-            .text_color(rgb(if dark { 0x6e7681 } else { 0x8c959f }))
+            .text_color(rgb(line_number_colour(dark)))
             .child(format!("{:>5} ", i + 1)),
     )
     .child(StyledText::new(body).with_highlights(spans))
@@ -1918,11 +2139,7 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
     };
     let cursor = code.cursor;
     let column = code.column;
-    let (removed, added, cursor_bg) = if dark {
-        (0x3d1d1d, 0x1d3d24, 0x2d333b)
-    } else {
-        (0xffebe9, 0xe6ffec, 0xeaeef2)
-    };
+    let (removed, added, cursor_bg) = row_tints(dark);
     let list = uniform_list("code-rows", diff.rows.len(), move |range, _, _| {
         range
             .filter_map(|i| Some((i, *diff.rows.get(i)?)))
@@ -1935,10 +2152,10 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
                 };
                 let mut row = div()
                     .w_full()
-                    .h(px(18.0))
+                    .h(rems(1.125))
                     .flex()
                     .flex_row()
-                    .text_size(px(13.0))
+                    .text_size(rems(0.8125))
                     .font_family(mono_font())
                     .child(side(&diff.base, r.base, left, column, dark))
                     .child(side(&diff.head, r.head, right, column, dark));
@@ -1950,13 +2167,124 @@ fn code_view(code: &CodeView, scroll: &UniformListScrollHandle, dark: bool) -> g
             .collect()
     })
     .track_scroll(scroll)
-    .flex_1();
+    .flex_1()
+    .min_h(rems(2.25));
+    // As for the other lists: the wheel scrolls the rows, not the screen.
+    let list = div()
+        .id("code-rows-wheel")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(rems(2.25))
+        .on_scroll(|_, _, cx| cx.stop_propagation())
+        .child(list);
     div().flex().flex_col().flex_1().child(header).child(list)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG AA (§5.5): 4.5 for text on everything it is drawn on, 3 for
+    /// graphics (edges) against the background.
+    #[test]
+    fn every_colour_pair_meets_wcag_aa() {
+        use crate::{Theme, contrast};
+        let statuses = [
+            Status::Added,
+            Status::Removed,
+            Status::Surface,
+            Status::Moved,
+            Status::Changed,
+            Status::Contained,
+            Status::Inside,
+            Status::Unchanged,
+        ];
+        let tokens = [
+            TokenClass::Keyword,
+            TokenClass::Type,
+            TokenClass::Function,
+            TokenClass::String,
+            TokenClass::Number,
+            TokenClass::Comment,
+        ];
+        let mut fails = Vec::new();
+        let mut check = |what: String, fg: u32, bg: u32, min: f64| {
+            let c = contrast(fg, bg);
+            if c < min {
+                fails.push(format!("{what}: {c:.2} < {min}"));
+            }
+        };
+        for dark in [false, true] {
+            let theme = if dark { Theme::DARK } else { Theme::LIGHT };
+            check(
+                format!("muted text, dark {dark}"),
+                theme.muted,
+                theme.background,
+                4.5,
+            );
+            for s in statuses {
+                check(
+                    format!("label on {s:?}, dark {dark}"),
+                    theme.text,
+                    fill(s, dark),
+                    4.5,
+                );
+            }
+            for s in statuses {
+                for bg in [theme.background, fill(s, dark)] {
+                    for (sel, inside) in [(true, false), (false, true), (false, false)] {
+                        let status = if inside { Status::Inside } else { s };
+                        check(
+                            format!("border sel {sel} inside {inside} on {bg:06x}, dark {dark}"),
+                            border_colour(sel, status, dark),
+                            bg,
+                            3.0,
+                        );
+                    }
+                }
+            }
+            for e in [
+                EdgeStatus::Added,
+                EdgeStatus::Removed,
+                EdgeStatus::Unchanged,
+            ] {
+                check(
+                    format!("edge {e:?}, dark {dark}"),
+                    edge_colour(e, dark),
+                    theme.background,
+                    3.0,
+                );
+            }
+            let (removed, added, cursor) = row_tints(dark);
+            for bg in [theme.background, removed, added, cursor] {
+                check(format!("text on {bg:06x}"), theme.text, bg, 4.5);
+                check(
+                    format!("line numbers on {bg:06x}"),
+                    line_number_colour(dark),
+                    bg,
+                    4.5,
+                );
+                for t in tokens {
+                    check(format!("{t:?} on {bg:06x}"), token_colour(t, dark), bg, 4.5);
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{fails:#?}");
+    }
+
+    #[test]
+    fn rows_are_read_without_their_marks() {
+        assert_eq!(
+            row_label("› ✓ New dependency: a → b"),
+            "✓ New dependency: a → b"
+        );
+        assert_eq!(
+            row_label("      ▾ m — changed; depends on 1"),
+            "m — changed; depends on 1"
+        );
+        assert_eq!(row_label("  plain"), "plain");
+    }
 
     #[test]
     fn every_registered_action_is_handled() {

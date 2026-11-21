@@ -123,6 +123,22 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 
 `e` writes a note on the same node `r` would mark: a one-line editor opens with the node's note, Enter saves it (keeping whether the node is reviewed), Esc cancels, and saving an empty note removes it. The note of the node under the cursor is shown under the header, and `bp review` prints notes too.
 
+## Accessibility
+
+Blueprint works with the keyboard alone, and with a screen reader (#118, §5.5):
+
+- **Screen readers.** The app exposes its screens to the platform's accessibility API (AccessKit through GPUI):
+  - the review list, the findings and the outline are named lists, and the outline is a tree;
+  - each row is read without its cursor mark, says whether it is the highlighted row and its place in the list, and for the outline, its level and whether it is expanded;
+  - the highlighted row, or the map, is the focused window's active item, so moving the cursor is read out;
+  - the map is a named region whose label says where it is, how many nodes it shows, and the selected node's change, review state and edges;
+  - notices carry the alert role. GPUI cannot yet mark them live, so macOS and Windows screen readers find them but do not speak them unprompted.
+
+  The findings list and the outline together are the map's non-visual equivalent.
+- **Contrast.** Every pair of colours the app draws meets WCAG AA in light and dark themes: 4.5:1 for text, including code colours on changed rows, and 3:1 for map edges. A test checks every pair, map node outlines included (3:1). Added and removed edges differ by colour only; the outline and the findings list say the same without colour.
+- **Motion.** There are no animations or transitions. The view changes when you press a key, or all at once when more of the diff arrives. So there is nothing to turn off for reduced motion.
+- **Text size.** Text and row heights follow the system's text-size setting: GNOME's *Large Text* / text-scaling factor on Linux (on an X11 session GNOME already applies it through the display's DPI, which the app follows), and *Make text bigger* on Windows. Other Linux desktops have no shared setting; use their display scaling or the override below. macOS has no system-wide text size for desktop apps, so there the size is fixed. The setting is read when the app starts; restart it after changing it. `BLUEPRINT_TEXT_SCALE=1.5` overrides it (0.5 to 3). The map keeps its own zoom (`+`/`-`), since its boxes are laid out in pixels. Page Up and Page Down in the code view move a screenful at the current size. Rows that do not fit end in an ellipsis; the chosen row is shown in full on a *Selected:* line under the commit list, the findings and the outline. Lists always keep at least two rows in view; when the text above them is taller than that allows, the screen scrolls (with the mouse wheel or trackpad, not yet from the keyboard). Display scaling is followed as well.
+
 ## Command palette
 
 Every action has a key and an entry in the **command palette** (#94, §2.4). F1 (or Ctrl+Shift+P, ⌘⇧P on macOS) opens it over any screen, listing the actions of that screen with their keys. Typing filters them: titles that contain what you typed come first, then titles that contain its letters in order. ↑ ↓ choose, Enter runs the action, Esc closes the palette.
