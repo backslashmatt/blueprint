@@ -4,6 +4,7 @@ nodes:
   L1:cargo:crates/cli#  System  "blueprint-cli"  Exact  crates/cli/Cargo.toml
   L1:cargo:crates/engine#  System  "blueprint-engine"  Exact  crates/engine/Cargo.toml
   L1:cargo:crates/lang-rust#  System  "blueprint-lang-rust"  Exact  crates/lang-rust/Cargo.toml
+  L1:cargo:crates/lang-ts#  System  "blueprint-lang-ts"  Exact  crates/lang-ts/Cargo.toml
   L1:cargo:crates/model#  System  "blueprint-model"  Exact  crates/model/Cargo.toml
   L1:cargo:crates/protocol#  System  "blueprint-protocol"  Exact  crates/protocol/Cargo.toml
   L1:cargo:crates/store#  System  "blueprint-store"  Exact  crates/store/Cargo.toml
@@ -59,6 +60,9 @@ nodes:
   L2:cargo:crates/lang-rust#highlight  Module  "highlight"  Exact  crates/lang-rust/src/highlight.rs  Public
   L2:cargo:crates/lang-rust#highlight/tests  Module  "highlight::tests"  Exact  crates/lang-rust/src/highlight.rs  Private
   L2:cargo:crates/lang-rust#tests%2F  Directory  "tests/"  Unknown  crates/lang-rust/tests
+  L2:cargo:crates/lang-ts#highlight  Module  "highlight"  Exact  crates/lang-ts/src/highlight.rs  Public
+  L2:cargo:crates/lang-ts#highlight/tests  Module  "highlight::tests"  Exact  crates/lang-ts/src/highlight.rs  Private
+  L2:cargo:crates/lang-ts#tests%2F  Directory  "tests/"  Unknown  crates/lang-ts/tests
   L2:cargo:crates/model#codec  Module  "codec"  Exact  crates/model/src/codec.rs  Public
   L2:cargo:crates/model#codec/tests  Module  "codec::tests"  Exact  crates/model/src/codec.rs  Private
   L2:cargo:crates/model#diff  Module  "diff"  Exact  crates/model/src/diff.rs  Public
@@ -115,6 +119,7 @@ edges:
   L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/store#  DependsOn  Exact  {Normal}
   L1:cargo:crates/lang-rust# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/lang-ts# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/protocol# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/store/fuzz# -> L1:cargo:crates/store#  DependsOn  Exact  {Normal}
   L1:cargo:crates/ui# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}

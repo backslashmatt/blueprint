@@ -4,6 +4,7 @@ members = [
     "crates/model",
     "crates/engine",
     "crates/lang-rust",
+    "crates/lang-ts",
     "crates/store",
     "crates/protocol",
     "crates/cli",
@@ -27,6 +28,7 @@ publish = false
 blueprint-model = { path = "crates/model" }
 blueprint-engine = { path = "crates/engine" }
 blueprint-lang-rust = { path = "crates/lang-rust" }
+blueprint-lang-ts = { path = "crates/lang-ts" }
 blueprint-store = { path = "crates/store" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
