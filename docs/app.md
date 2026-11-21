@@ -42,6 +42,7 @@ Names below L1 come after their system's, as in `blueprint-store › segment`. O
 | Enter | Show it on the map: drilled to its node (a dependency's dependent, a cycle's first node) and selected |
 | `r` | Mark the finding's node reviewed, or not (see Review state) |
 | `e` | Write a note on the finding's node |
+| `x` | Copy the review as Markdown |
 | `m` | The map, at the systems |
 | Esc | Back to the review list |
 
@@ -66,12 +67,26 @@ The **map** (#92), opened from the findings, shows the systems: one level at a t
 | `c` | Open the selected node's code (its file's diff, at its lines) |
 | `r` | Mark the selected node reviewed, or not (see Review state) |
 | `e` | Write a note on the selected node |
+| `x` | Copy the review as Markdown |
 | Backspace | Up one level; the breadcrumb is in the header |
 | `f` | Back to the findings |
+| `o` | The outline tree, at the selected node |
 | Ctrl+← → ↑ ↓ (⌘ on macOS) | Pan the view |
 | `=` or `+`, `-` (also with Ctrl or ⌘, and the keypad + −) | Zoom in or out a step of 25%, about the middle of the view, from 26% to 381% |
 | `0` | Back to the selection at 100% |
 | Esc | Back to the review list |
+
+## Outline
+
+The **outline** (#117, §5.5) is the map as a tree, its non-visual equivalent with the findings list. `o` on the map opens it, expanded down to the map's view with the selected node highlighted. Each row gives the node's name, how it changed in words, whether it is reviewed, and how many of its siblings it depends on and is used by: the map's edges, counted. It is built from the map's own views, so every node the map can show is in it.
+
+| Key | Action |
+|---|---|
+| ↑ ↓ Home End | Move |
+| → | Expand the row, or go to its first child |
+| ← | Collapse the row, or go to its parent |
+| Enter, `o`, Esc | Back to the map, at the highlighted node |
+| `r`, `e`, `x` | Mark the highlighted node reviewed, write a note on it, export the review |
 
 ## Code
 
@@ -96,7 +111,33 @@ Opening a node's code (#93) shows its file's diff side by side, base on the left
 - **Where marks live.** They are kept on this computer, per repository (`bp review` reads and writes the same ones: [cli.md](cli.md)).
 - **Rebases.** A mark applies wherever the node changed exactly as it did when marked, so it survives a rebase that leaves that change alone, and is dropped, never misapplied, when the change differs.
 
+`x` copies the whole review to the clipboard as Markdown, ready to paste into a pull request comment (#116):
+
+- the base and head commits and the progress;
+- the findings in order, each ticked ✓ or ☐;
+- the reviewed nodes, each at the highest level reviewed, with their notes;
+- what is still to review, at the highest level nothing under has been reviewed;
+- every other note.
+
+`bp review export <repo> <base> <head>` prints the same text from the same stored marks.
+
 `e` writes a note on the same node `r` would mark: a one-line editor opens with the node's note, Enter saves it (keeping whether the node is reviewed), Esc cancels, and saving an empty note removes it. The note of the node under the cursor is shown under the header, and `bp review` prints notes too.
+
+## Accessibility
+
+Blueprint works with the keyboard alone, and with a screen reader (#118, §5.5):
+
+- **Screen readers.** The app exposes its screens to the platform's accessibility API (AccessKit through GPUI):
+  - the review list, the findings and the outline are named lists, and the outline is a tree;
+  - each row is read without its cursor mark, says whether it is the highlighted row and its place in the list, and for the outline, its level and whether it is expanded;
+  - the highlighted row, or the map, is the focused window's active item, so moving the cursor is read out;
+  - the map is a named region whose label says where it is, how many nodes it shows, and the selected node's change, review state and edges;
+  - notices carry the alert role. GPUI cannot yet mark them live, so macOS and Windows screen readers find them but do not speak them unprompted.
+
+  The findings list and the outline together are the map's non-visual equivalent.
+- **Contrast.** Every pair of colours the app draws meets WCAG AA in light and dark themes: 4.5:1 for text, including code colours on changed rows, and 3:1 for map edges. A test checks every pair, map node outlines included (3:1). Added and removed edges differ by colour only; the outline and the findings list say the same without colour.
+- **Motion.** There are no animations or transitions. The view changes when you press a key, or all at once when more of the diff arrives. So there is nothing to turn off for reduced motion.
+- **Text size.** Text and row heights follow the system's text-size setting: GNOME's *Large Text* / text-scaling factor on Linux (on an X11 session GNOME already applies it through the display's DPI, which the app follows), and *Make text bigger* on Windows. Other Linux desktops have no shared setting; use their display scaling or the override below. macOS has no system-wide text size for desktop apps, so there the size is fixed. The setting is read when the app starts; restart it after changing it. `BLUEPRINT_TEXT_SCALE=1.5` overrides it (0.5 to 3). The map keeps its own zoom (`+`/`-`), since its boxes are laid out in pixels. Page Up and Page Down in the code view move a screenful at the current size. Rows that do not fit end in an ellipsis; the chosen row is shown in full on a *Selected:* line under the commit list, the findings and the outline. Lists always keep at least two rows in view; when the text above them is taller than that allows, the screen scrolls (with the mouse wheel or trackpad, not yet from the keyboard). Display scaling is followed as well.
 
 ## Command palette
 
@@ -117,6 +158,8 @@ cargo run --release -p blueprint-app --features latency -- <repo> --latency-repo
 then press ↓ and ↑ alternately, 60 times in all, in the review list; the app quits once it has the samples.
 
 ## Options for tests and benchmarks
+
+- `--export-report <file>` (with `--review-report`): writes the review's Markdown export to `<file>` when the report is written, as `x` would copy it.
 
 | Option | What it does |
 |---|---|
