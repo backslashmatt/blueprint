@@ -302,7 +302,7 @@ impl ReviewBasis {
     }
 
     /// Every changed node, and every ancestor of one, ordered by id.
-    pub fn changed(&self) -> impl Iterator<Item = &NodeId> {
+    pub fn changed(&self) -> impl DoubleEndedIterator<Item = &NodeId> {
         self.order.iter()
     }
 
@@ -317,6 +317,22 @@ impl ReviewBasis {
     #[must_use]
     pub fn is_changed(&self, id: &NodeId) -> bool {
         self.index.contains_key(id)
+    }
+
+    /// Every changed node, ordered by id, with its changed children.
+    pub fn entries(&self) -> impl DoubleEndedIterator<Item = (&NodeId, Vec<&NodeId>)> + '_ {
+        self.order
+            .iter()
+            .zip(&self.children)
+            .map(move |(id, cs)| (id, cs.iter().map(|&c| &self.order[c]).collect()))
+    }
+
+    /// The changed children of `id`: none if `id` did not change.
+    #[must_use]
+    pub fn children_of(&self, id: &NodeId) -> Vec<&NodeId> {
+        self.index.get(id).map_or_else(Vec::new, |&i| {
+            self.children[i].iter().map(|&c| &self.order[c]).collect()
+        })
     }
 }
 
@@ -448,17 +464,17 @@ pub fn export(
     };
     // Each changed node's changed parents: a moved node has two.
     let mut parents: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
-    for (id, children) in &basis.changed {
+    for (id, children) in basis.entries() {
         for c in children {
             parents.entry(c).or_default().push(id);
         }
     }
     // Whether anything under each node is reviewed (children before parents).
     let mut touched: HashSet<&NodeId> = HashSet::new();
-    for (id, children) in basis.changed.iter().rev() {
+    for (id, children) in basis.entries().rev() {
         if children
             .iter()
-            .any(|c| state.is_reviewed(c) || touched.contains(c))
+            .any(|&c| state.is_reviewed(c) || touched.contains(c))
         {
             touched.insert(id);
         }
@@ -500,7 +516,7 @@ pub fn export(
     let note = |id: &NodeId| state.mark(id).and_then(|m| m.note.as_deref()).map(text);
     out.push_str("\n### Reviewed\n\n");
     let mut any = false;
-    for id in basis.changed.keys() {
+    for id in basis.changed() {
         let top = state.is_reviewed(id)
             && !parents
                 .get(id)
@@ -523,8 +539,7 @@ pub fn export(
     out.push_str("\n### Still to review\n\n");
     let mut open: Vec<String> = Vec::new();
     let mut stack: Vec<&NodeId> = basis
-        .changed
-        .keys()
+        .changed()
         .filter(|id| !parents.contains_key(id))
         .rev()
         .collect();
@@ -539,12 +554,10 @@ pub fn export(
             continue;
         }
         // Partly reviewed: its own change, if any, then what is open below.
-        if basis.own_mark.contains(id) {
+        if basis.needs_own_mark(id) {
             open.push(format!("- {}: its own change", node(id)));
         }
-        if let Some(children) = basis.changed.get(id) {
-            stack.extend(children.iter().rev());
-        }
+        stack.extend(basis.children_of(id).into_iter().rev());
     }
     if open.is_empty() {
         out.push_str("Nothing: every change is reviewed.\n");
@@ -554,8 +567,7 @@ pub fn export(
     }
 
     let notes: Vec<(&NodeId, String)> = basis
-        .changed
-        .keys()
+        .changed()
         .filter(|id| !noted.contains(id))
         .filter_map(|id| note(id).map(|n| (id, n)))
         .collect();
