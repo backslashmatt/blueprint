@@ -12,6 +12,9 @@
 //!   nodes and the impl is in the type's crate, so the edge runs the way
 //!   the dependency does. An impl of a local trait for a foreign type gives
 //!   no edge.
+//! - **TypeScript and JavaScript:** packages' files resolve their module
+//!   specifiers, `extends`/`implements` and calls by their own rules
+//!   ([`ts`], #139).
 //! - **Roll-up:** every edge between nodes with different parents adds the
 //!   same edge between the parents, with the lower edges as evidence, as
 //!   sure as its surest evidence. At L1 it only adds evidence to edges the
@@ -31,6 +34,8 @@ use toml::{Table, Value};
 
 use super::{Builder, FUNCTIONS, Parsed};
 use crate::l1::Read;
+
+mod ts;
 
 /// The names each module binds with `use`: (system, module) -> name -> path.
 type Imports = HashMap<(SystemKey, Vec<String>), HashMap<String, Vec<String>>>;
@@ -139,6 +144,7 @@ pub(crate) struct Context {
     crates: Crates,
     imports: Imports,
     index: Index,
+    packages: ts::Packages,
 }
 
 /// Adds every edge the facts give, rolled up. With `keep`, also returns the
@@ -164,16 +170,18 @@ pub(super) fn add(
         add_imports(&mut imports, &place.system, file_module, facts);
     }
     let index = Index::build(b.model);
+    let packages = ts::Packages::build(b.model, parsed);
     let r = Resolver {
         model: &*b.model,
         crates: &crates,
         imports: &imports,
         index: &index,
+        packages: &packages,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
     let mut kept = Vec::with_capacity(if keep { parsed.len() } else { 0 });
     for (f, (path, place, file_module, facts)) in parsed.iter().enumerate() {
-        let mine = r.file_edges(&place.system, file_module, facts, |i| {
+        let mine = r.file_edges(path, &place.system, file_module, facts, |i| {
             functions.get(&(f, i))
         });
         if keep {
@@ -224,15 +232,15 @@ pub(super) fn add(
             crates,
             imports,
             index,
+            packages,
         },
         kept,
     ))
 }
 
-/// Whether references from files of `system` are resolved into edges. Only
-/// Rust's are, so far: TypeScript and JavaScript files give no edges until
-/// their specifiers are resolved (#139), since a missing edge is better than
-/// an invented one (§2.3).
+/// Whether references from files of `system` are resolved as Rust's are.
+/// TypeScript and JavaScript packages have their own resolution ([`ts`]);
+/// any other system's files are not analysed.
 fn resolved(system: &SystemKey) -> bool {
     system.ecosystem == Ecosystem::Cargo
 }
@@ -358,6 +366,7 @@ impl Context {
 pub(crate) fn edges_of<'n>(
     model: &Model,
     ctx: &Context,
+    path: &RepoPath,
     system: &SystemKey,
     file_module: &[String],
     facts: &FileFacts,
@@ -368,8 +377,9 @@ pub(crate) fn edges_of<'n>(
         crates: &ctx.crates,
         imports: &ctx.imports,
         index: &ctx.index,
+        packages: &ctx.packages,
     };
-    contributions(&r.file_edges(system, file_module, facts, node))
+    contributions(&r.file_edges(path, system, file_module, facts, node))
 }
 
 /// The `calls` edges of one file's functions, resolved against `model` and
@@ -377,6 +387,7 @@ pub(crate) fn edges_of<'n>(
 pub(crate) fn calls_of<'n>(
     model: &Model,
     ctx: &Context,
+    path: &RepoPath,
     system: &SystemKey,
     file_module: &[String],
     facts: &FileFacts,
@@ -387,8 +398,9 @@ pub(crate) fn calls_of<'n>(
         crates: &ctx.crates,
         imports: &ctx.imports,
         index: &ctx.index,
+        packages: &ctx.packages,
     };
-    r.file_calls(system, file_module, facts, node)
+    r.file_calls(path, system, file_module, facts, node)
         .into_iter()
         .collect()
 }
@@ -480,6 +492,7 @@ struct Resolver<'a> {
     crates: &'a Crates,
     imports: &'a Imports,
     index: &'a Index,
+    packages: &'a ts::Packages,
 }
 
 /// What resolution looks up, per system: the module paths, and the names
@@ -546,16 +559,20 @@ impl Resolver<'_> {
     /// its impls, each with its confidence.
     fn file_edges<'n>(
         &self,
+        path: &RepoPath,
         system: &SystemKey,
         file_module: &[String],
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
     ) -> Vec<(EdgeKey, Confidence)> {
+        if ts::is_package(system) {
+            return self.ts_file_edges(path, system, file_module, facts, node);
+        }
         if !resolved(system) {
             return Vec::new();
         }
         let mut found: Vec<(EdgeKey, Confidence)> = self
-            .file_calls(system, file_module, facts, node)
+            .file_calls(path, system, file_module, facts, node)
             .into_iter()
             .map(|k| (k, Confidence::Inferred))
             .collect();
@@ -586,6 +603,7 @@ impl Resolver<'_> {
                     self_type,
                     r#trait,
                     module,
+                    ..
                 } => {
                     let m = [file_module, module.as_slice()].concat();
                     let ty = self.item(system, &m, self_type);
@@ -612,11 +630,15 @@ impl Resolver<'_> {
     /// of each item, by its index in the facts.
     fn file_calls<'n>(
         &self,
+        path: &RepoPath,
         system: &SystemKey,
         file_module: &[String],
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
     ) -> Vec<EdgeKey> {
+        if ts::is_package(system) {
+            return self.ts_file_calls(path, system, file_module, facts, node);
+        }
         if !resolved(system) {
             return Vec::new();
         }

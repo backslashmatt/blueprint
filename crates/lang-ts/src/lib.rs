@@ -61,7 +61,7 @@ pub struct TypeScript;
 pub struct Tsx;
 
 /// The version of both analysers' output.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 fn extension(path: &RepoPath) -> Option<&str> {
     path.segments().last()?.rsplit_once('.').map(|(_, e)| e)
@@ -504,20 +504,22 @@ impl Out<'_> {
         preorder(decl, |n| match n.kind() {
             "class_body" | "interface_body" | "object_type" => false,
             "extends_clause" => {
-                targets.extend(n.child_by_field_name("value"));
+                targets.extend(n.child_by_field_name("value").map(|v| (v, true)));
                 false
             }
             "implements_clause" | "extends_type_clause" => {
+                let extends = n.kind() == "extends_type_clause";
                 targets.extend(
                     named_children(n)
                         .into_iter()
-                        .filter(|c| c.kind() != "comment"),
+                        .filter(|c| c.kind() != "comment")
+                        .map(|c| (c, extends)),
                 );
                 false
             }
             _ => true,
         });
-        for t in targets {
+        for (t, extends) in targets {
             let base = match t.kind() {
                 "generic_type" => t.child_by_field_name("name").unwrap_or(t),
                 _ => t,
@@ -528,6 +530,7 @@ impl Out<'_> {
                     self_type: vec![name.clone()],
                     r#trait: path,
                     module: module.to_vec(),
+                    extends,
                 };
                 self.references.push((t.start_byte(), r));
             }

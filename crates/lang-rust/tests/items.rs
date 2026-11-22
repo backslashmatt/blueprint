@@ -358,6 +358,7 @@ fn impls_and_aliases_are_references() {
                 self_type: vec!["Graph".into()],
                 r#trait: vec!["crate".into(), "x".into(), "Walk".into()],
                 module: vec![],
+                extends: false,
             },
         ],
         "an inherent impl implements nothing"
