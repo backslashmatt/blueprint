@@ -23,6 +23,7 @@ edges:
   L1:cargo:crates/cli# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
   L1:cargo:crates/cli# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/cli# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/engine# -> L1:cargo:crates/lang-csharp#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-rust#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-ts#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}

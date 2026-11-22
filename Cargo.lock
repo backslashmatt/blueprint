@@ -645,6 +645,7 @@ dependencies = [
 name = "blueprint-engine"
 version = "0.1.0"
 dependencies = [
+ "blueprint-lang-csharp",
  "blueprint-lang-rust",
  "blueprint-lang-ts",
  "blueprint-model",

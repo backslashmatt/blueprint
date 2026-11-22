@@ -1,12 +1,13 @@
 //! Which language analyser reads a file (REQUIREMENTS §3.4, DR 0008).
 
+use blueprint_lang_csharp::CSharp;
 use blueprint_lang_rust::Rust;
 use blueprint_lang_ts::{Tsx, TypeScript};
 use blueprint_model::lang::LanguageAnalyser;
 use blueprint_model::{Ecosystem, RepoPath};
 
 /// Every analyser, in the order they are asked whether they handle a file.
-pub static ANALYSERS: [&dyn LanguageAnalyser; 3] = [&Rust, &TypeScript, &Tsx];
+pub static ANALYSERS: [&dyn LanguageAnalyser; 4] = [&Rust, &TypeScript, &Tsx, &CSharp];
 
 /// The analyser that reads the file at `path`, if any.
 #[must_use]
@@ -16,17 +17,18 @@ pub fn analyser_for(path: &RepoPath) -> Option<&'static dyn LanguageAnalyser> {
 
 /// The analyser that reads the file at `path` as part of a system of
 /// `ecosystem`: Rust in a Cargo package, TypeScript and JavaScript in an npm
-/// or Nx package. A `.js` file a Rust module reaches with `#[path]` is not
+/// or Nx package, C# in a .NET project. A `.js` file a Rust module reaches with `#[path]` is not
 /// read as JavaScript: its system's L2 pass and edges are Rust's.
 #[must_use]
 pub fn analyser_in(path: &RepoPath, ecosystem: Ecosystem) -> Option<&'static dyn LanguageAnalyser> {
     let a = analyser_for(path)?;
-    let rust = a.name() == Rust.name();
-    match ecosystem {
-        Ecosystem::Cargo => rust.then_some(a),
-        Ecosystem::Npm | Ecosystem::Nx => (!rust).then_some(a),
-        _ => None,
-    }
+    let wanted: &[&str] = match ecosystem {
+        Ecosystem::Cargo => &["rust"],
+        Ecosystem::Npm | Ecosystem::Nx => &["ts", "tsx"],
+        Ecosystem::Dotnet => &["csharp"],
+        _ => &[],
+    };
+    wanted.contains(&a.name()).then_some(a)
 }
 
 /// The analyser named `name` (its [`LanguageAnalyser::name`]).
@@ -80,5 +82,7 @@ mod tests {
         assert_eq!(within("src/lib.rs", Ecosystem::Cargo), Some("rust"));
         assert_eq!(within("src/lib.rs", Ecosystem::Npm), None);
         assert_eq!(within("src/a.ts", Ecosystem::Nx), Some("ts"));
+        assert_eq!(within("src/A.cs", Ecosystem::Dotnet), Some("csharp"));
+        assert_eq!(within("src/A.cs", Ecosystem::Cargo), None);
     }
 }

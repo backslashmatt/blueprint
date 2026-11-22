@@ -288,3 +288,88 @@ fn a_new_typescript_import_is_a_new_dependency_and_one_closing_a_loop_a_new_cycl
     let d = package_diff(&[("src/b.ts", "export function g() {}\n")], &ext);
     assert!(d.findings.is_empty(), "{:#?}", d.findings);
 }
+
+/// The diff between a .NET project with `base` as its sources and `head`.
+fn project_diff(base: &[(&str, &str)], head: &[(&str, &str)]) -> Diff {
+    let with = |src: &[(&str, &str)]| {
+        let mut v = vec![(
+            "App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        )];
+        v.extend_from_slice(src);
+        model(&v)
+    };
+    diff(&with(base), &with(head))
+}
+
+#[test]
+fn csharp_changes_are_told_apart_and_partial_parts_join() {
+    const A: &str = "Core/A.cs";
+    let d = project_diff(
+        &[(
+            A,
+            "namespace App;\npublic class C { public int F(int x) { return x + 1; } }\n",
+        )],
+        &[(
+            A,
+            "namespace App;\npublic class C {\n  public int F(int x) { return x + 2; }\n}\n",
+        )],
+    );
+    // The class's methods are its body, so it is contained too.
+    assert_eq!(
+        changes(&d),
+        ["contained L3:dotnet:#App/C", "contained L4:dotnet:#App/C/F"]
+    );
+    let d = project_diff(
+        &[(
+            A,
+            "namespace App;\npublic class C { public void F(int x) {} void G() {} }\n",
+        )],
+        &[(
+            A,
+            "namespace App;\npublic class C { public void F(long x) {} void G(int y) {} }\n",
+        )],
+    );
+    let got = changes(&d);
+    assert!(
+        got.contains(&"surface L4:dotnet:#App/C/F".to_owned()),
+        "{got:#?}"
+    );
+    assert!(
+        got.contains(&"changed L4:dotnet:#App/C/G".to_owned()),
+        "{got:#?}"
+    );
+    // A body change in either part of a partial class changes the one node.
+    const B: &str = "Core/A.More.cs";
+    let base = [
+        (
+            A,
+            "namespace App;\npublic partial class P { void F() {} }\n",
+        ),
+        (
+            B,
+            "namespace App;\npublic partial class P { void G() { int a = 1; } }\n",
+        ),
+    ];
+    let head = [
+        (
+            A,
+            "namespace App;\npublic partial class P { void F() {} }\n",
+        ),
+        (
+            B,
+            "namespace App;\npublic partial class P { void G() { int a = 2; } }\n",
+        ),
+    ];
+    let d = project_diff(&base, &head);
+    assert!(
+        changes(&d).contains(&"contained L4:dotnet:#App/P/G".to_owned()),
+        "{:#?}",
+        changes(&d)
+    );
+    assert!(
+        !changes(&d).iter().any(|c| c.contains("P~2")),
+        "{:#?}",
+        changes(&d)
+    );
+}
