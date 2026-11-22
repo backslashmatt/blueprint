@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use blueprint_model::lang::{FileFacts, Item, ItemKind, Reference};
 use blueprint_model::{
-    Code, Confidence, EdgeKey, EdgeKind, Level, Model, Node, NodeId, NodeKind, RepoPath, SystemKey,
-    Visibility,
+    Code, Confidence, Ecosystem, EdgeKey, EdgeKind, Level, Model, Node, NodeId, NodeKind, RepoPath,
+    SystemKey, Visibility,
 };
 use rayon::prelude::*;
 
@@ -388,6 +388,7 @@ pub(crate) fn update_body(
     let calls = edges::calls_of(
         model,
         &state.context,
+        path,
         &file.system,
         &file.module,
         &facts,
@@ -477,16 +478,32 @@ pub(crate) fn update_items(
                 .is_some_and(|files| files.contains(g))
         })
     };
+    // A TypeScript or JavaScript file reaches another's module by a
+    // specifier, not by its segments, so there any file of a package that
+    // mentions a changed name can change; the two languages' references
+    // never resolve into each other.
+    let package = |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Npm | Ecosystem::Nx);
     let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
     for name in &changed {
         for g in mentions.get(*name).into_iter().flatten() {
-            let shared = match state.files.get(g) {
-                Some(f) if f.system == system => module
+            let Some(f) = state.files.get(g) else {
+                continue;
+            };
+            if package(&f.system) != package(&system) {
+                continue;
+            }
+            if package(&system) {
+                touched.insert(g.clone());
+                continue;
+            }
+            let shared = if f.system == system {
+                module
                     .iter()
                     .zip(&f.module)
                     .take_while(|(a, b)| a == b)
-                    .count(),
-                _ => 0,
+                    .count()
+            } else {
+                0
             };
             if mentions_all(g, &module[shared..]) {
                 touched.insert(g.clone());
@@ -551,9 +568,15 @@ pub(crate) fn update_items(
         let Some(f) = state.files.get(p) else {
             continue;
         };
-        let found = edges::edges_of(model, &state.context, &f.system, &f.module, &f.facts, |i| {
-            f.nodes.get(i).and_then(Option::as_ref)
-        });
+        let found = edges::edges_of(
+            model,
+            &state.context,
+            p,
+            &f.system,
+            &f.module,
+            &f.facts,
+            |i| f.nodes.get(i).and_then(Option::as_ref),
+        );
         for (k, c) in &found {
             // A crate root's L2 node exists only once something needs it.
             for end in [&k.from, &k.to] {

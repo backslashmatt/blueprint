@@ -492,3 +492,153 @@ fn calls_through_globs_and_body_uses() {
         .is_some()
     );
 }
+
+#[test]
+fn typescript_imports_heritage_and_calls_become_edges() {
+    let files = files(&[
+        (
+            "package.json",
+            r#"{ "private": true, "workspaces": ["packages/*"] }"#,
+        ),
+        ("packages/core/package.json", r#"{ "name": "core" }"#),
+        ("packages/core/src/index.ts", "export class Base {}\n"),
+        ("packages/core/src/util.ts", "export function helper() {}\n"),
+        (
+            "packages/web/package.json",
+            r#"{ "name": "web", "dependencies": { "core": "workspace:*", "react": "^18" } }"#,
+        ),
+        (
+            "packages/web/src/app.ts",
+            "import { Base } from \"core/src\";\nimport { helper } from \"core/src/util\";\nimport * as u from \"./u\";\nimport { local } from \"./lib/index.js\";\nimport React from \"react\";\nimport { gone } from \"./missing\";\nimport { other } from \"lone\";\nexport class App extends Base implements u.Shape {\n  run() { helper(); u.go(); }\n}\nexport function start() { local(); start2(); gone(); }\nfunction start2() {}\n",
+        ),
+        (
+            "packages/web/src/u.ts",
+            "export interface Shape {}\nexport function go() {}\n",
+        ),
+        (
+            "packages/web/src/lib/index.ts",
+            "export function local() {}\n",
+        ),
+        ("packages/lone/package.json", r#"{ "name": "lone" }"#),
+        (
+            "packages/lone/a.js",
+            "import { helper } from \"core/src/util\";\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let dep = |from: &str, to: &str| edge(&model, from, to, EdgeKind::DependsOn);
+    let app = "L2:npm:packages/web#src/app";
+    // A subpath of a declared package, a namespace import, and a `.js`
+    // specifier naming a `.ts` directory index.
+    assert_eq!(
+        dep(app, "L2:npm:packages/core#src"),
+        Some(Confidence::Exact)
+    );
+    assert_eq!(
+        dep(app, "L2:npm:packages/core#src/util"),
+        Some(Confidence::Exact)
+    );
+    assert_eq!(
+        dep(app, "L2:npm:packages/web#src/u"),
+        Some(Confidence::Exact)
+    );
+    assert_eq!(
+        dep(app, "L2:npm:packages/web#src/lib"),
+        Some(Confidence::Exact)
+    );
+    // Rolled up to the systems the manifest already joins.
+    assert!(dep("L1:npm:packages/web#", "L1:npm:packages/core#").is_some());
+    // A package outside the repository, a missing file, a package not
+    // declared: no edge.
+    let from_app: Vec<String> = model
+        .edges()
+        .filter(|e| String::from(e.key.from.clone()) == app && e.key.kind == EdgeKind::DependsOn)
+        .map(|e| String::from(e.key.to.clone()))
+        .collect();
+    assert_eq!(from_app.len(), 4, "{from_app:#?}");
+    assert!(
+        !model
+            .edges()
+            .any(|e| String::from(e.key.from.clone()).starts_with("L2:npm:packages/lone")),
+        "lone does not declare core"
+    );
+    // extends and implements, through imports.
+    let class = "L3:npm:packages/web#src/app/App";
+    let imp = |to: &str| edge(&model, class, to, EdgeKind::Implements);
+    let ext = edge(
+        &model,
+        class,
+        "L3:npm:packages/core#src/Base",
+        EdgeKind::Extends,
+    );
+    assert_eq!(ext, Some(Confidence::Exact));
+    assert_eq!(
+        imp("L3:npm:packages/web#src/u/Shape"),
+        Some(Confidence::Exact)
+    );
+    // Calls: imported, through a namespace, and in the same file.
+    let call = |from: &str, to: &str| edge(&model, from, to, EdgeKind::Calls);
+    let run = "L4:npm:packages/web#src/app/App/run";
+    let start = "L4:npm:packages/web#src/app/(functions)/start";
+    assert!(call(run, "L4:npm:packages/core#src/util/(functions)/helper").is_some());
+    assert!(call(run, "L4:npm:packages/web#src/u/(functions)/go").is_some());
+    assert!(call(start, "L4:npm:packages/web#src/lib/(functions)/local").is_some());
+    assert!(call(start, "L4:npm:packages/web#src/app/(functions)/start2").is_some());
+}
+
+#[test]
+fn typescript_resolution_invents_no_edge() {
+    let files = files(&[
+        (
+            "package.json",
+            r#"{ "name": "root", "workspaces": ["p/*"] }"#,
+        ),
+        // Beside the `core` package's directory, in the root package.
+        ("p/core.ts", "export function c() {}\n"),
+        ("p/core/package.json", r#"{ "name": "core" }"#),
+        ("p/core/src/x.ts", "export function c() {}\n"),
+        (
+            "p/web/package.json",
+            r#"{ "name": "web", "dependencies": { "core": "workspace:*" } }"#,
+        ),
+        // `core` has no index file: no edge, rather than one to a file
+        // beside it.
+        (
+            "p/web/src/a.ts",
+            "import { c } from \"core\";\nexport function a() { c(); }\n",
+        ),
+        // `.` and `./util/` name directories, which have no index here.
+        ("p/web/src/util.ts", "export function u() {}\n"),
+        (
+            "p/web/src/util/helper.ts",
+            "import { u } from \".\";\nexport function h() { u(); }\n",
+        ),
+        (
+            "p/web/src/b.ts",
+            "import { u } from \"./util/\";\nexport function b() { u(); }\n",
+        ),
+        // A namespace's items share the file's module: nothing there is
+        // resolved to the file's own items.
+        (
+            "p/web/src/n.ts",
+            "export function foo() {}\nnamespace N { function foo() {} export function bar() { foo(); } }\nexport class C {}\nexport class Base {}\nnamespace M { class Base {} export class C extends Base {} }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let from_web: Vec<String> = model
+        .edges()
+        .filter(|e| e.key.from.level() != Level::System)
+        .filter(|e| String::from(e.key.from.clone()).contains("npm:p/web#"))
+        .map(|e| {
+            format!(
+                "{} -> {} {:?}",
+                String::from(e.key.from.clone()),
+                String::from(e.key.to.clone()),
+                e.key.kind
+            )
+        })
+        .collect();
+    assert!(from_web.is_empty(), "{from_web:#?}");
+}

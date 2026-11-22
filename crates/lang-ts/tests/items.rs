@@ -88,10 +88,11 @@ fn imports_and_heritage_are_references() {
         alias: alias.map(str::to_owned),
         module: Vec::new(),
     };
-    let impl_ = |ty: &str, tr: &[&str]| Reference::Impl {
+    let impl_ = |ty: &str, tr: &[&str], extends: bool| Reference::Impl {
         self_type: vec![ty.into()],
         r#trait: tr.iter().map(|s| (*s).to_owned()).collect(),
         module: Vec::new(),
+        extends,
     };
     assert_eq!(
         f.references,
@@ -100,9 +101,9 @@ fn imports_and_heritage_are_references() {
             use_(&["./x", "a"], Some("b")),
             use_(&["./x", "c"], None),
             use_(&["lib", "*"], Some("ns")),
-            impl_("K", &["ns", "Base"]),
-            impl_("K", &["I"]),
-            impl_("I", &["A"]),
+            impl_("K", &["ns", "Base"], true),
+            impl_("K", &["I"], false),
+            impl_("I", &["A"], true),
         ]
     );
 }

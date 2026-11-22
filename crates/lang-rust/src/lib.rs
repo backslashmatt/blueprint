@@ -190,6 +190,7 @@ impl<'s> Out<'s> {
                         self_type: type_path(src, ty),
                         r#trait: segments(src, base),
                         module: module.to_vec(),
+                        extends: false,
                     };
                     self.references.push((node.start_byte(), r));
                 }

@@ -109,6 +109,32 @@ const APP_ON_CORE: (&str, &str) = (
 );
 const APP_MAIN: (&str, &str) = ("app/src/main.rs", "fn main() { let _ = 6; }\n");
 
+// An npm package `web` with TypeScript modules `src/a` and `src/b` (DR 0012).
+const PKG: (&str, &str) = ("package.json", "{ \"name\": \"web\" }");
+const TS_A: (&str, &str) = ("src/a.ts", "export function f() {}\n");
+const TS_B_IMPORTS_A: (&str, &str) = (
+    "src/b.ts",
+    "import { f } from \"./a\";\nexport function g() {}\n",
+);
+
+// An npm workspace with packages `core` and `web`.
+const NPM_WS: (&str, &str) = (
+    "package.json",
+    "{ \"private\": true, \"workspaces\": [\"p/*\"] }",
+);
+const NPM_CORE: (&str, &str) = ("p/core/package.json", "{ \"name\": \"core\" }");
+const NPM_UTIL: (&str, &str) = ("p/core/src/util.ts", "export function helper() {}\n");
+const NPM_WEB_ON_CORE: (&str, &str) = (
+    "p/web/package.json",
+    "{ \"name\": \"web\", \"dependencies\": { \"core\": \"workspace:*\" } }",
+);
+const NPM_WEB: (&str, &str) = ("p/web/package.json", "{ \"name\": \"web\" }");
+const NPM_APP: (&str, &str) = ("p/web/src/app.ts", "export function run() { let x = 1; }\n");
+const NPM_APP_CALLS: (&str, &str) = (
+    "p/web/src/app.ts",
+    "import { helper } from \"core/src/util\";\nexport function run() { let x = 1; helper(); }\n",
+);
+
 #[test]
 fn every_hand_written_change_gives_its_expected_diff() {
     let cases: &[Case<'_>] = &[
@@ -705,6 +731,124 @@ fn every_hand_written_change_gives_its_expected_diff() {
                 "added\tL3:cargo:app#.%2F/Cargo.toml",
                 "+edge\tL1:cargo:app# -> L1:cargo:core#\tdepends-on",
             ],
+        },
+        Case {
+            name: "ts-import-adds-a-module-dependency",
+            base: &[PKG, TS_A, ("src/b.ts", "export function g() {}\n")],
+            head: &[PKG, TS_A, TS_B_IMPORTS_A],
+            expect: &[
+                "finding\tnew-dependency\tL2:npm:#src/b -> L2:npm:#src/a\tdepends-on",
+                "+edge\tL2:npm:#src/b -> L2:npm:#src/a\tdepends-on",
+            ],
+        },
+        Case {
+            name: "ts-call-across-modules",
+            base: &[PKG, TS_A, TS_B_IMPORTS_A],
+            head: &[
+                PKG,
+                TS_A,
+                (
+                    "src/b.ts",
+                    "import { f } from \"./a\";\nexport function g() { f(); }\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:npm:#src/b -> L2:npm:#src/a\tcalls",
+                "changed\tL4:npm:#src/b/(functions)/g",
+                "+edge\tL4:npm:#src/b/(functions)/g -> L4:npm:#src/a/(functions)/f\tcalls",
+                "+edge\tL3:npm:#src/b/(functions) -> L3:npm:#src/a/(functions)\tcalls",
+                "+edge\tL2:npm:#src/b -> L2:npm:#src/a\tcalls",
+            ],
+        },
+        Case {
+            name: "ts-import-closes-a-module-cycle",
+            base: &[PKG, TS_A, TS_B_IMPORTS_A],
+            head: &[
+                PKG,
+                (
+                    "src/a.ts",
+                    "import { g } from \"./b\";\nexport function f() {}\n",
+                ),
+                TS_B_IMPORTS_A,
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:npm:#src/a -> L2:npm:#src/b\tdepends-on",
+                "finding\tnew-cycle\tL2\tL2:npm:#src/a, L2:npm:#src/b\tnew: L2:npm:#src/a -> L2:npm:#src/b",
+                "+edge\tL2:npm:#src/a -> L2:npm:#src/b\tdepends-on",
+            ],
+        },
+        Case {
+            name: "ts-body-only-change-is-contained",
+            base: &[PKG, ("src/a.ts", "export function f() { return 1; }\n")],
+            head: &[PKG, ("src/a.ts", "export function f() {\n  return 2;\n}\n")],
+            expect: &["contained\tL4:npm:#src/a/(functions)/f"],
+        },
+        Case {
+            name: "ts-exported-signature-change-is-surface",
+            base: &[PKG, ("src/a.ts", "export function f(x: number) {}\n")],
+            head: &[PKG, ("src/a.ts", "export function f(x: string) {}\n")],
+            expect: &["surface\tL4:npm:#src/a/(functions)/f"],
+        },
+        Case {
+            name: "ts-class-moved-with-its-method",
+            base: &[
+                PKG,
+                ("src/a.ts", "export class C {\n  m() { return 1; }\n}\n"),
+                ("src/b.ts", ""),
+            ],
+            head: &[
+                PKG,
+                ("src/a.ts", ""),
+                ("src/b.ts", "export class C {\n  m() { return 1; }\n}\n"),
+            ],
+            expect: &[
+                "moved\tL3:npm:#src/a/C -> L3:npm:#src/b/C",
+                "moved\tL4:npm:#src/a/C/m -> L4:npm:#src/b/C/m",
+            ],
+        },
+        Case {
+            name: "ts-extends-across-modules",
+            base: &[
+                PKG,
+                ("src/a.ts", "export class Base {}\n"),
+                ("src/b.ts", "export class K {}\n"),
+            ],
+            head: &[
+                PKG,
+                ("src/a.ts", "export class Base {}\n"),
+                (
+                    "src/b.ts",
+                    "import { Base } from \"./a\";\nexport class K extends Base {}\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:npm:#src/b -> L2:npm:#src/a\tdepends-on",
+                "finding\tnew-dependency\tL2:npm:#src/b -> L2:npm:#src/a\textends",
+                "surface\tL3:npm:#src/b/K",
+                "+edge\tL3:npm:#src/b/K -> L3:npm:#src/a/Base\textends",
+                "+edge\tL2:npm:#src/b -> L2:npm:#src/a\textends",
+                "+edge\tL2:npm:#src/b -> L2:npm:#src/a\tdepends-on",
+            ],
+        },
+        Case {
+            name: "ts-call-into-a-declared-package",
+            base: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB_ON_CORE, NPM_APP],
+            head: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB_ON_CORE, NPM_APP_CALLS],
+            expect: &[
+                "finding\tnew-dependency\tL2:npm:p/web#src/app -> L2:npm:p/core#src/util\tdepends-on",
+                "finding\tnew-dependency\tL2:npm:p/web#src/app -> L2:npm:p/core#src/util\tcalls",
+                "changed\tL4:npm:p/web#src/app/(functions)/run",
+                "+edge\tL4:npm:p/web#src/app/(functions)/run -> L4:npm:p/core#src/util/(functions)/helper\tcalls",
+                "+edge\tL3:npm:p/web#src/app/(functions) -> L3:npm:p/core#src/util/(functions)\tcalls",
+                "+edge\tL2:npm:p/web#src/app -> L2:npm:p/core#src/util\tcalls",
+                "+edge\tL2:npm:p/web#src/app -> L2:npm:p/core#src/util\tdepends-on",
+            ],
+        },
+        Case {
+            name: "ts-import-of-an-undeclared-package-is-not-a-dependency",
+            base: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB, NPM_APP],
+            head: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB, NPM_APP_CALLS],
+            expect: &["contained\tL4:npm:p/web#src/app/(functions)/run"],
         },
     ];
     assert!(cases.len() >= 30, "the exit test asks for at least 30");

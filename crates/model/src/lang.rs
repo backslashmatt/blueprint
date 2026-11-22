@@ -147,7 +147,8 @@ pub enum Reference {
         /// The inline module the `use` sits in.
         module: Vec<String>,
     },
-    /// `impl Trait for Type`: the type implements the trait (§3.2).
+    /// `impl Trait for Type`: the type implements the trait (§3.2); also a
+    /// TypeScript `implements` or `extends`.
     Impl {
         /// The type's path as written, without generic arguments or `&`.
         self_type: Vec<String>,
@@ -155,5 +156,9 @@ pub enum Reference {
         r#trait: Vec<String>,
         /// The inline module the `impl` sits in.
         module: Vec<String>,
+        /// Whether the type extends the other (TypeScript's `extends`)
+        /// rather than implementing it (`impl`, `implements`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        extends: bool,
     },
 }

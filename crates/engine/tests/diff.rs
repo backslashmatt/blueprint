@@ -244,3 +244,47 @@ fn typescript_changes_are_told_apart_as_rust_ones_are() {
         changes(&d)
     );
 }
+
+#[test]
+fn a_new_typescript_import_is_a_new_dependency_and_one_closing_a_loop_a_new_cycle() {
+    let base = [
+        (
+            "src/a.ts",
+            "import { g } from \"./b\";\nexport function f() {}\n",
+        ),
+        ("src/b.ts", "export function g() {}\n"),
+    ];
+    let head = [
+        (
+            "src/a.ts",
+            "import { g } from \"./b\";\nexport function f() {}\n",
+        ),
+        (
+            "src/b.ts",
+            "import { f } from \"./a\";\nexport function g() {}\n",
+        ),
+    ];
+    let d = package_diff(&base, &head);
+    assert!(
+        d.findings
+            .iter()
+            .any(|f| matches!(f, Finding::NewDependency { edge }
+            if edge.from.to_string() == "L2:npm:#src/b" && edge.to.to_string() == "L2:npm:#src/a")),
+        "{:#?}",
+        d.findings
+    );
+    let cycles: Vec<&Finding> = d
+        .findings
+        .iter()
+        .filter(|f| matches!(f, Finding::NewCycle { .. }))
+        .collect();
+    assert_eq!(cycles.len(), 1, "{:#?}", d.findings);
+    assert!(package_diff(&head, &head).findings.is_empty());
+    // An import of a package from outside the repository is no finding.
+    let ext = [(
+        "src/b.ts",
+        "import React from \"react\";\nexport function g() {}\n",
+    )];
+    let d = package_diff(&[("src/b.ts", "export function g() {}\n")], &ext);
+    assert!(d.findings.is_empty(), "{:#?}", d.findings);
+}

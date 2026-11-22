@@ -58,6 +58,10 @@ nodes:
   L4:npm:web#src/view/View/render  Function  "render"  Exact  web/src/view.tsx  Public  lines 3-3
 edges:
   L2:cargo:core#util -> L2:cargo:core#graph  DependsOn  Exact  {}
+  L2:npm:web#src/view -> L2:npm:web#src/util  DependsOn  Exact  {}
+  L2:npm:web#src/view -> L2:npm:web#src/util  Calls  Inferred  {}
   L3:cargo:core#graph/Graph -> L3:cargo:core#graph/Walk  Implements  Exact  {}
+  L3:npm:web#src/view/View -> L3:npm:web#src/util/(functions)  Calls  Inferred  {}
   L4:cargo:core#graph/Graph/<Default>%3A%3Adefault -> L4:cargo:core#graph/Graph/new  Calls  Inferred  {}
+  L4:npm:web#src/view/View/render -> L4:npm:web#src/util/(functions)/helper  Calls  Inferred  {}
 diagnostics:

@@ -496,3 +496,71 @@ fn a_js_file_a_rust_module_reaches_is_rusts_and_gives_no_javascript_facts() {
         "// \u{ff}\nexport function a() {}\n",
     );
 }
+
+#[test]
+fn typescript_item_edits_update_the_edges_of_files_that_import_them() {
+    let mut tree = files(&[
+        (
+            "package.json",
+            r#"{ "private": true, "workspaces": ["p/*"] }"#,
+        ),
+        ("p/core/package.json", r#"{ "name": "core" }"#),
+        (
+            "p/core/src/a.ts",
+            "export function f() {}\nexport class Base {}\n",
+        ),
+        (
+            "p/web/package.json",
+            r#"{ "name": "web", "dependencies": { "core": "workspace:*" } }"#,
+        ),
+        (
+            "p/web/src/b.ts",
+            "import { f, Base } from \"core/src/a\";\nimport * as c from \"./c\";\nexport class K extends Base {}\nexport function g() { f(); c.h(); }\n",
+        ),
+        ("p/web/src/c.ts", "export function h() {}\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    assert_eq!(calls(&r).len(), 6, "{:?}", calls(&r));
+    // Removing what another package imports: its edges change by item.
+    let how = change(
+        &mut r,
+        &mut tree,
+        "p/core/src/a.ts",
+        "export class Base {}\n",
+    );
+    assert_eq!(how, Update::Items);
+    // And back, renamed class too.
+    change(
+        &mut r,
+        &mut tree,
+        "p/core/src/a.ts",
+        "export function f() {}\nexport class Other {}\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "p/core/src/a.ts",
+        "export function f() {}\nexport class Base {}\n",
+    );
+    // The namespace import's target gains and loses a function.
+    change(
+        &mut r,
+        &mut tree,
+        "p/web/src/c.ts",
+        "export function x() {}\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "p/web/src/c.ts",
+        "export function h() {}\n",
+    );
+    // The importing file's body and imports change.
+    change(
+        &mut r,
+        &mut tree,
+        "p/web/src/b.ts",
+        "import { f } from \"core/src/a\";\nexport function g() { f(); }\n",
+    );
+}
