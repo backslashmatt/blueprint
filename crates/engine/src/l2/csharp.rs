@@ -74,7 +74,8 @@ pub fn analyse_project(
 }
 
 /// The namespaces a C# file declares, block or file-scoped, as nested
-/// paths: `namespace A { namespace B.C {} }` gives `A` and `A.B.C`.
+/// paths: `namespace A { namespace B.C {} }` gives `A` and `A.B.C`. Linear
+/// in the file's length; paths deeper than [`MAX_DEPTH`] are not read.
 #[must_use]
 pub fn namespaces_of(bytes: &[u8]) -> BTreeSet<Vec<String>> {
     let src = String::from_utf8_lossy(bytes);
@@ -94,34 +95,36 @@ pub fn namespaces_of(bytes: &[u8]) -> BTreeSet<Vec<String>> {
                     stack.pop();
                 }
             }
+            // `@namespace` is an identifier, kept with its `@` by `tokens`.
             "namespace" => {
                 // A dotted name, then `{` (block) or `;` (file-scoped).
-                let mut name = Vec::new();
+                let mut name: Vec<&str> = Vec::new();
                 let mut j = i + 1;
                 while let Some(t) = tokens.get(j) {
-                    if is_ident(t) {
-                        name.push((*t).to_owned());
-                        j += 1;
-                        if tokens.get(j) == Some(&".") {
-                            j += 1;
-                            continue;
-                        }
+                    if !is_ident(t) || name.len() > MAX_DEPTH {
+                        break;
                     }
-                    break;
+                    name.push(t);
+                    j += 1;
+                    if tokens.get(j) != Some(&".") {
+                        break;
+                    }
+                    j += 1;
                 }
-                let outer = stack
-                    .last()
-                    .map_or_else(|| file_scoped.clone(), |(p, _)| p.clone());
-                let full = [outer, name.clone()].concat();
+                let outer_len = stack.last().map_or(file_scoped.len(), |(p, _)| p.len());
+                let fits = !name.is_empty() && outer_len + name.len() <= MAX_DEPTH;
+                let segs = || name.iter().map(|t| t.trim_start_matches('@').to_owned());
                 match tokens.get(j) {
-                    Some(&"{") if !name.is_empty() && full.len() <= MAX_DEPTH => {
+                    Some(&"{") if fits => {
+                        let outer = stack.last().map_or(&file_scoped, |(p, _)| p);
+                        let full: Vec<String> = outer.iter().cloned().chain(segs()).collect();
                         depth += 1;
-                        stack.push((full.clone(), depth));
-                        out.insert(full);
+                        out.insert(full.clone());
+                        stack.push((full, depth));
                         i = j;
                     }
-                    Some(&";") if !name.is_empty() && stack.is_empty() => {
-                        file_scoped = name;
+                    Some(&";") if fits && stack.is_empty() => {
+                        file_scoped = segs().collect();
                         out.insert(file_scoped.clone());
                         i = j;
                     }
@@ -141,37 +144,60 @@ fn is_ident(t: &str) -> bool {
         .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '@')
 }
 
-/// Identifiers and the punctuation `{ } ; .`, with comments, strings,
-/// characters and preprocessor lines skipped.
+/// Identifiers (a verbatim `@name` kept whole) and the punctuation
+/// `{ } ; .`, with comments, strings, characters and preprocessor lines
+/// skipped. Of `#if … #elif … #else … #endif`, only the first branch is
+/// read, so both branches of a conditional `namespace X {` are not counted.
 fn tokens(src: &str) -> Vec<&str> {
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     let mut line_start = true;
+    // For each open `#if`: whether its current branch is skipped.
+    let mut pp: Vec<bool> = Vec::new();
     while i < b.len() {
         let c = b[i];
-        match c {
-            b'\n' => {
-                line_start = true;
-                i += 1;
-                continue;
-            }
-            b' ' | b'\t' | b'\r' => {
-                i += 1;
-                continue;
-            }
-            // `#region`, `#if` and the like: to the end of the line.
-            b'#' if line_start => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
+        if c == b'\n' {
+            line_start = true;
+            i += 1;
+            continue;
+        }
+        if c == b' ' || c == b'\t' || c == b'\r' {
+            i += 1;
+            continue;
+        }
+        if c == b'#' && line_start {
+            let end = b[i..]
+                .iter()
+                .position(|&x| x == b'\n')
+                .map_or(b.len(), |p| i + p);
+            let directive = src.get(i + 1..end).unwrap_or("").trim_start();
+            let word: String = directive
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphabetic())
+                .collect();
+            match word.as_str() {
+                "if" => pp.push(false),
+                "elif" | "else" => {
+                    if let Some(top) = pp.last_mut() {
+                        *top = true;
+                    }
                 }
-                continue;
+                "endif" => {
+                    pp.pop();
+                }
+                _ => {}
             }
+            i = end;
+            continue;
+        }
+        line_start = false;
+        let skipping = pp.iter().any(|s| *s);
+        match c {
             b'/' if b.get(i + 1) == Some(&b'/') => {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
                 }
-                continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 i += 2;
@@ -180,66 +206,116 @@ fn tokens(src: &str) -> Vec<&str> {
                 }
                 i += 2;
             }
-            b'"' if b.get(i + 1) == Some(&b'"') && b.get(i + 2) == Some(&b'"') => {
-                // A raw string: to the next run of as many quotes.
-                let mut n = 0;
-                while b.get(i + n) == Some(&b'"') {
-                    n += 1;
+            b'"' | b'\'' => i = skip_literal(b, i, 0),
+            // A string's `$`/`@` prefix: the literal starts after it.
+            b'$' | b'@' if matches!(b.get(i + 1), Some(b'"' | b'$' | b'@')) => {
+                let mut j = i;
+                while matches!(b.get(j), Some(b'$' | b'@')) {
+                    j += 1;
                 }
-                i += n;
-                'raw: while i < b.len() {
-                    if (0..n).all(|k| b.get(i + k) == Some(&b'"')) {
-                        i += n;
-                        break 'raw;
-                    }
-                    i += 1;
-                }
-            }
-            b'"' | b'\'' => {
-                // `@"…"` and `$@"…"` double their quotes; others escape.
-                let verbatim = i > 0 && (b[i - 1] == b'@' || (i > 1 && b[i - 2] == b'@'));
-                i += 1;
-                while i < b.len() {
-                    if b[i] == c {
-                        if verbatim && b.get(i + 1) == Some(&c) {
-                            i += 2;
-                            continue;
-                        }
-                        break;
-                    }
-                    if b[i] == b'\\' && !verbatim {
-                        i += 1;
-                    }
-                    if b[i.min(b.len() - 1)] == b'\n' && c == b'\'' {
-                        break;
-                    }
-                    i += 1;
-                }
-                i += 1;
+                i = if b.get(j) == Some(&b'"') {
+                    skip_literal(b, j, 0)
+                } else {
+                    j
+                };
             }
             b'{' | b'}' | b';' | b'.' => {
-                out.push(&src[i..=i]);
+                if !skipping {
+                    out.push(&src[i..=i]);
+                }
                 i += 1;
             }
             _ if c.is_ascii_alphabetic() || c == b'_' || c == b'@' || c >= 0x80 => {
                 let start = i;
-                while i < b.len()
-                    && (b[i].is_ascii_alphanumeric()
-                        || b[i] == b'_'
-                        || b[i] == b'@'
-                        || b[i] >= 0x80)
+                i += 1;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 0x80)
                 {
                     i += 1;
                 }
-                if let Some(t) = src.get(start..i) {
-                    out.push(t.trim_start_matches('@'));
+                if !skipping && let Some(t) = src.get(start..i) {
+                    out.push(t);
                 }
             }
             _ => i += 1,
         }
-        line_start = false;
     }
     out
+}
+
+/// The index just past the string or character literal whose opening quote
+/// is at `q`, with its prefix (`$`, `@`, `$@`, `@$`) read from just before
+/// it. Interpolation holes are skipped as code, nested literals included,
+/// to a depth of [`MAX_DEPTH`]. Never past the end of `b`.
+fn skip_literal(b: &[u8], q: usize, depth: usize) -> usize {
+    let quote = b[q];
+    let mut k = q;
+    let (mut verbatim, mut interpolated) = (false, false);
+    while k > 0 && matches!(b[k - 1], b'$' | b'@') {
+        k -= 1;
+        if b[k] == b'@' {
+            verbatim = true;
+        } else {
+            interpolated = true;
+        }
+    }
+    // `"""…"""` raw strings (not after `@`, where `""` is an escaped quote).
+    if quote == b'"' && !verbatim && b.get(q + 1) == Some(&b'"') && b.get(q + 2) == Some(&b'"') {
+        let mut n = 0;
+        while b.get(q + n) == Some(&b'"') {
+            n += 1;
+        }
+        let mut i = q + n;
+        while i < b.len() {
+            if (0..n).all(|m| b.get(i + m) == Some(&b'"')) {
+                return i + n;
+            }
+            i += 1;
+        }
+        return b.len();
+    }
+    let mut i = q + 1;
+    while i < b.len() {
+        let c = b[i];
+        if c == quote {
+            if verbatim && b.get(i + 1) == Some(&quote) {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        if c == b'\\' && !verbatim {
+            i += 2;
+            continue;
+        }
+        if c == b'\n' && !verbatim {
+            // An unterminated literal ends at the line.
+            return i;
+        }
+        if interpolated && c == b'{' {
+            if b.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
+            // A hole: code to the matching `}`, nested literals skipped.
+            let mut open = 1usize;
+            i += 1;
+            while i < b.len() && open > 0 {
+                match b[i] {
+                    b'{' => open += 1,
+                    b'}' => open -= 1,
+                    b'"' | b'\'' if depth < MAX_DEPTH => {
+                        i = skip_literal(b, i, depth + 1);
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    b.len()
 }
 
 #[cfg(test)]
@@ -271,6 +347,56 @@ mod tests {
     fn comments_strings_and_directives_hide_namespaces() {
         let src = "// namespace Fake1 {\n/* namespace Fake2 { */\nvar s = \"namespace Fake3 {\";\nvar v = @\"a \"\" namespace Fake4 {\";\nvar r = \"\"\"namespace Fake5 {\"\"\";\n#region namespace Fake6\nnamespace Real { }\n";
         assert_eq!(ns(src), ["Real"]);
+    }
+
+    #[test]
+    fn verbatim_interpolated_and_conditional_code_keep_nesting_right() {
+        assert_eq!(
+            ns("namespace A { class C { string q = @\"\"\"\"; } }\nnamespace B { class D {} }"),
+            ["A", "B"]
+        );
+        assert_eq!(
+            ns(
+                "namespace A { class C { var s = $\"{x.Replace(\"{\", \"\")}\"; } }\nnamespace B { }"
+            ),
+            ["A", "B"]
+        );
+        assert_eq!(
+            ns("namespace A { class C { var s = $@\"\"\"{x}\"; } }\nnamespace B { }"),
+            ["A", "B"]
+        );
+        assert_eq!(
+            ns("class C { void M() { var @namespace = Get(); } }"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            ns("namespace A { void M() { if (@namespace == y) { } } }"),
+            ["A"]
+        );
+        assert_eq!(
+            ns(
+                "#if X\nnamespace X {\n#else\nnamespace Y {\n#endif\nclass C {}\n}\nnamespace Z { }"
+            ),
+            ["X", "Z"]
+        );
+        assert_eq!(ns("char a = '{'; char b = '\\''; namespace A { }"), ["A"]);
+    }
+
+    #[test]
+    fn long_and_many_namespaces_stay_linear() {
+        let start = std::time::Instant::now();
+        let long = format!("namespace {};", vec!["a"; 20_000].join("."));
+        assert!(
+            namespaces_of(long.as_bytes()).is_empty(),
+            "too deep to read"
+        );
+        let many = format!(
+            "namespace {};\n{}",
+            vec!["a"; 60].join("."),
+            "namespace b { }\n".repeat(20_000)
+        );
+        assert_eq!(namespaces_of(many.as_bytes()).len(), 2);
+        assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
     }
 
     #[test]

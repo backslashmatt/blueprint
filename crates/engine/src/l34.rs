@@ -17,7 +17,7 @@
 //! an L4 id its component's path plus the function's name, with `<Trait>::`
 //! for trait methods and `~2`, `~3`… for any clash left.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use blueprint_model::lang::{FileFacts, Item, ItemKind, Reference};
 use blueprint_model::{
@@ -97,6 +97,11 @@ pub(crate) struct State {
     /// For each crate-root L2 node, how many direct edges name it: it
     /// exists while any does, or while it has children.
     root_refs: HashMap<NodeId, usize>,
+    /// The names of C# `partial` types, by system. Which of two same-named
+    /// types gets the plain id depends on every file that declares one, so
+    /// a file declaring such a name is not updated alone (DR 0013). Only a
+    /// rebuild changes the set: a file with a partial type always rebuilds.
+    partials: HashSet<(SystemKey, String)>,
 }
 
 impl State {
@@ -233,6 +238,17 @@ pub(crate) fn run(
         l1,
         mentions: HashMap::new(),
         root_refs: HashMap::new(),
+        partials: parsed
+            .iter()
+            .flat_map(|(_, place, _, facts)| {
+                facts.items.iter().filter_map(|i| match &i.kind {
+                    ItemKind::Type { keyword } if keyword.starts_with("partial ") => {
+                        Some((place.system.clone(), i.name.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect(),
     };
     for (((path, place, module, facts), nodes), edges) in
         parsed.into_iter().zip(nodes).zip(contributions)
@@ -480,6 +496,19 @@ pub(crate) fn update_items(
 ) -> Result<(), NotBody> {
     let file = state.files.get(path).ok_or(NotBody::NotAnalysed)?;
     if has_partial(&file.facts) || has_partial(&facts) {
+        return Err(NotBody::Structure);
+    }
+    // A type named as a partial one elsewhere: the ids of both depend on
+    // every file that declares the name.
+    let shares_partial = |f: &FileFacts| {
+        f.items.iter().any(|i| {
+            matches!(i.kind, ItemKind::Type { .. })
+                && state
+                    .partials
+                    .contains(&(file.system.clone(), i.name.clone()))
+        })
+    };
+    if shares_partial(&file.facts) || shares_partial(&facts) {
         return Err(NotBody::Structure);
     }
     let (system, module) = (file.system.clone(), file.module.clone());
@@ -905,7 +934,28 @@ impl Builder<'_> {
                 // else goes to an `impl <Type>` group in the impl's module,
                 // so an unrelated type of the same name elsewhere can never
                 // move these methods (the diff compares by id).
-                match self.type_in(&module_id, system, self_type) {
+                // A member of a partial type this file declares belongs to
+                // the partial type's node, not to another type of the name.
+                let own_partial = facts.items.iter().any(|t| {
+                    t.name == *self_type
+                        && t.module == item.module
+                        && matches!(&t.kind, ItemKind::Type { keyword } if keyword.starts_with("partial "))
+                });
+                let partial = own_partial
+                    .then(|| {
+                        self.types
+                            .get(&(system.clone(), format!("partial {self_type}")))
+                    })
+                    .flatten()
+                    .and_then(|ids| {
+                        ids.iter()
+                            .find(|t| {
+                                t.path().len() == module_id.path().len() + 1
+                                    && t.path().starts_with(module_id.path())
+                            })
+                            .cloned()
+                    });
+                match partial.or_else(|| self.type_in(&module_id, system, self_type)) {
                     Some(ty) => (ty, segment, conf),
                     None => {
                         let conf = Confidence::Inferred.min(conf);

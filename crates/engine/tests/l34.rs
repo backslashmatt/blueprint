@@ -685,3 +685,37 @@ fn csharp_namespaces_are_modules_and_partial_types_one_node() {
     // Build output is not read.
     assert!(!ids.iter().any(|i| i.contains("Generated")), "{ids:#?}");
 }
+
+#[test]
+fn a_partial_types_members_stay_with_it_beside_a_same_named_type() {
+    let files = files(&[
+        (
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "App/A.cs",
+            "namespace N;\npublic class P<T> { void Z() {} }\n",
+        ),
+        (
+            "App/B.cs",
+            "namespace N;\npublic partial class P { void X() {} }\n",
+        ),
+        (
+            "App/C.cs",
+            "namespace N;\npublic partial class P { void Y() {} }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let ids: Vec<String> = model
+        .nodes()
+        .filter(|n| n.id.level() == Level::Code)
+        .map(|n| String::from(n.id.clone()))
+        .collect();
+    let has = |id: &str| assert!(ids.iter().any(|i| i == id), "no {id} in {ids:#?}");
+    // The generic type is first by path, so it has the plain id.
+    has("L4:dotnet:App#N/P/Z");
+    has("L4:dotnet:App#N/P~2/X");
+    has("L4:dotnet:App#N/P~2/Y");
+}
