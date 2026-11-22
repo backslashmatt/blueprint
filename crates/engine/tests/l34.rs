@@ -719,3 +719,188 @@ fn a_partial_types_members_stay_with_it_beside_a_same_named_type() {
     has("L4:dotnet:App#N/P~2/X");
     has("L4:dotnet:App#N/P~2/Y");
 }
+
+#[test]
+fn csharp_usings_bases_and_calls_become_edges() {
+    let files = files(&[
+        (
+            "Core/Core.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "Core/Shapes.cs",
+            "namespace Core.Shapes;\npublic interface IShape { double Area(); }\npublic abstract class Base { public static double Unit() { return 1; } }\n",
+        ),
+        (
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><ProjectReference Include=\"../Core/Core.csproj\" /></ItemGroup></Project>",
+        ),
+        (
+            "App/Circle.cs",
+            "using System;\nusing Core.Shapes;\nnamespace App.Model;\npublic class Circle : Base, IShape {\n  public double Area() { return Base.Unit() * Helper(); }\n  double Helper() { return Math.PI; }\n}\n",
+        ),
+        (
+            "Lone/Lone.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "Lone/L.cs",
+            "using Core.Shapes;\nnamespace Lone;\npublic class L : Base { void F() { Base.Unit(); } }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let e = |from: &str, to: &str, kind| edge(&model, from, to, kind);
+    // A using of a referenced project's namespace; `System` is external.
+    assert_eq!(
+        e(
+            "L2:dotnet:App#App/Model",
+            "L2:dotnet:Core#Core/Shapes",
+            EdgeKind::DependsOn
+        ),
+        Some(Confidence::Exact)
+    );
+    // A class base is extended, an interface implemented.
+    let circle = "L3:dotnet:App#App/Model/Circle";
+    assert!(e(circle, "L3:dotnet:Core#Core/Shapes/Base", EdgeKind::Extends).is_some());
+    assert!(
+        e(
+            circle,
+            "L3:dotnet:Core#Core/Shapes/IShape",
+            EdgeKind::Implements
+        )
+        .is_some()
+    );
+    // A static call through a type, and a call within the type.
+    let area = "L4:dotnet:App#App/Model/Circle/Area";
+    assert!(
+        e(
+            area,
+            "L4:dotnet:Core#Core/Shapes/Base/Unit",
+            EdgeKind::Calls
+        )
+        .is_some()
+    );
+    assert!(
+        e(
+            area,
+            "L4:dotnet:App#App/Model/Circle/Helper",
+            EdgeKind::Calls
+        )
+        .is_some()
+    );
+    // A project that does not reference Core gets nothing from it.
+    assert!(
+        !model.edges().any(
+            |x| String::from(x.key.from.clone()).starts_with("L2:dotnet:Lone")
+                || (String::from(x.key.from.clone()).contains("dotnet:Lone#")
+                    && String::from(x.key.to.clone()).contains("dotnet:Core#"))
+        ),
+        "Lone does not reference Core"
+    );
+    // The L1 roll-up lands on the declared project reference.
+    assert!(e("L1:dotnet:App#", "L1:dotnet:Core#", EdgeKind::DependsOn).is_some());
+}
+
+#[test]
+fn csharp_names_resolve_in_csharps_order_and_ambiguity_gives_no_edge() {
+    let files = files(&[
+        (
+            "Core/Core.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "Core/B.cs",
+            "namespace B { public class Bar { } public class Bar2 { } }\n",
+        ),
+        (
+            "Core/A.cs",
+            "namespace A { public class Foo { } public class Bar2 { } public class Inner { } }\n",
+        ),
+        // A namespace member beats a compilation-unit alias.
+        (
+            "Core/K1.cs",
+            "using Foo = B.Bar;\nnamespace A { class K1 : Foo { } }\n",
+        ),
+        // A namespace block's own usings come before the enclosing namespace.
+        (
+            "Core/K2.cs",
+            "namespace A.X { using B; class K2 : Bar2 { } }\n",
+        ),
+        // A nested type beats a namespace type of the same name.
+        (
+            "Core/K3.cs",
+            "namespace A { class Outer { class Inner { } class Sub : Inner { } } }\n",
+        ),
+        // `Base` and `Base<T>` cannot be told apart: no edge.
+        (
+            "Core/K4.cs",
+            "namespace G { class Base { } class Base<T> { } class K4 : Base<int> { } }\n",
+        ),
+        // A field, not a type, receives the call.
+        (
+            "Core/K5.cs",
+            "namespace S { public class Store { public static void Get() { } } class Svc { Foo Store; void Run() { Store.Get(); } } }\n",
+        ),
+        // An interface extends the interfaces it names.
+        (
+            "Core/K6.cs",
+            "namespace I { interface IA { } interface IB : IA { } }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let e = |from: &str, to: &str, kind| edge(&model, from, to, kind);
+    assert!(
+        e(
+            "L3:dotnet:Core#A/K1",
+            "L3:dotnet:Core#A/Foo",
+            EdgeKind::Extends
+        )
+        .is_some()
+    );
+    assert!(
+        e(
+            "L3:dotnet:Core#A/K1",
+            "L3:dotnet:Core#B/Bar",
+            EdgeKind::Extends
+        )
+        .is_none()
+    );
+    assert!(
+        e(
+            "L3:dotnet:Core#A/X/K2",
+            "L3:dotnet:Core#B/Bar2",
+            EdgeKind::Extends
+        )
+        .is_some()
+    );
+    assert!(
+        e(
+            "L3:dotnet:Core#A/Outer.Sub",
+            "L3:dotnet:Core#A/Outer.Inner",
+            EdgeKind::Extends
+        )
+        .is_some()
+    );
+    let from_k4: Vec<String> = model
+        .edges()
+        .filter(|x| String::from(x.key.from.clone()) == "L3:dotnet:Core#G/K4")
+        .map(|x| String::from(x.key.to.clone()))
+        .collect();
+    assert!(from_k4.is_empty(), "{from_k4:?}");
+    assert!(
+        !model
+            .edges()
+            .any(|x| String::from(x.key.from.clone()) == "L4:dotnet:Core#S/Svc/Run"),
+        "a call through a field invents no edge"
+    );
+    assert!(
+        e(
+            "L3:dotnet:Core#I/IB",
+            "L3:dotnet:Core#I/IA",
+            EdgeKind::Extends
+        )
+        .is_some()
+    );
+}

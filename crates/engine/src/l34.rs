@@ -568,12 +568,27 @@ pub(crate) fn update_items(
     let package = |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Npm | Ecosystem::Nx);
     let extern_names = state.context.extern_names(&system);
     let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
-    for name in &changed {
+    // A nested type is `Outer.Inner`, mentioned as `Outer` and `Inner`.
+    let lookups: BTreeSet<&str> = changed
+        .iter()
+        .flat_map(|n| std::iter::once(*n).chain(n.split('.')))
+        .collect();
+    for name in &lookups {
         for g in mentions.get(*name).into_iter().flatten() {
             let Some(f) = state.files.get(g) else {
                 continue;
             };
             if package(&f.system) != package(&system) {
+                continue;
+            }
+            // C#: a name reaches another file through its namespace's
+            // `using`s or a qualified name, in its project or one that
+            // references it, so any C# file that mentions it can change.
+            let dotnet = |s: &SystemKey| s.ecosystem == Ecosystem::Dotnet;
+            if dotnet(&system) || dotnet(&f.system) {
+                if dotnet(&system) && dotnet(&f.system) {
+                    touched.insert(g.clone());
+                }
                 continue;
             }
             if package(&system) {
@@ -654,6 +669,7 @@ pub(crate) fn update_items(
         &indexed_names(&new_owned),
     );
     state.context.rebind(&system, &module, &file.facts, &facts);
+    state.context.rekind(&system, &module, &file.facts, &facts);
     let old_facts = std::mem::replace(&mut file.facts, facts);
     file.nodes = nodes;
     file.owned = new_owned;

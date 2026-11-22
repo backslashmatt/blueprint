@@ -48,7 +48,7 @@ impl LanguageAnalyser for CSharp {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -73,8 +73,8 @@ struct Scope {
     types: Vec<String>,
     /// Whether the enclosing type is an interface (members default public).
     interface: bool,
-    /// The enclosing type's primary-constructor parameters, which its
-    /// members can use (`class C(ILogger log)`).
+    /// The enclosing type's primary-constructor parameters, fields and
+    /// properties, which its members can name (`class C(ILogger log)`).
     params: Vec<String>,
 }
 
@@ -356,6 +356,23 @@ impl Out<'_> {
                         .filter(|c| c.kind() == "parameter_list")
                     {
                         bind(src, p, &mut names);
+                    }
+                    // Its fields and properties: `Store.Get()` through a
+                    // field calls an instance, not a type named `Store`.
+                    for m in &members {
+                        match m.kind() {
+                            "field_declaration" | "event_field_declaration" => {
+                                preorder(*m, |n| {
+                                    if n.kind() == "variable_declarator" {
+                                        names.extend(field_text(src, n, "name"));
+                                        return false;
+                                    }
+                                    true
+                                });
+                            }
+                            "property_declaration" => names.extend(field_text(src, *m, "name")),
+                            _ => {}
+                        }
                     }
                     names.into_iter().collect()
                 },

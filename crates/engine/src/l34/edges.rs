@@ -12,6 +12,8 @@
 //!   nodes and the impl is in the type's crate, so the edge runs the way
 //!   the dependency does. An impl of a local trait for a foreign type gives
 //!   no edge.
+//! - **C#:** `using`s, bases and calls resolved within a project and the
+//!   projects it references ([`csharp`], #150).
 //! - **TypeScript and JavaScript:** packages' files resolve their module
 //!   specifiers, `extends`/`implements` and calls by their own rules
 //!   ([`ts`], #139).
@@ -35,6 +37,7 @@ use toml::{Table, Value};
 use super::{Builder, FUNCTIONS, Parsed};
 use crate::l1::Read;
 
+mod csharp;
 mod ts;
 
 /// The names each module binds with `use`: (system, module) -> name -> path.
@@ -145,6 +148,7 @@ pub(crate) struct Context {
     imports: Imports,
     index: Index,
     packages: ts::Packages,
+    projects: csharp::Projects,
 }
 
 /// Adds every edge the facts give, rolled up. With `keep`, also returns the
@@ -171,12 +175,14 @@ pub(super) fn add(
     }
     let index = Index::build(b.model);
     let packages = ts::Packages::build(b.model, parsed);
+    let projects = csharp::Projects::build(b.model, parsed);
     let r = Resolver {
         model: &*b.model,
         crates: &crates,
         imports: &imports,
         index: &index,
         packages: &packages,
+        projects: &projects,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
     let mut kept = Vec::with_capacity(if keep { parsed.len() } else { 0 });
@@ -233,6 +239,7 @@ pub(super) fn add(
             imports,
             index,
             packages,
+            projects,
         },
         kept,
     ))
@@ -331,6 +338,21 @@ impl Context {
             .collect()
     }
 
+    /// Replaces a C# file's interfaces in the resolution context: `old`
+    /// facts out, `new` in.
+    pub(crate) fn rekind(
+        &mut self,
+        system: &SystemKey,
+        file_module: &[String],
+        old: &FileFacts,
+        new: &FileFacts,
+    ) {
+        if csharp::is_project(system) {
+            self.projects
+                .rekind(system, file_module, Some(old), Some(new));
+        }
+    }
+
     /// Replaces the names a file's `use`s bind: `old` facts out, `new` in.
     pub(crate) fn rebind(
         &mut self,
@@ -390,6 +412,7 @@ pub(crate) fn edges_of<'n>(
         imports: &ctx.imports,
         index: &ctx.index,
         packages: &ctx.packages,
+        projects: &ctx.projects,
     };
     contributions(&r.file_edges(path, system, file_module, facts, node))
 }
@@ -411,6 +434,7 @@ pub(crate) fn calls_of<'n>(
         imports: &ctx.imports,
         index: &ctx.index,
         packages: &ctx.packages,
+        projects: &ctx.projects,
     };
     r.file_calls(path, system, file_module, facts, node)
         .into_iter()
@@ -505,6 +529,7 @@ struct Resolver<'a> {
     imports: &'a Imports,
     index: &'a Index,
     packages: &'a ts::Packages,
+    projects: &'a csharp::Projects,
 }
 
 /// What resolution looks up, per system: the module paths, and the names
@@ -580,6 +605,9 @@ impl Resolver<'_> {
         if ts::is_package(system) {
             return self.ts_file_edges(path, system, file_module, facts, node);
         }
+        if csharp::is_project(system) {
+            return self.cs_file_edges(system, file_module, facts, node);
+        }
         if !resolved(system) {
             return Vec::new();
         }
@@ -650,6 +678,9 @@ impl Resolver<'_> {
     ) -> Vec<EdgeKey> {
         if ts::is_package(system) {
             return self.ts_file_calls(path, system, file_module, facts, node);
+        }
+        if csharp::is_project(system) {
+            return self.cs_file_calls(system, file_module, facts, node);
         }
         if !resolved(system) {
             return Vec::new();
