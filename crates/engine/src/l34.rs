@@ -295,6 +295,48 @@ fn mentioned(facts: &FileFacts) -> BTreeSet<&str> {
     out
 }
 
+/// Whether a file of another crate can resolve a path to an item named in
+/// `changed` in the crate root it knows by one of `externs` (a root item,
+/// a method of a root type, an item of an inline module). Paths resolve
+/// through the file's own `use`s, once, and never through re-exports, so a
+/// path can only reach there if it is
+/// - `extern::…` with a changed name or a glob anywhere after the crate,
+///   in a `use`, an `impl` or a call;
+/// - the crate itself, bound by a `use` (`use extern as x;`);
+/// - `b::…` with a changed name after `b`, where `b` is a name a `use` of
+///   `extern::…` binds (`use extern::S;` then `S::new()`).
+fn reaches_root(facts: &FileFacts, externs: &BTreeSet<&str>, changed: &BTreeSet<&str>) -> bool {
+    let mut bound: BTreeSet<&str> = BTreeSet::new();
+    for r in &facts.references {
+        if let Reference::Use { path, alias, .. } = r
+            && path.first().is_some_and(|f| externs.contains(f.as_str()))
+        {
+            let name = alias.as_deref().or_else(|| path.last().map(String::as_str));
+            bound.extend(name.filter(|n| *n != "*"));
+        }
+    }
+    let after = |rest: &[String]| {
+        rest.iter()
+            .any(|s| s == "*" || changed.contains(s.as_str()))
+    };
+    let hits = |p: &[String], is_use: bool| match p {
+        [first] if externs.contains(first.as_str()) => is_use,
+        [first, rest @ ..] if externs.contains(first.as_str()) => after(rest),
+        [first, rest @ ..] if bound.contains(first.as_str()) => after(rest),
+        _ => false,
+    };
+    facts.references.iter().any(|r| match r {
+        Reference::Use { path, .. } => hits(path, true),
+        Reference::Impl {
+            self_type, r#trait, ..
+        } => hits(self_type, false) || hits(r#trait, false),
+    }) || facts
+        .items
+        .iter()
+        .flat_map(|i| &i.calls)
+        .any(|c| hits(c, false))
+}
+
 /// The names a file's items give the resolution index: each L3 node's last
 /// segment in its module, and each free function's name in its module.
 fn indexed_names(owned: &[NodeId]) -> BTreeSet<(Vec<String>, String)> {
@@ -435,16 +477,21 @@ pub(crate) fn update_items(
     let file = state.files.get(path).ok_or(NotBody::NotAnalysed)?;
     let (system, module) = (file.system.clone(), file.module.clone());
     let module_id = NodeId::within(Level::Module, system.clone(), module.clone());
-    if module.is_empty() || model.node(&module_id).is_none() {
+    // A crate root's own L2 node exists only while something needs it
+    // (its items, or an edge), so it may be missing; the builder makes it
+    // when an item needs it, and step 4 drops it when nothing does.
+    let root = module.is_empty();
+    if !root && model.node(&module_id).is_none() {
         return Err(NotBody::Structure);
     }
     // Inline modules must have their own L2 nodes too, or items would sit
     // in a module another file shares.
     for item in &facts.items {
         let m = [module.as_slice(), item.module.as_slice()].concat();
-        if model
-            .node(&NodeId::within(Level::Module, system.clone(), m))
-            .is_none()
+        if !m.is_empty()
+            && model
+                .node(&NodeId::within(Level::Module, system.clone(), m))
+                .is_none()
         {
             return Err(NotBody::Structure);
         }
@@ -483,6 +530,7 @@ pub(crate) fn update_items(
     // mentions a changed name can change; the two languages' references
     // never resolve into each other.
     let package = |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Npm | Ecosystem::Nx);
+    let extern_names = state.context.extern_names(&system);
     let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
     for name in &changed {
         for g in mentions.get(*name).into_iter().flatten() {
@@ -503,6 +551,17 @@ pub(crate) fn update_items(
                     .take_while(|(a, b)| a == b)
                     .count()
             } else {
+                // Another crate reaches this one only by an extern name,
+                // and a crate root's items only right after it.
+                if !extern_names
+                    .iter()
+                    .any(|n| mentions_all(g, &[(*n).to_owned()]))
+                {
+                    continue;
+                }
+                if root && !reaches_root(&f.facts, &extern_names, &changed) {
+                    continue;
+                }
                 0
             };
             if mentions_all(g, &module[shared..]) {
@@ -513,6 +572,9 @@ pub(crate) fn update_items(
 
     // 1. The touched files' edges go, rolled up.
     let mut roots_to_check: BTreeSet<NodeId> = BTreeSet::new();
+    if root {
+        roots_to_check.insert(module_id.clone());
+    }
     for p in &touched {
         let Some(f) = state.files.get_mut(p) else {
             continue;

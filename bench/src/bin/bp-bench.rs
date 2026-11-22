@@ -538,7 +538,8 @@ fn diff_medium(
 /// 99th, which on these repositories is generated code.
 /// `reindex_one_file_items` adds `pub fn new() {}` to the p90 file and takes
 /// it away again, an edit to its items (#81) with a name many files
-/// mention, held to the same budget. Medium
+/// mention, held to the same budget. `reindex_one_file_root_items` makes
+/// the same edit to the p90 crate root (`src/lib.rs`) by size (#141). Medium
 /// and large only. The engine is linked into bp-bench, so there is no base.
 fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, Error> {
     use blueprint_engine::resident::{Resident, Update};
@@ -565,13 +566,23 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
             .filter_map(|p| Some((commit.read(p)?.len(), p.clone())))
             .collect();
         by_size.sort();
-        for (name, percentile, structural) in [
-            ("reindex_one_file", 90, false),
-            ("reindex_one_file_p99", 99, false),
-            ("reindex_one_file_items", 90, true),
+        // Crate roots, whose item edits were rebuilt until #141.
+        let roots: Vec<(usize, RepoPath)> = by_size
+            .iter()
+            .filter(|(_, p)| {
+                p.segments()
+                    .ends_with(&["src".to_owned(), "lib.rs".to_owned()])
+            })
+            .cloned()
+            .collect();
+        for (name, percentile, structural, among) in [
+            ("reindex_one_file", 90, false, &by_size),
+            ("reindex_one_file_p99", 99, false, &by_size),
+            ("reindex_one_file_items", 90, true, &by_size),
+            ("reindex_one_file_root_items", 90, true, &roots),
         ] {
-            let (_, target) = by_size
-                .get(by_size.len() * percentile / 100)
+            let (_, target) = among
+                .get(among.len() * percentile / 100)
                 .ok_or("no analysed Rust file")?
                 .clone();
             let original = commit.read(&target).ok_or("unreadable target")?;
@@ -621,8 +632,9 @@ fn reindex_one_file(dest: &Path, repos: &[RefRepo]) -> Result<Vec<Measurement>, 
                 budget: (r.name == "large" && percentile == 90).then(|| "reindex_one_file".into()),
                 samples: samples * 2,
                 note: Some(format!(
-                    "in process, engine resident: {target} (p{percentile} of {} analysed files by size, {} KB) {}; fastest of {}",
-                    by_size.len(),
+                    "in process, engine resident: {target} (p{percentile} of {} analysed {} by size, {} KB) {}; fastest of {}",
+                    among.len(),
+                    if std::ptr::eq(among, &roots) { "crate roots" } else { "files" },
                     original.len() / 1024,
                     if structural {
                         "gains or loses `pub fn new() {}`"
