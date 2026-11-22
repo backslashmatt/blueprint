@@ -265,3 +265,85 @@ fn hostile_input_never_panics_and_stays_linear() {
         let _ = CSharp.highlight(s.as_bytes());
     }
 }
+
+#[test]
+fn an_unclosed_type_at_the_top_keeps_what_could_be_read() {
+    let f = cs("class A { void M() {}\nclass B { void N() {} }\n");
+    assert!(!f.clean);
+    let names: Vec<&str> = f.items.iter().map(|i| i.name.as_str()).collect();
+    for want in ["M", "N"] {
+        assert!(names.contains(&want), "{names:?}");
+    }
+}
+
+#[test]
+fn locals_of_every_form_give_no_call() {
+    let src = r#"class C(ILogger log) {
+  int P { get; set { value.Foo(); } }
+  void M(Dictionary<int,int> d, int[] xs) {
+    foreach (var (k, v) in d) k.Foo();
+    var (a, b) = T(); a.Foo();
+    if (d is var dv) dv.Foo();
+    if (d is { Count: var cnt }) cnt.Foo();
+    if (xs is [var first, ..]) first.Foo();
+    var q = from x in xs let z = x select x.Foo() + z.Bar();
+    var n = nameof(M);
+    log.Info();
+    Real();
+  }
+}"#;
+    let f = cs(src);
+    assert_eq!(by_name(&f, "M").calls, vec![p(&["T"]), p(&["Real"])]);
+    assert!(
+        by_name(&f, "P").calls.is_empty(),
+        "{:?}",
+        by_name(&f, "P").calls
+    );
+}
+
+#[test]
+fn a_records_base_arguments_are_not_part_of_its_base() {
+    let f = cs("record R(int X) : Base(X), IFoo;");
+    let bases: Vec<Vec<String>> = f
+        .references
+        .iter()
+        .filter_map(|r| match r {
+            Reference::Impl { r#trait, .. } => Some(r#trait.clone()),
+            Reference::Use { .. } => None,
+        })
+        .collect();
+    assert_eq!(bases, vec![p(&["Base"]), p(&["IFoo"])]);
+}
+
+#[test]
+fn a_property_initial_value_is_body() {
+    let a = item("class C { public int X { get; set; } = 5; }", "X");
+    let b = item("class C { public int X { get; set; } = 6; }", "X");
+    assert_eq!(a.signature_hash, b.signature_hash);
+    assert_ne!(a.body_hash, b.body_hash);
+}
+
+#[test]
+fn an_explicit_interface_implementation_names_its_interface() {
+    let f = cs("class C : IFoo { void IFoo.Bar() {} void Bar() {} }");
+    let traits: Vec<Option<String>> = f
+        .items
+        .iter()
+        .filter_map(|i| match &i.kind {
+            ItemKind::Method { r#trait, .. } => Some(r#trait.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(traits, vec![Some("IFoo".into()), None]);
+}
+
+#[test]
+fn file_local_types_are_private_and_regions_change_nothing() {
+    assert_eq!(
+        item("file class F {}", "F").visibility,
+        Some(Visibility::Private)
+    );
+    let plain = item("class C { int x; }", "C");
+    let region = item("class C {\n#region R\n int x;\n#endregion\n}", "C");
+    assert_eq!(plain.signature_hash, region.signature_hash);
+}

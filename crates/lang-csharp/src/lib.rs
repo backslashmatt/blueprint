@@ -72,6 +72,9 @@ struct Scope {
     types: Vec<String>,
     /// Whether the enclosing type is an interface (members default public).
     interface: bool,
+    /// The enclosing type's primary-constructor parameters, which its
+    /// members can use (`class C(ILogger log)`).
+    params: Vec<String>,
 }
 
 struct Out<'s> {
@@ -103,6 +106,7 @@ pub fn analyse(src: &[u8]) -> FileFacts {
         namespace: Vec::new(),
         types: Vec::new(),
         interface: false,
+        params: Vec::new(),
     };
     let mut work = vec![(root, top)];
     while let Some((list, mut scope)) = work.pop() {
@@ -176,6 +180,7 @@ impl Out<'_> {
                     namespace: [scope.namespace.clone(), segments(src, name)].concat(),
                     types: Vec::new(),
                     interface: false,
+                    params: Vec::new(),
                 };
                 work.push((body, inner));
             }
@@ -184,6 +189,26 @@ impl Out<'_> {
             }
             kind if is_member_function(kind) && !scope.types.is_empty() => {
                 self.member(node, scope);
+            }
+            // Parser recovery: what it could read is inside. A type that
+            // never closed leaves its name here; its members stay its own.
+            "ERROR" if depth < MAX_DEPTH => {
+                let mut inner = scope.clone();
+                // The grammar keeps the unclosed type's `name` field.
+                let opens_type = named_children(node)
+                    .iter()
+                    .any(|c| is_member_function(c.kind()));
+                let name = field_text(src, node, "name").or_else(|| {
+                    named_children(node)
+                        .into_iter()
+                        .find(|c| c.kind() == "identifier")
+                        .map(|c| text(src, c))
+                });
+                if let (true, Some(name)) = (opens_type, name) {
+                    inner.types.push(name);
+                    inner.params.clear();
+                }
+                work.push((node, inner));
             }
             _ => {}
         }
@@ -310,6 +335,16 @@ impl Out<'_> {
                 ]
                 .concat(),
                 interface: keyword == "interface",
+                params: {
+                    let mut names = HashSet::new();
+                    for p in named_children(node)
+                        .into_iter()
+                        .filter(|c| c.kind() == "parameter_list")
+                    {
+                        bind(src, p, &mut names);
+                    }
+                    names.into_iter().collect()
+                },
             };
             work.push((b, inner));
         }
@@ -342,22 +377,35 @@ impl Out<'_> {
                 None => return,
             },
         };
-        // The body: a block, an arrow expression, or a property's accessors.
-        let body = node
-            .child_by_field_name("body")
-            .or_else(|| node.child_by_field_name("accessors"))
-            .or_else(|| node.child_by_field_name("value"))
-            .or_else(|| {
+        // The body: a block, an arrow expression, a property's accessors and
+        // its initial value.
+        let body: Vec<Node<'_>> = ["body", "accessors", "value"]
+            .into_iter()
+            .filter_map(|f| node.child_by_field_name(f))
+            .chain(
                 named_children(node)
                     .into_iter()
-                    .find(|c| c.kind() == "arrow_expression_clause")
+                    .filter(|c| c.kind() == "arrow_expression_clause"),
+            )
+            .fold(Vec::new(), |mut v, n| {
+                if !v.iter().any(|x: &Node<'_>| x.id() == n.id()) {
+                    v.push(n);
+                }
+                v
             });
-        let mut skip: Vec<Node<'_>> = body.into_iter().collect();
+        let mut skip: Vec<Node<'_>> = body.clone();
         skip.extend(node.child_by_field_name("name"));
+        // `void IFoo.Bar()`: an explicit implementation of IFoo's member.
+        let explicit = named_children(node)
+            .into_iter()
+            .find(|c| c.kind() == "explicit_interface_specifier")
+            .map(|e| segments(src, e).join("."))
+            .filter(|t| !t.is_empty());
+        let first = body.iter().map(Node::start_byte).min();
         let item = Item {
             kind: ItemKind::Method {
                 self_type,
-                r#trait: None,
+                r#trait: explicit,
             },
             name,
             module: scope.namespace.clone(),
@@ -365,11 +413,18 @@ impl Out<'_> {
                 line(node.start_position().row),
                 line(node.end_position().row),
             ),
-            body_line: body.map(|b| line(b.start_position().row)),
+            body_line: body
+                .iter()
+                .find(|b| Some(b.start_byte()) == first)
+                .map(|b| line(b.start_position().row)),
             visibility: Some(visibility(src, node, scope)),
             signature_hash: hash(src, &[node], &skip),
-            body_hash: body.map(|b| hash(src, &[b], &[])),
-            calls: body.map(|b| calls(src, node, b)).unwrap_or_default(),
+            body_hash: (!body.is_empty()).then(|| hash(src, &body, &[])),
+            calls: if body.is_empty() {
+                Vec::new()
+            } else {
+                calls(src, node, &body, scope)
+            },
         };
         self.items.push((node.start_byte(), item));
     }
@@ -384,7 +439,10 @@ fn visibility(src: &[u8], node: Node<'_>, scope: &Scope) -> Visibility {
         .map(|c| text(src, c))
         .collect();
     let has = |m: &str| mods.iter().any(|x| x == m);
-    if has("public") {
+    if has("file") {
+        // Visible only in its own file.
+        Visibility::Private
+    } else if has("public") {
         Visibility::Public
     } else if has("internal") || has("protected") {
         Visibility::Restricted
@@ -400,47 +458,87 @@ fn visibility(src: &[u8], node: Node<'_>, scope: &Scope) -> Visibility {
 }
 
 /// The paths a member's body calls, in source order, without repeats.
-fn calls(src: &[u8], member: Node<'_>, body: Node<'_>) -> Vec<Vec<String>> {
-    let mut locals: HashSet<String> = HashSet::new();
+fn calls(src: &[u8], member: Node<'_>, body: &[Node<'_>], scope: &Scope) -> Vec<Vec<String>> {
+    let mut locals: HashSet<String> = scope.params.iter().cloned().collect();
+    // A setter's (or `init`'s, `add`'s, `remove`'s) implicit parameter.
+    if matches!(
+        member.kind(),
+        "property_declaration" | "indexer_declaration"
+    ) {
+        locals.insert("value".into());
+    }
     if let Some(params) = member.child_by_field_name("parameters") {
         bind(src, params, &mut locals);
     }
-    preorder(body, |n| {
-        match n.kind() {
-            "variable_declarator" | "parameter" | "foreach_statement" | "catch_declaration" => {
-                locals.extend(field_text(src, n, "name").or_else(|| field_text(src, n, "left")));
-            }
-            "local_function_statement" => {
-                locals.extend(field_text(src, n, "name"));
-            }
-            "declaration_expression" | "declaration_pattern" | "recursive_pattern" => {
-                bind(src, n, &mut locals);
-            }
-            "lambda_expression" => {
-                if let Some(p) = n.child_by_field_name("parameters") {
-                    bind(src, p, &mut locals);
+    for b in body {
+        preorder(*b, |n| {
+            match n.kind() {
+                "variable_declarator" | "parameter" | "catch_declaration" => {
+                    match field_text(src, n, "name") {
+                        Some(name) => {
+                            locals.insert(name);
+                        }
+                        // `var (a, b) = …`
+                        None => bind(src, n, &mut locals),
+                    }
                 }
+                "foreach_statement" => {
+                    if let Some(left) = n.child_by_field_name("left") {
+                        match left.kind() {
+                            "identifier" => {
+                                locals.insert(text(src, left));
+                            }
+                            _ => bind(src, left, &mut locals),
+                        }
+                    }
+                }
+                // `is var x`, `{ P: var x }`, `[var x, ..]`, `out var x`.
+                "single_variable_designation" => {
+                    locals.insert(text(src, n));
+                }
+                // Query variables: `from x in …`, `let y = …`, `join z in …`.
+                "from_clause" | "let_clause" | "join_clause" | "query_continuation" => {
+                    // `let z = …` has no name field: its first identifier.
+                    locals.extend(field_text(src, n, "name").or_else(|| {
+                        named_children(n)
+                            .into_iter()
+                            .find(|c| c.kind() == "identifier")
+                            .map(|c| text(src, c))
+                    }));
+                }
+                "local_function_statement" => {
+                    locals.extend(field_text(src, n, "name"));
+                }
+                "declaration_expression" | "declaration_pattern" | "recursive_pattern" => {
+                    bind(src, n, &mut locals);
+                }
+                "lambda_expression" => {
+                    if let Some(p) = n.child_by_field_name("parameters") {
+                        bind(src, p, &mut locals);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        true
-    });
+            true
+        });
+    }
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<Vec<String>> = HashSet::new();
-    preorder(body, |n| {
-        if n.kind() == "local_function_statement" {
-            return true;
-        }
-        if n.kind() == "invocation_expression"
-            && let Some(f) = n.child_by_field_name("function")
-            && let Some(path) = call_path(src, f)
-            && path.first().is_some_and(|first| !locals.contains(first))
-            && seen.insert(path.clone())
-        {
-            out.push(path);
-        }
-        true
-    });
+    for b in body {
+        preorder(*b, |n| {
+            if n.kind() == "invocation_expression"
+                && let Some(f) = n.child_by_field_name("function")
+                && let Some(path) = call_path(src, f)
+                // `nameof(x)` names, it calls nothing.
+                && path != ["nameof"]
+                && path.first().is_some_and(|first| !locals.contains(first))
+                && seen.insert(path.clone())
+            {
+                out.push(path);
+            }
+            true
+        });
+    }
     out
 }
 
@@ -482,11 +580,26 @@ fn call_path(src: &[u8], f: Node<'_>) -> Option<Vec<String>> {
 fn bind(src: &[u8], node: Node<'_>, names: &mut HashSet<String>) {
     preorder(node, |n| {
         match n.kind() {
-            "parameter" | "variable_declarator" | "declaration_expression" => {
+            "parameter"
+            | "variable_declarator"
+            | "declaration_expression"
+            | "declaration_pattern" => {
                 names.extend(field_text(src, n, "name"));
             }
             "single_variable_designation" | "implicit_parameter" => {
                 names.insert(text(src, n));
+            }
+            // `var (a, b)`, `(var a, var b)`, `(a, b)` on the left of a
+            // deconstruction or a `foreach`.
+            "tuple_pattern" | "parenthesized_variable_designation" | "tuple_expression" => {
+                for c in named_children(n) {
+                    if c.kind() == "identifier" {
+                        names.insert(text(src, c));
+                    }
+                }
+            }
+            "argument" if n.named_child(0).is_some_and(|c| c.kind() == "identifier") => {
+                names.extend(n.named_child(0).map(|c| text(src, c)));
             }
             _ => {}
         }
@@ -499,7 +612,8 @@ fn bind(src: &[u8], node: Node<'_>, names: &mut HashSet<String>) {
 fn segments(src: &[u8], node: Node<'_>) -> Vec<String> {
     let mut out = Vec::new();
     preorder(node, |n| match n.kind() {
-        "type_argument_list" => false,
+        // `List<T>`; a record's `Base(X)` base arguments.
+        "type_argument_list" | "argument_list" => false,
         "identifier" => {
             let t = text(src, n);
             if t != "global" || !out.is_empty() {
@@ -562,7 +676,8 @@ fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
     let mut h = FNV_OFFSET;
     for root in roots {
         preorder(*root, |n| {
-            if n.kind() == "comment" || skip.contains(&n.id()) {
+            // Comments and `#region`-style directives change nothing.
+            if n.kind() == "comment" || n.kind().starts_with("preproc") || skip.contains(&n.id()) {
                 return false;
             }
             if n.child_count() == 0 {
