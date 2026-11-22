@@ -646,3 +646,61 @@ fn typescript_item_edits_update_the_edges_of_files_that_import_them() {
         "import { f } from \"core/src/a\";\nexport function g() { f(); }\n",
     );
 }
+
+#[test]
+fn csharp_edits_match_a_fresh_build() {
+    let mut tree = files(&[
+        (
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "App/A.cs",
+            "namespace App.Core;\npublic class A { public void F() {} }\n",
+        ),
+        (
+            "App/B.cs",
+            "namespace App.Core { public class B { void G() { } } }\n",
+        ),
+        (
+            "App/P1.cs",
+            "namespace App;\npublic partial class P { void X() {} }\n",
+        ),
+        (
+            "App/P2.cs",
+            "namespace App;\npublic partial class P { void Y() {} }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    // A body edit, then a new member: in place, then by item.
+    let body = "namespace App.Core;\npublic class A {\n  public void F() { int x = 1; }\n}\n";
+    assert_eq!(change(&mut r, &mut tree, "App/A.cs", body), Update::InPlace);
+    let item = "namespace App.Core;\npublic class A { public void F() {} public void H() {} }\n";
+    assert_eq!(change(&mut r, &mut tree, "App/A.cs", item), Update::Items);
+    // A new namespace changes the module tree.
+    let moved = "namespace App.Other;\npublic class A { public void F() {} }\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "App/A.cs", moved),
+        Update::Rebuilt
+    );
+    // Either part of a partial type rebuilds, and matches.
+    change(
+        &mut r,
+        &mut tree,
+        "App/P2.cs",
+        "namespace App;\npublic partial class P { void Y() { int a = 1; } }\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "App/P1.cs",
+        "namespace App;\npublic partial class P { void X() {} void Z() {} }\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "App/P2.cs",
+        "namespace App;\npublic class Q { }\n",
+    );
+}

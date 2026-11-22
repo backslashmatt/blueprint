@@ -642,3 +642,46 @@ fn typescript_resolution_invents_no_edge() {
         .collect();
     assert!(from_web.is_empty(), "{from_web:#?}");
 }
+
+#[test]
+fn csharp_namespaces_are_modules_and_partial_types_one_node() {
+    let files = files(&[
+        (
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "App/Core/Graph.cs",
+            "namespace App.Core;\npublic partial class Graph { public void Add() {} }\npublic interface IWalk { void Walk(); }\n",
+        ),
+        (
+            "App/Core/Graph.Walk.cs",
+            "namespace App.Core { public partial class Graph : IWalk { public void Walk() {} } }\n",
+        ),
+        (
+            "App/Program.cs",
+            "class Program { static void Main() {} }\n",
+        ),
+        ("App/obj/Gen.cs", "namespace Generated { class G {} }\n"),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let ids: Vec<String> = model
+        .nodes()
+        .filter(|n| n.id.level() >= Level::Module)
+        .map(|n| String::from(n.id.clone()))
+        .collect();
+    let has = |id: &str| assert!(ids.iter().any(|i| i == id), "no {id} in {ids:#?}");
+    has("L2:dotnet:App#App");
+    has("L2:dotnet:App#App/Core");
+    // One node for both parts of the partial class, with both parts' members.
+    has("L3:dotnet:App#App/Core/Graph");
+    has("L4:dotnet:App#App/Core/Graph/Add");
+    has("L4:dotnet:App#App/Core/Graph/Walk");
+    assert!(!ids.iter().any(|i| i.contains("Graph~2")), "{ids:#?}");
+    // Outside any namespace: the project's root module.
+    has("L3:dotnet:App#Program");
+    has("L4:dotnet:App#Program/Main");
+    // Build output is not read.
+    assert!(!ids.iter().any(|i| i.contains("Generated")), "{ids:#?}");
+}

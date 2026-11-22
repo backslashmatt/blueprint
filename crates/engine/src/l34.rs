@@ -409,6 +409,10 @@ pub(crate) fn update_body(
     facts: FileFacts,
 ) -> Result<(), NotBody> {
     let file = state.files.get_mut(path).ok_or(NotBody::NotAnalysed)?;
+    // A partial type's node is shared with its other parts' files.
+    if has_partial(&file.facts) || has_partial(&facts) {
+        return Err(NotBody::Structure);
+    }
     let same_items = file.facts.items.len() == facts.items.len()
         && file
             .facts
@@ -475,6 +479,9 @@ pub(crate) fn update_items(
     facts: FileFacts,
 ) -> Result<(), NotBody> {
     let file = state.files.get(path).ok_or(NotBody::NotAnalysed)?;
+    if has_partial(&file.facts) || has_partial(&facts) {
+        return Err(NotBody::Structure);
+    }
     let (system, module) = (file.system.clone(), file.module.clone());
     let module_id = NodeId::within(Level::Module, system.clone(), module.clone());
     // A crate root's own L2 node exists only while something needs it
@@ -830,6 +837,31 @@ impl Builder<'_> {
     ) -> Option<NodeId> {
         let module = [file_module, item.module.as_slice()].concat();
         let (parent, conf) = self.module(system, &module, path);
+        // A C# `partial` type's parts are one node (DR 0013): a later part
+        // joins the first part's node, in path order, its hashes mixed in.
+        let partial =
+            matches!(&item.kind, ItemKind::Type { keyword } if keyword.starts_with("partial "));
+        let partial_key = (system.clone(), format!("partial {}", item.name));
+        if partial
+            && let Some(first) = self.types.get(&partial_key).and_then(|ids| {
+                ids.iter().find(|t| {
+                    t.path().len() == parent.path().len() + 1 && t.path().starts_with(parent.path())
+                })
+            })
+            && let Some(mut node) = self.model.node(first).cloned()
+            && let Some(code) = node.code.as_mut()
+        {
+            let join = |a: u64, b: u64| (a ^ b.rotate_left(17)).wrapping_mul(0x0100_0000_01b3);
+            code.signature_hash = join(code.signature_hash, item.signature_hash);
+            code.body_hash = match (code.body_hash, item.body_hash) {
+                (Some(a), Some(b)) => Some(join(a, b)),
+                (a, b) => a.or(b),
+            };
+            node.visibility = node.visibility.max(item.visibility);
+            let id = node.id.clone();
+            let _ = self.model.replace_node(node);
+            return Some(id);
+        }
         let id = self.free_id(Level::Component, &parent, &item.name);
         let added = self.add(Node {
             id,
@@ -846,6 +878,9 @@ impl Builder<'_> {
                 .entry((system.clone(), item.name.clone()))
                 .or_default()
                 .push(id.clone());
+            if partial {
+                self.types.entry(partial_key).or_default().push(id.clone());
+            }
         }
         added
     }
@@ -989,6 +1024,15 @@ fn code(item: &Item) -> Code {
         signature_hash: item.signature_hash,
         body_hash: item.body_hash,
     }
+}
+
+/// Whether a file declares a C# `partial` type, whose node its other
+/// parts' files share (DR 0013): such a file is not updated alone.
+fn has_partial(facts: &FileFacts) -> bool {
+    facts
+        .items
+        .iter()
+        .any(|i| matches!(&i.kind, ItemKind::Type { keyword } if keyword.starts_with("partial ")))
 }
 
 /// An item is as sure as its module, and at most `inferred` if its file had

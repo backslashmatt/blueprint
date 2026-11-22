@@ -3,7 +3,8 @@
 //!
 //! What the model sees:
 //! - **Types (L3):** `class`, `struct`, `interface`, `enum`, `record` and
-//!   `delegate`. A nested type is named by its path in its outer types
+//!   `delegate`; a `partial` one's keyword says so (`partial class`), for
+//!   the engine to join its parts. A nested type is named by its path in its outer types
 //!   (`Outer.Inner`). A type's base list, fields and their types are its
 //!   signature; its function-like members and field initial values are its
 //!   body (as for TypeScript classes and Rust traits).
@@ -47,7 +48,7 @@ impl LanguageAnalyser for CSharp {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -142,6 +143,13 @@ fn type_keyword(kind: &str) -> Option<&'static str> {
         "delegate_declaration" => "delegate",
         _ => return None,
     })
+}
+
+/// Whether a type declaration has the `partial` modifier.
+fn is_partial(src: &[u8], node: Node<'_>) -> bool {
+    named_children(node)
+        .into_iter()
+        .any(|c| c.kind() == "modifier" && text(src, c) == "partial")
 }
 
 /// Whether a member is function-like: an L4 item with a body of its own.
@@ -304,7 +312,13 @@ impl Out<'_> {
         let has_body = !body.is_empty();
         let item = Item {
             kind: ItemKind::Type {
-                keyword: keyword.into(),
+                // `partial class`: its parts in other files are one type
+                // (DR 0013).
+                keyword: if is_partial(src, node) {
+                    format!("partial {keyword}")
+                } else {
+                    keyword.into()
+                },
             },
             name: full.clone(),
             module: scope.namespace.clone(),

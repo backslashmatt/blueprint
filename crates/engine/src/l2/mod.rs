@@ -5,6 +5,8 @@
 //!   `src/main.rs`, following `mod` declarations ([`rust`]).
 //! - **TypeScript and JavaScript:** each file of an npm or Nx package is a
 //!   module, named by its path ([`ts`]).
+//! - **C#:** one module per namespace a .NET project's files declare
+//!   ([`csharp`], DR 0013).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -13,6 +15,7 @@
 //!
 //! Every L2 node's parent is its L1 system; nesting is in the node's path.
 
+pub mod csharp;
 mod lexer;
 pub mod rust;
 pub mod ts;
@@ -109,6 +112,7 @@ fn run(
             Ecosystem::Npm | Ecosystem::Nx => {
                 ts::analyse_package(id, key, &files, model, &mut diags)
             }
+            Ecosystem::Dotnet => csharp::analyse_project(id, key, &files, read, model, &mut diags),
             _ => None,
         };
         // Whatever the module tree did not reach (tests, benches, examples,

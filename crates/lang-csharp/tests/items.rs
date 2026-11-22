@@ -63,7 +63,7 @@ fn finds_types_and_members_in_source_order() {
     assert_eq!(
         got,
         vec![
-            ("K", "class".into(), Some(Public)),
+            ("K", "partial class".into(), Some(Public)),
             ("Name", "method of K".into(), Some(Public)),
             ("K", "method of K".into(), Some(Public)),
             ("M", "method of K".into(), Some(Public)),

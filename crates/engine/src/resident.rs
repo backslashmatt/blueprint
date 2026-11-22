@@ -40,7 +40,7 @@ pub struct Resident {
     diags: Vec<Diagnostic>,
     state: l34::State,
     /// The L2 shape of every analysed file.
-    shapes: HashMap<RepoPath, Shape>,
+    shapes: HashMap<RepoPath, FileShape>,
 }
 
 impl Resident {
@@ -126,7 +126,7 @@ fn shapes(
     placed: &BTreeMap<RepoPath, Placement>,
     state: &l34::State,
     read: Read<'_>,
-) -> HashMap<RepoPath, Shape> {
+) -> HashMap<RepoPath, FileShape> {
     let bytes: Vec<(RepoPath, Vec<u8>)> = placed
         .keys()
         .filter(|p| state.facts(p).is_some())
@@ -141,12 +141,24 @@ fn shapes(
         .collect()
 }
 
-/// What of a file's contents its L2 placement depends on: a Rust file's
-/// `mod` items; nothing for other languages, whose modules are their paths.
-fn file_shape(path: &RepoPath, bytes: &[u8]) -> Shape {
+/// What of a file's contents its L2 placement depends on.
+fn file_shape(path: &RepoPath, bytes: &[u8]) -> FileShape {
     if crate::lang::is_rust(path) {
-        l2::shape(bytes)
+        FileShape::Rust(l2::shape(bytes))
+    } else if path.segments().last().is_some_and(|f| f.ends_with(".cs")) {
+        FileShape::Namespaces(l2::csharp::namespaces_of(bytes))
     } else {
-        l2::shape(b"")
+        FileShape::Path
     }
+}
+
+/// What of a file's contents its L2 placement depends on.
+#[derive(Debug, PartialEq)]
+enum FileShape {
+    /// A Rust file's `mod` items.
+    Rust(Shape),
+    /// The namespaces a C# file declares (DR 0013).
+    Namespaces(std::collections::BTreeSet<Vec<String>>),
+    /// Nothing: a TypeScript or JavaScript module is its path.
+    Path,
 }
