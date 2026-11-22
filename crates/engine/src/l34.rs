@@ -537,7 +537,10 @@ pub(crate) fn update_items(
             } else {
                 // Another crate reaches this one only by an extern name,
                 // and a crate root's items only right after it.
-                if !extern_names.iter().any(|n| mentions_all(g, &[(*n).to_owned()])) {
+                if !extern_names
+                    .iter()
+                    .any(|n| mentions_all(g, &[(*n).to_owned()]))
+                {
                     continue;
                 }
                 if root && !reaches_root(&f.facts, &extern_names, &changed) {
