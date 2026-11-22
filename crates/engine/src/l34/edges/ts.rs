@@ -7,7 +7,11 @@
 //!     directory's `index` file.
 //!   - A bare one (`pkg`, `@scope/pkg/sub`) is a package of the repository
 //!     with that name, only when this package's manifest declares it (the L1
-//!     edge exists); a subpath is a file in it. Packages from outside the
+//!     edge exists): its `index` file, or for a subpath a file in it. A
+//!     package with no `index` file gives no edge (`main` and `exports` are
+//!     not read yet).
+//!   - `.`, `..` and a specifier ending in `/` name a directory: only its
+//!     `index` file. Packages from outside the
 //!     repository, Node's built-ins and `tsconfig` path aliases give no edge.
 //!   - `exact` when the imported name is a type or free function of the
 //!     target (or the whole module is imported), `inferred` otherwise.
@@ -16,6 +20,9 @@
 //!   namespace import.
 //! - **calls (L4):** the analyser's call paths: a free function of the same
 //!   file, or an imported one.
+//!
+//! Inside a `namespace` nothing is resolved: its items share the file's
+//! module, so a name there could resolve to the file's own item.
 
 use std::collections::HashMap;
 
@@ -68,9 +75,14 @@ impl Packages {
         Packages { files, by_name }
     }
 
-    /// The analysed file a path names, tried as [`EXTENSIONS`] describe.
-    fn file(&self, base: &[String]) -> Option<&(SystemKey, Vec<String>)> {
+    /// The analysed file a path names, tried as [`EXTENSIONS`] describe;
+    /// with `dir_only` (`.`, `..`, a trailing `/`, a package's own name)
+    /// only as a directory's `index` file.
+    fn file(&self, base: &[String], dir_only: bool) -> Option<&(SystemKey, Vec<String>)> {
         let (last, dir) = base.split_last()?;
+        if dir_only {
+            return self.index(base);
+        }
         if let Some(found) = self.files.get(base) {
             return Some(found);
         }
@@ -94,24 +106,31 @@ impl Packages {
                 return Some(found);
             }
         }
-        for ext in EXTENSIONS {
-            let index = [base, &[format!("index.{ext}")]].concat();
-            if let Some(found) = self.files.get(&index) {
-                return Some(found);
-            }
-        }
-        None
+        self.index(base)
     }
 
-    /// The module `spec` names from the file at `from` in `system`, and
-    /// whether that module is a file (not a package with no entry file).
+    /// The `index` file of the directory at `base`.
+    fn index(&self, base: &[String]) -> Option<&(SystemKey, Vec<String>)> {
+        EXTENSIONS
+            .iter()
+            .find_map(|ext| self.files.get(&[base, &[format!("index.{ext}")]].concat()))
+    }
+
+    /// The module `spec` names from the file at `from` in `system`. A
+    /// package with no entry file this pass reads gives none: its `main` or
+    /// `exports` are not read yet.
     fn resolve(
         &self,
         model: &Model,
         from: &RepoPath,
         system: &SystemKey,
         spec: &str,
-    ) -> Option<(SystemKey, Vec<String>, bool)> {
+    ) -> Option<(SystemKey, Vec<String>)> {
+        let dir_only = spec == "."
+            || spec == ".."
+            || spec.ends_with('/')
+            || spec.ends_with("/.")
+            || spec.ends_with("/..");
         if spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".." {
             let mut base: Vec<String> = from.segments().split_last()?.1.to_vec();
             for part in spec.split('/') {
@@ -123,8 +142,7 @@ impl Packages {
                     p => base.push(p.to_owned()),
                 }
             }
-            let (s, m) = self.file(&base)?;
-            return Some((s.clone(), m.clone(), true));
+            return self.file(&base, dir_only).cloned();
         }
         let parts: Vec<&str> = spec.split('/').collect();
         let n = if spec.starts_with('@') { 2 } else { 1 };
@@ -142,14 +160,19 @@ impl Packages {
         if !declared && target != system {
             return None;
         }
-        let sub: Vec<String> = parts[n..].iter().map(|s| (*s).to_owned()).collect();
-        let base = [target.dir.segments(), sub.as_slice()].concat();
-        match self.file(&base) {
-            Some((s, m)) => Some((s.clone(), m.clone(), true)),
-            // The package itself, with no entry file this pass reads.
-            None if sub.is_empty() => Some((target.clone(), Vec::new(), false)),
-            None => None,
+        let sub: Vec<String> = parts[n..]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| (*s).to_owned())
+            .collect();
+        if sub.iter().any(|s| s == "." || s == "..") {
+            return None;
         }
+        let base = [target.dir.segments(), sub.as_slice()].concat();
+        // Only a file of that package: not `<package dir>.ts` beside it.
+        self.file(&base, dir_only || sub.is_empty())
+            .filter(|(s, _)| s == target)
+            .cloned()
     }
 }
 
@@ -193,16 +216,15 @@ impl Resolver<'_> {
                     let Some((spec, name)) = p.split_first() else {
                         continue;
                     };
-                    let Some((to_sys, to_mod, is_file)) =
+                    let Some((to_sys, to_mod)) =
                         self.packages.resolve(self.model, path, system, spec)
                     else {
                         continue;
                     };
-                    let exact = is_file
-                        && match name.first().map(String::as_str) {
-                            None | Some("*") => true,
-                            Some(n) => self.has_item(&to_sys, &to_mod, n),
-                        };
+                    let exact = match name.first().map(String::as_str) {
+                        None | Some("*") => true,
+                        Some(n) => self.has_item(&to_sys, &to_mod, n),
+                    };
                     let key = EdgeKey {
                         from: from.clone(),
                         to: NodeId::within(Level::Module, to_sys, to_mod),
@@ -219,9 +241,11 @@ impl Resolver<'_> {
                     self_type,
                     r#trait,
                     extends,
-                    ..
+                    module,
                 } => {
-                    let [ty] = self_type.as_slice() else {
+                    // In a namespace: its items have no module of their
+                    // own, so a name there could resolve to the file's.
+                    let ([ty], true) = (self_type.as_slice(), module.is_empty()) else {
                         continue;
                     };
                     let ty_id = NodeId::within(
@@ -238,14 +262,12 @@ impl Resolver<'_> {
                         }
                         [name] => bound.get(name.as_str()).and_then(|imp| {
                             let (spec, imported) = (imp.first()?, imp.get(1)?);
-                            let (s, m, _) =
-                                self.packages.resolve(self.model, path, system, spec)?;
+                            let (s, m) = self.packages.resolve(self.model, path, system, spec)?;
                             (imported != "*").then(|| (s, m, imported.clone()))
                         }),
                         [ns, name] => bound.get(ns.as_str()).and_then(|imp| {
                             let (spec, star) = (imp.first()?, imp.get(1)?);
-                            let (s, m, _) =
-                                self.packages.resolve(self.model, path, system, spec)?;
+                            let (s, m) = self.packages.resolve(self.model, path, system, spec)?;
                             (star == "*").then(|| (s, m, name.clone()))
                         }),
                         _ => None,
@@ -290,7 +312,9 @@ impl Resolver<'_> {
         };
         let mut out = Vec::new();
         for (i, item) in facts.items.iter().enumerate() {
-            let Some(caller) = node(i) else {
+            // A namespace's function: a bare name it calls may be the
+            // namespace's, which has no module of its own to look in.
+            let Some(caller) = node(i).filter(|_| item.module.is_empty()) else {
                 continue;
             };
             for call in &item.calls {
@@ -299,7 +323,7 @@ impl Resolver<'_> {
                     [spec, name] => self
                         .packages
                         .resolve(self.model, path, system, spec)
-                        .and_then(|(s, m, _)| function(s, m, name)),
+                        .and_then(|(s, m)| function(s, m, name)),
                     _ => None,
                 };
                 if let Some(callee) = callee

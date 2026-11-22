@@ -586,3 +586,59 @@ fn typescript_imports_heritage_and_calls_become_edges() {
     assert!(call(start, "L4:npm:packages/web#src/lib/(functions)/local").is_some());
     assert!(call(start, "L4:npm:packages/web#src/app/(functions)/start2").is_some());
 }
+
+#[test]
+fn typescript_resolution_invents_no_edge() {
+    let files = files(&[
+        (
+            "package.json",
+            r#"{ "name": "root", "workspaces": ["p/*"] }"#,
+        ),
+        // Beside the `core` package's directory, in the root package.
+        ("p/core.ts", "export function c() {}\n"),
+        ("p/core/package.json", r#"{ "name": "core" }"#),
+        ("p/core/src/x.ts", "export function c() {}\n"),
+        (
+            "p/web/package.json",
+            r#"{ "name": "web", "dependencies": { "core": "workspace:*" } }"#,
+        ),
+        // `core` has no index file: no edge, rather than one to a file
+        // beside it.
+        (
+            "p/web/src/a.ts",
+            "import { c } from \"core\";\nexport function a() { c(); }\n",
+        ),
+        // `.` and `./util/` name directories, which have no index here.
+        ("p/web/src/util.ts", "export function u() {}\n"),
+        (
+            "p/web/src/util/helper.ts",
+            "import { u } from \".\";\nexport function h() { u(); }\n",
+        ),
+        (
+            "p/web/src/b.ts",
+            "import { u } from \"./util/\";\nexport function b() { u(); }\n",
+        ),
+        // A namespace's items share the file's module: nothing there is
+        // resolved to the file's own items.
+        (
+            "p/web/src/n.ts",
+            "export function foo() {}\nnamespace N { function foo() {} export function bar() { foo(); } }\nexport class C {}\nexport class Base {}\nnamespace M { class Base {} export class C extends Base {} }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = files.keys().cloned().collect();
+    let (model, _) = analyse_deep(&paths, &|p| files.get(p).cloned());
+    let from_web: Vec<String> = model
+        .edges()
+        .filter(|e| e.key.from.level() != Level::System)
+        .filter(|e| String::from(e.key.from.clone()).contains("npm:p/web#"))
+        .map(|e| {
+            format!(
+                "{} -> {} {:?}",
+                String::from(e.key.from.clone()),
+                String::from(e.key.to.clone()),
+                e.key.kind
+            )
+        })
+        .collect();
+    assert!(from_web.is_empty(), "{from_web:#?}");
+}
