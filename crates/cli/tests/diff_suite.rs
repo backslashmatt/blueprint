@@ -135,6 +135,21 @@ const NPM_APP_CALLS: (&str, &str) = (
     "import { helper } from \"core/src/util\";\nexport function run() { let x = 1; helper(); }\n",
 );
 
+// A .NET project `App` with namespaces `App.A` and `App.B` (DR 0013).
+const CSPROJ: (&str, &str) = (
+    "App.csproj",
+    "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+);
+const CS_A: (&str, &str) = (
+    "A.cs",
+    "namespace App.A;\npublic class X { public static void F() { } }\n",
+);
+const CS_B: (&str, &str) = ("B.cs", "namespace App.B;\npublic class Y { }\n");
+const CS_B_USES_A: (&str, &str) = (
+    "B.cs",
+    "using App.A;\nnamespace App.B;\npublic class Y { }\n",
+);
+
 #[test]
 fn every_hand_written_change_gives_its_expected_diff() {
     let cases: &[Case<'_>] = &[
@@ -849,6 +864,82 @@ fn every_hand_written_change_gives_its_expected_diff() {
             base: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB, NPM_APP],
             head: &[NPM_WS, NPM_CORE, NPM_UTIL, NPM_WEB, NPM_APP_CALLS],
             expect: &["contained\tL4:npm:p/web#src/app/(functions)/run"],
+        },
+        Case {
+            name: "cs-using-adds-a-namespace-dependency",
+            base: &[CSPROJ, CS_A, CS_B],
+            head: &[CSPROJ, CS_A, CS_B_USES_A],
+            expect: &[
+                "finding\tnew-dependency\tL2:dotnet:#App/B -> L2:dotnet:#App/A\tdepends-on",
+                "+edge\tL2:dotnet:#App/B -> L2:dotnet:#App/A\tdepends-on",
+            ],
+        },
+        Case {
+            name: "cs-using-closes-a-namespace-cycle",
+            base: &[CSPROJ, CS_A, CS_B_USES_A],
+            head: &[
+                CSPROJ,
+                (
+                    "A.cs",
+                    "using App.B;\nnamespace App.A;\npublic class X { public static void F() { } }\n",
+                ),
+                CS_B_USES_A,
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:dotnet:#App/A -> L2:dotnet:#App/B\tdepends-on",
+                "finding\tnew-cycle\tL2\tL2:dotnet:#App/A, L2:dotnet:#App/B\tnew: L2:dotnet:#App/A -> L2:dotnet:#App/B",
+                "+edge\tL2:dotnet:#App/A -> L2:dotnet:#App/B\tdepends-on",
+            ],
+        },
+        Case {
+            name: "cs-interface-implemented",
+            base: &[
+                CSPROJ,
+                ("A.cs", "namespace App.A;\npublic interface IRun { }\n"),
+                CS_B_USES_A,
+            ],
+            head: &[
+                CSPROJ,
+                ("A.cs", "namespace App.A;\npublic interface IRun { }\n"),
+                (
+                    "B.cs",
+                    "using App.A;\nnamespace App.B;\npublic class Y : IRun { }\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:dotnet:#App/B -> L2:dotnet:#App/A\timplements",
+                "surface\tL3:dotnet:#App/B/Y",
+                "+edge\tL3:dotnet:#App/B/Y -> L3:dotnet:#App/A/IRun\timplements",
+                "+edge\tL2:dotnet:#App/B -> L2:dotnet:#App/A\timplements",
+            ],
+        },
+        Case {
+            name: "cs-static-call-across-namespaces",
+            base: &[
+                CSPROJ,
+                CS_A,
+                (
+                    "B.cs",
+                    "using App.A;\nnamespace App.B;\npublic class Y { void G() { int a = 1; } }\n",
+                ),
+            ],
+            head: &[
+                CSPROJ,
+                CS_A,
+                (
+                    "B.cs",
+                    "using App.A;\nnamespace App.B;\npublic class Y { void G() { int a = 1; X.F(); } }\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:dotnet:#App/B -> L2:dotnet:#App/A\tcalls",
+                "changed\tL4:dotnet:#App/B/Y/G",
+                // Its body changed and it gains an edge: changed (§3.3).
+                "changed\tL3:dotnet:#App/B/Y",
+                "+edge\tL4:dotnet:#App/B/Y/G -> L4:dotnet:#App/A/X/F\tcalls",
+                "+edge\tL3:dotnet:#App/B/Y -> L3:dotnet:#App/A/X\tcalls",
+                "+edge\tL2:dotnet:#App/B -> L2:dotnet:#App/A\tcalls",
+            ],
         },
     ];
     assert!(cases.len() >= 30, "the exit test asks for at least 30");

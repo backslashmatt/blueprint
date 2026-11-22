@@ -576,6 +576,16 @@ pub(crate) fn update_items(
             if package(&f.system) != package(&system) {
                 continue;
             }
+            // C#: a name reaches another file through its namespace's
+            // `using`s or a qualified name, in its project or one that
+            // references it, so any C# file that mentions it can change.
+            let dotnet = |s: &SystemKey| s.ecosystem == Ecosystem::Dotnet;
+            if dotnet(&system) || dotnet(&f.system) {
+                if dotnet(&system) && dotnet(&f.system) {
+                    touched.insert(g.clone());
+                }
+                continue;
+            }
             if package(&system) {
                 touched.insert(g.clone());
                 continue;
@@ -654,6 +664,7 @@ pub(crate) fn update_items(
         &indexed_names(&new_owned),
     );
     state.context.rebind(&system, &module, &file.facts, &facts);
+    state.context.rekind(&system, &module, &file.facts, &facts);
     let old_facts = std::mem::replace(&mut file.facts, facts);
     file.nodes = nodes;
     file.owned = new_owned;

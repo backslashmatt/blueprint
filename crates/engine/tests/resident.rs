@@ -743,3 +743,50 @@ fn a_type_named_as_a_partial_one_elsewhere_matches_a_fresh_build() {
     );
     change(&mut r, &mut tree, "src/lib.rs", "pub fn f() {}\n");
 }
+
+#[test]
+fn csharp_edges_follow_edits_across_projects() {
+    let mut tree = files(&[
+        (
+            "Core/Core.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "Core/Shapes.cs",
+            "namespace Core.Shapes;\npublic interface IShape { }\npublic class Base { public static int Unit() { return 1; } }\n",
+        ),
+        (
+            "App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><ProjectReference Include=\"../Core/Core.csproj\" /></ItemGroup></Project>",
+        ),
+        (
+            "App/C.cs",
+            "using Core.Shapes;\nnamespace App;\npublic class C : Base, IShape { int F() { return Base.Unit() + G(); } int G() { return 0; } }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let shapes = "Core/Shapes.cs";
+    // The called method renamed, then back.
+    let renamed = "namespace Core.Shapes;\npublic interface IShape { }\npublic class Base { public static int Other() { return 1; } }\n";
+    assert_eq!(change(&mut r, &mut tree, shapes, renamed), Update::Items);
+    // The interface becomes a class: implements becomes extends.
+    let class = "namespace Core.Shapes;\npublic class IShape { }\npublic class Base { public static int Unit() { return 1; } }\n";
+    assert_eq!(change(&mut r, &mut tree, shapes, class), Update::Items);
+    let back = "namespace Core.Shapes;\npublic interface IShape { }\npublic class Base { public static int Unit() { return 1; } }\n";
+    assert_eq!(change(&mut r, &mut tree, shapes, back), Update::Items);
+    // The caller's own type loses the member it calls.
+    change(
+        &mut r,
+        &mut tree,
+        "App/C.cs",
+        "using Core.Shapes;\nnamespace App;\npublic class C : Base, IShape { int F() { return Base.Unit() + G(); } }\n",
+    );
+    // The project reference goes: a rebuild, and no edge into Core.
+    change(
+        &mut r,
+        &mut tree,
+        "App/App.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+    );
+}
