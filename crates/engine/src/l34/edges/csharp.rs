@@ -7,10 +7,13 @@
 //! - **depends-on (L2):** `using A.B;` (and `using static A.T;`, `using X =
 //!   A.B;`) from each namespace of the file's items that the `using` is in
 //!   scope for, to the namespace it names, `exact`.
-//! - **extends / implements (L3):** each base of a type, found in the
-//!   type's namespace and its enclosing ones, then the file's `using`s, or
-//!   as a qualified name; `implements` when it is an interface, `extends`
-//!   otherwise. A base that does not resolve gives no edge.
+//! - **extends / implements (L3):** each base of a type, looked up as C#
+//!   does: the enclosing types' nested types; then for each namespace from
+//!   the type's outwards, its types, then that declaration's own aliases and
+//!   `using`s; or as a qualified name. `implements` when a class, struct or
+//!   record names an interface, `extends` otherwise (an interface extends
+//!   the interfaces it names). A base that does not resolve, or that names
+//!   more than one type (`Base` and generic `Base<T>`), gives no edge.
 //! - **calls (L4):** `T.M()` and `A.B.T.M()` resolved as types are; `M()` in
 //!   the caller's own type. Calls through instances need types and give
 //!   none.
@@ -135,18 +138,19 @@ impl<'f> Usings<'f> {
         u
     }
 
-    fn globs_at(&self, at: &[String]) -> impl Iterator<Item = &'f [String]> + '_ {
-        let at = at.to_vec();
+    /// The namespaces brought in by `using`s declared exactly at `ns`.
+    fn globs_here<'s>(&'s self, ns: &'s [String]) -> impl Iterator<Item = &'f [String]> + 's {
         self.globs
             .iter()
-            .filter(move |(m, _)| at.starts_with(m))
+            .filter(move |(m, _)| *m == ns)
             .map(|(_, b)| *b)
     }
 
-    fn alias_at(&self, at: &[String], name: &str) -> Option<&'f [String]> {
+    /// An alias declared exactly at `ns`.
+    fn alias_here(&self, ns: &[String], name: &str) -> Option<&'f [String]> {
         self.aliases
             .iter()
-            .find(|(m, a, _)| *a == name && at.starts_with(m))
+            .find(|(m, a, _)| *a == name && *m == ns)
             .map(|(_, _, p)| *p)
     }
 }
@@ -161,48 +165,75 @@ impl Resolver<'_> {
                 .is_some_and(|m| m.contains(ns))
     }
 
-    /// The type a (possibly qualified) name used in namespace `at` names:
-    /// its system, namespace and name.
+    /// A type `name` in namespace `ns` of a visible project. A name more
+    /// than one type has (`Base` and generic `Base<T>`, which the analyser
+    /// cannot tell apart, so `Base~2`) is ambiguous and resolves to none.
+    fn cs_find(
+        &self,
+        system: &SystemKey,
+        ns: &[String],
+        name: &str,
+    ) -> Option<Option<(SystemKey, Vec<String>, String)>> {
+        let mut found = None;
+        for sys in self.projects.visible(system) {
+            if self.has_item(sys, ns, name) {
+                if found.is_some() || self.has_item(sys, ns, &format!("{name}~2")) {
+                    return Some(None);
+                }
+                found = Some((sys.clone(), ns.to_vec(), name.to_owned()));
+            }
+        }
+        found.map(Some)
+    }
+
+    /// The type a (possibly qualified) name used in namespace `at`, inside
+    /// type `within` (`Outer.Sub`, or `None`), names: its system, namespace
+    /// and name. Looked up as C# does: the enclosing types; then, for each
+    /// namespace from `at` outwards, its types and then that declaration's
+    /// own `using`s and aliases; finally as a fully qualified name.
     fn cs_type(
         &self,
         system: &SystemKey,
         at: &[String],
+        within: Option<&str>,
         path: &[String],
         usings: &Usings<'_>,
     ) -> Option<(SystemKey, Vec<String>, String)> {
         let (first, rest) = path.split_first()?;
-        // An alias stands for its path.
-        if let Some(target) = usings.alias_at(at, first) {
-            let whole = [target, rest].concat();
-            return self.qualified(system, &whole);
-        }
-        if rest.is_empty() {
-            // The namespace and its enclosing ones, then the usings.
-            let mut scopes: Vec<Vec<String>> =
-                (0..=at.len()).rev().map(|n| at[..n].to_vec()).collect();
-            scopes.extend(usings.globs_at(at).map(<[String]>::to_vec));
-            for ns in scopes {
-                for sys in self.projects.visible(system) {
-                    if self.has_item(sys, &ns, first) {
-                        return Some((sys.clone(), ns, first.clone()));
-                    }
-                }
-            }
-            return None;
-        }
-        // `Outer.Inner` from a using's namespace, or a qualified name.
-        let nested = path.join(".");
-        for ns in usings
-            .globs_at(at)
-            .chain((0..=at.len()).rev().map(|n| &at[..n]))
-        {
-            for sys in self.projects.visible(system) {
-                if self.has_item(sys, ns, &nested) {
-                    return Some((sys.clone(), ns.to_vec(), nested.clone()));
+        let dotted = path.join(".");
+        // Nested types of the enclosing types, innermost first.
+        if let Some(within) = within {
+            let outer: Vec<&str> = within.split('.').collect();
+            for n in (1..=outer.len()).rev() {
+                let name = format!("{}.{dotted}", outer[..n].join("."));
+                if let Some(hit) = self.cs_find(system, at, &name) {
+                    return hit;
                 }
             }
         }
-        self.qualified(system, path)
+        for level in (0..=at.len()).rev() {
+            let ns = &at[..level];
+            // A type of this namespace (`T`, or `Outer.Inner`).
+            if let Some(hit) = self.cs_find(system, ns, &dotted) {
+                return hit;
+            }
+            // A namespace inside it: `Sub.T` from `ns`.
+            if !rest.is_empty()
+                && let Some(hit) = self.qualified(system, &[ns, path].concat())
+            {
+                return Some(hit);
+            }
+            // This declaration's own aliases, then its usings.
+            if let Some(target) = usings.alias_here(ns, first) {
+                return self.qualified(system, &[target, rest].concat());
+            }
+            for base in usings.globs_here(ns) {
+                if let Some(hit) = self.cs_find(system, base, &dotted) {
+                    return hit;
+                }
+            }
+        }
+        None
     }
 
     /// `A.B.T` (or `A.B.Outer.Inner`) as a namespace and a type in it.
@@ -213,10 +244,15 @@ impl Resolver<'_> {
     ) -> Option<(SystemKey, Vec<String>, String)> {
         for split in (0..path.len()).rev() {
             let (ns, name) = (&path[..split], path[split..].join("."));
-            for sys in self.projects.visible(system) {
-                if self.is_namespace(sys, ns) && self.has_item(sys, ns, &name) {
-                    return Some((sys.clone(), ns.to_vec(), name));
-                }
+            if !self
+                .projects
+                .visible(system)
+                .any(|s| self.is_namespace(s, ns))
+            {
+                continue;
+            }
+            if let Some(hit) = self.cs_find(system, ns, &name) {
+                return hit;
             }
         }
         None
@@ -288,16 +324,24 @@ impl Resolver<'_> {
                     if self.model.node(&from).is_none() {
                         continue;
                     }
-                    let Some((sys, ns, name)) = self.cs_type(system, &at, r#trait, &usings) else {
+                    let Some((sys, ns, name)) =
+                        self.cs_type(system, &at, Some(ty), r#trait, &usings)
+                    else {
                         continue;
                     };
                     let interface =
                         self.projects
                             .interfaces
                             .contains(&(sys.clone(), ns.clone(), name.clone()));
+                    // An interface's bases are interfaces it extends.
+                    let from_interface = self.projects.interfaces.contains(&(
+                        system.clone(),
+                        at.clone(),
+                        ty.clone(),
+                    ));
                     let to = NodeId::within(Level::Component, sys, [ns, vec![name]].concat());
                     if self.model.node(&to).is_some() {
-                        let kind = if interface {
+                        let kind = if interface && !from_interface {
                             EdgeKind::Implements
                         } else {
                             EdgeKind::Extends
@@ -321,7 +365,7 @@ impl Resolver<'_> {
         let usings = Usings::of(facts);
         let mut out = Vec::new();
         for (i, item) in facts.items.iter().enumerate() {
-            let (Some(caller), ItemKind::Method { .. }) = (node(i), &item.kind) else {
+            let (Some(caller), ItemKind::Method { self_type, .. }) = (node(i), &item.kind) else {
                 continue;
             };
             let at = [file_module, item.module.as_slice()].concat();
@@ -339,9 +383,10 @@ impl Resolver<'_> {
                         )
                     })
                 } else {
-                    self.cs_type(system, &at, owner, &usings).map(|(s, ns, t)| {
-                        NodeId::within(Level::Code, s, [ns, vec![t, name.clone()]].concat())
-                    })
+                    self.cs_type(system, &at, Some(self_type), owner, &usings)
+                        .map(|(s, ns, t)| {
+                            NodeId::within(Level::Code, s, [ns, vec![t, name.clone()]].concat())
+                        })
                 };
                 if let Some(callee) = callee.filter(|c| self.model.node(c).is_some())
                     && callee != *caller

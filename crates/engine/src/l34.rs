@@ -568,7 +568,12 @@ pub(crate) fn update_items(
     let package = |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Npm | Ecosystem::Nx);
     let extern_names = state.context.extern_names(&system);
     let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
-    for name in &changed {
+    // A nested type is `Outer.Inner`, mentioned as `Outer` and `Inner`.
+    let lookups: BTreeSet<&str> = changed
+        .iter()
+        .flat_map(|n| std::iter::once(*n).chain(n.split('.')))
+        .collect();
+    for name in &lookups {
         for g in mentions.get(*name).into_iter().flatten() {
             let Some(f) = state.files.get(g) else {
                 continue;

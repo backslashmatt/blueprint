@@ -790,3 +790,30 @@ fn csharp_edges_follow_edits_across_projects() {
         "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
     );
 }
+
+#[test]
+fn renaming_a_nested_csharp_type_matches_a_fresh_build() {
+    let mut tree = files(&[
+        (
+            "Core/Core.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>",
+        ),
+        (
+            "Core/a.cs",
+            "namespace N { public class Outer { public class Inner { } } }\n",
+        ),
+        (
+            "Core/c.cs",
+            "namespace N { public class C : Outer.Inner { } }\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let renamed = "namespace N { public class Outer { public class Other { } } }\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "Core/a.cs", renamed),
+        Update::Items
+    );
+    let iface = "namespace N { public class Outer { public interface Inner { } } }\n";
+    assert_eq!(change(&mut r, &mut tree, "Core/a.cs", iface), Update::Items);
+}
