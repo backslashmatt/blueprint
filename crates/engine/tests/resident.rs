@@ -254,11 +254,77 @@ fn this_repository_edits_match_a_fresh_build() {
             "{file}"
         );
     }
-    // A crate's root file rebuilds: its nodes can be shared.
+    // A crate's root file too (#141).
     let main = "crates/cli/src/main.rs";
     let original = String::from_utf8(tree[&RepoPath::parse(main).unwrap()].clone()).unwrap();
     let added = format!("{original}\npub fn added_by_the_test() {{}}\n");
-    assert_eq!(change(&mut r, &mut tree, main, &added), Update::Rebuilt);
+    assert_eq!(change(&mut r, &mut tree, main, &added), Update::Items);
+    assert_eq!(change(&mut r, &mut tree, main, &original), Update::Items);
+}
+
+#[test]
+fn item_edits_to_a_crate_root_are_applied_by_item() {
+    let mut tree = files(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"core\", \"app\"]\n"),
+        ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
+        // Only modules at first: the root's L2 node exists only once
+        // something needs it.
+        ("core/src/lib.rs", "pub mod graph;\n"),
+        (
+            "core/src/graph.rs",
+            "pub struct Graph;\nimpl crate::Root { pub fn from_graph() {} }\n",
+        ),
+        ("core/src/main.rs", "fn main() {}\n"),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\ncore = { path = \"../core\" }\n",
+        ),
+        ("app/src/main.rs", "fn main() { core::top(); }\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let lib = "core/src/lib.rs";
+    // The root's first items: a type another file has an impl for, and the
+    // function another crate calls.
+    let with_items = "pub mod graph;\npub struct Root;\npub fn top() {}\n";
+    assert_eq!(change(&mut r, &mut tree, lib, with_items), Update::Items);
+    assert!(
+        calls(&r).iter().any(|c| c.contains("core#(functions)/top")),
+        "{:?}",
+        calls(&r)
+    );
+    // A renamed function, and then none again: the root's L2 node goes when
+    // nothing needs it.
+    let renamed = "pub mod graph;\npub struct Root;\npub fn other() {}\n";
+    assert_eq!(change(&mut r, &mut tree, lib, renamed), Update::Items);
+    assert_eq!(
+        change(&mut r, &mut tree, lib, "pub mod graph;\n"),
+        Update::Items
+    );
+    // The binary's root, beside the library.
+    let main = "core/src/main.rs";
+    assert_eq!(
+        change(&mut r, &mut tree, main, "fn main() {}\nfn helper() {}\n"),
+        Update::Items
+    );
+    assert_eq!(
+        change(&mut r, &mut tree, main, "fn main() {}\n"),
+        Update::Items
+    );
+    // Another crate reaching the root's items through an alias of the
+    // crate, and through a glob: each must follow a rename.
+    let app = "app/src/main.rs";
+    let alias = "use core as c;\nfn main() { c::top(); }\n";
+    change(&mut r, &mut tree, app, alias);
+    change(&mut r, &mut tree, lib, with_items);
+    change(&mut r, &mut tree, lib, renamed);
+    let glob = "use core::*;\nfn main() { top(); other(); }\n";
+    change(&mut r, &mut tree, app, glob);
+    change(&mut r, &mut tree, lib, with_items);
+    change(&mut r, &mut tree, lib, renamed);
+    // A `mod` added to the root still rebuilds: the module tree changes.
+    let more = "pub mod graph;\nmod extra;\n";
+    assert_eq!(change(&mut r, &mut tree, lib, more), Update::Rebuilt);
 }
 
 /// Structural edits whose effects reach other files: calls into a removed

@@ -319,6 +319,18 @@ fn file_modules(
 }
 
 impl Context {
+    /// Every name another crate's code can use for `system`: the extern
+    /// names its dependents declare it under. A reference from another
+    /// crate into it mentions one of them, in its path or in a `use`.
+    pub(crate) fn extern_names(&self, system: &SystemKey) -> BTreeSet<&str> {
+        self.crates
+            .values()
+            .flatten()
+            .filter(|(_, target)| *target == system)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// Replaces the names a file's `use`s bind: `old` facts out, `new` in.
     pub(crate) fn rebind(
         &mut self,
