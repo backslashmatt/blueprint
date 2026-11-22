@@ -296,17 +296,33 @@ fn mentioned(facts: &FileFacts) -> BTreeSet<&str> {
 }
 
 /// Whether a file of another crate can resolve a path to an item named in
-/// `changed` at the root of the crate it knows by one of `externs`: a path
-/// `extern::name` or `extern::*` (in a `use`, an `impl` or a call), or the
-/// crate itself bound by a `use` (`use extern as x;`), after which any
-/// `x::name` can. Paths are resolved through the file's own `use`s only, so
-/// nothing else can reach there.
+/// `changed` in the crate root it knows by one of `externs` (a root item,
+/// a method of a root type, an item of an inline module). Paths resolve
+/// through the file's own `use`s, once, and never through re-exports, so a
+/// path can only reach there if it is
+/// - `extern::…` with a changed name or a glob anywhere after the crate,
+///   in a `use`, an `impl` or a call;
+/// - the crate itself, bound by a `use` (`use extern as x;`);
+/// - `b::…` with a changed name after `b`, where `b` is a name a `use` of
+///   `extern::…` binds (`use extern::S;` then `S::new()`).
 fn reaches_root(facts: &FileFacts, externs: &BTreeSet<&str>, changed: &BTreeSet<&str>) -> bool {
-    let hits = |p: &[String], whole_crate: bool| match p {
-        [first, rest @ ..] if externs.contains(first.as_str()) => match rest.first() {
-            None => whole_crate,
-            Some(next) => next == "*" || changed.contains(next.as_str()),
-        },
+    let mut bound: BTreeSet<&str> = BTreeSet::new();
+    for r in &facts.references {
+        if let Reference::Use { path, alias, .. } = r
+            && path.first().is_some_and(|f| externs.contains(f.as_str()))
+        {
+            let name = alias.as_deref().or_else(|| path.last().map(String::as_str));
+            bound.extend(name.filter(|n| *n != "*"));
+        }
+    }
+    let after = |rest: &[String]| {
+        rest.iter()
+            .any(|s| s == "*" || changed.contains(s.as_str()))
+    };
+    let hits = |p: &[String], is_use: bool| match p {
+        [first] if externs.contains(first.as_str()) => is_use,
+        [first, rest @ ..] if externs.contains(first.as_str()) => after(rest),
+        [first, rest @ ..] if bound.contains(first.as_str()) => after(rest),
         _ => false,
     };
     facts.references.iter().any(|r| match r {

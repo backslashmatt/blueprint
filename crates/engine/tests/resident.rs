@@ -322,6 +322,22 @@ fn item_edits_to_a_crate_root_are_applied_by_item() {
     change(&mut r, &mut tree, app, glob);
     change(&mut r, &mut tree, lib, with_items);
     change(&mut r, &mut tree, lib, renamed);
+    // Methods of a root type and items of a root's inline module, reached
+    // by path and through a `use` (#143 review).
+    let methods = "pub mod graph;\npub struct Root;\npub struct S;\nimpl S { pub fn new() {} }\npub mod m { pub fn f() {} }\n";
+    change(&mut r, &mut tree, lib, methods);
+    let paths_app = "use core::S;\nuse core::m;\nfn main() { core::S::new(); S::new(); core::m::g(); m::g(); }\n";
+    change(&mut r, &mut tree, app, paths_app);
+    let renamed_method = "pub mod graph;\npub struct Root;\npub struct S;\nimpl S { pub fn old() {} }\npub mod m { pub fn f() {} pub fn g() {} }\n";
+    assert_eq!(
+        change(&mut r, &mut tree, lib, renamed_method),
+        Update::Items
+    );
+    assert_eq!(change(&mut r, &mut tree, lib, methods), Update::Items);
+    let used = "use core::m::g;\nfn main() { g(); }\n";
+    change(&mut r, &mut tree, app, used);
+    change(&mut r, &mut tree, lib, renamed_method);
+    change(&mut r, &mut tree, lib, methods);
     // A `mod` added to the root still rebuilds: the module tree changes.
     let more = "pub mod graph;\nmod extra;\n";
     assert_eq!(change(&mut r, &mut tree, lib, more), Update::Rebuilt);
