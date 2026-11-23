@@ -483,7 +483,9 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
                     place.at
                 }
             } else {
-                let reached = graph().any(|p| p.x + m.width > place.at && p.y < grid_h);
+                // A node below the grid's top row still reaches it: its
+                // incoming lane runs in the channel above it.
+                let reached = graph().any(|p| p.x + m.width > place.at && p.y < grid_h + m.channel);
                 if reached {
                     place.at.max(beside_at)
                 } else {
@@ -900,6 +902,39 @@ mod tests {
                 "moved whole"
             );
         }
+    }
+
+    /// Whether any edge segment passes through a node with no edges.
+    fn edges_cross_the_grid(l: &Layout, loose: &[usize]) -> bool {
+        let m = Metrics::default();
+        l.edges.iter().flat_map(|e| e.windows(2)).any(|w| {
+            let (a, b) = (w[0], w[1]);
+            let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+            let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+            loose.iter().any(|&i| {
+                let p = l.nodes[i];
+                x0 < p.x + m.width && x1 > p.x && y0 < p.y + m.height && y1 > p.y
+            })
+        })
+    }
+
+    #[test]
+    fn a_new_edge_never_runs_through_a_seeded_grid_beside() {
+        // Found in review of #171: a node in the layer below the grid's
+        // top row did not push the grid, but its incoming lane, in the
+        // channel above it, crossed the grid's last row.
+        let ids = names("n", 13);
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let edges = [(1, 4), (5, 12), (9, 1), (4, 5)];
+        let base = lay(&ids, &edges);
+        let mut more = edges.to_vec();
+        more.push((1, 2));
+        let l = relayout(&ids, &more, Metrics::default(), &base.seed(&ids));
+        let loose: Vec<usize> = (0..13)
+            .filter(|i| !more.iter().any(|(a, b)| a == i || b == i))
+            .collect();
+        assert!(sound(&l), "{l:?}");
+        assert!(!edges_cross_the_grid(&l, &loose), "{l:?}");
     }
 
     #[test]
