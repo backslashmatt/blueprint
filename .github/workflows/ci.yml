@@ -159,6 +159,85 @@ jobs:
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
   # release; `latest` is not used, so a release never changes CI unannounced.
 
+  # Unsigned installers (#162, DR 0016): the app alone, stripped, packaged by cargo-packager
+  # (Packager.toml), with its installed size checked against the 50 MB budget (§4). The packages
+  # are workflow artifacts, not releases: publishing and signing wait on the owner (#159), and
+  # macOS packages on macOS CI (#133).
+  package:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      # linuxdeploy is itself an AppImage; runners have no FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install
+      - name: Install the app's libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libvulkan1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Packager.toml and the workspace agree on the version
+        shell: bash
+        run: |
+          ws=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          pk=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
+          echo "workspace $ws, Packager.toml $pk"
+          test -n "$ws" && test "$ws" = "$pk"
+      - name: Build the app
+        run: cargo build --release --locked -p blueprint-app
+      - name: Strip the app
+        if: runner.os == 'Linux'
+        run: strip target/release/blueprint
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Package
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then formats=deb,appimage; else formats=nsis; fi
+          cargo packager --release --formats "$formats"
+          ls -l target/packages
+      # The budget is the installed size: what the installer puts on disk.
+      - name: Installed size (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          deb=$(ls target/packages/*.deb)
+          mkdir -p installed && dpkg-deb -x "$deb" installed
+          bytes=$(du -sb installed | cut -f1)
+          image=$(ls target/packages/*.AppImage)
+          image_bytes=$(stat -c %s "$image")
+          .github/scripts/installed_size.sh deb "$bytes"
+          .github/scripts/installed_size.sh AppImage "$image_bytes"
+      - name: Installed size (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem target/packages/*.exe | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP 'blueprint-installed'
+          Start-Process -Wait -FilePath $setup.FullName -ArgumentList '/S', "/D=$dir"
+          $bytes = (Get-ChildItem -Recurse -File $dir | Measure-Object Length -Sum).Sum
+          Get-ChildItem -Recurse -File $dir | Select-Object FullName, Length | Format-Table -AutoSize
+          bash .github/scripts/installed_size.sh NSIS $bytes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: |
+            target/packages/*.deb
+            target/packages/*.AppImage
+            target/packages/*.exe
+          if-no-files-found: error
+
   # The §4 interaction budgets on Windows (#95): a release build runs the timed session that
   # bp-bench runs on Linux, on this repository, and the budgets are checked.
   ui-timings:

@@ -5,6 +5,7 @@
 # benchmarks (REQUIREMENTS §5.3), and with it the install would exceed the
 # 50 MB budget (§4). The binary is stripped before packaging.
 
+name = "blueprint"
 product-name = "Blueprint"
 # Keep in step with `[workspace.package] version` (CI checks).
 version = "0.1.0"
