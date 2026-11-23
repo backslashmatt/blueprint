@@ -6,6 +6,7 @@ members = [
     "crates/lang-rust",
     "crates/lang-ts",
     "crates/lang-csharp",
+    "crates/lang-python",
     "crates/store",
     "crates/protocol",
     "crates/cli",
@@ -31,6 +32,7 @@ blueprint-engine = { path = "crates/engine" }
 blueprint-lang-rust = { path = "crates/lang-rust" }
 blueprint-lang-ts = { path = "crates/lang-ts" }
 blueprint-lang-csharp = { path = "crates/lang-csharp" }
+blueprint-lang-python = { path = "crates/lang-python" }
 blueprint-store = { path = "crates/store" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
