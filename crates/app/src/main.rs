@@ -14,6 +14,9 @@
 //!   the review reached as JSON and quits once its diff is complete and
 //!   its map laid out: the app test of #90 and #92. With `--stay-open` it
 //!   does not quit, so a screenshot can be taken (`.github/scripts`).
+//!   The report includes the process's peak resident memory,
+//!   `peak_resident_bytes` (`null` where the platform gives none), which is
+//!   bp-bench's `memory_medium` row (#163).
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -265,8 +268,12 @@ fn report_review(
         let (reviewed, to_review) = r.reviewed.as_ref().map_or((0, 0), |s| s.progress());
         // The marks made (each `r` that marked a node) and notes typed (#119).
         let (marks, notes) = w.mark_counts();
+        // Peak resident memory so far (#163, §4 budget): the review is open,
+        // its map laid out and the script's keys done.
+        let peak = blueprint_app::peak_resident_bytes()
+            .map_or_else(|| "null".to_owned(), |b| b.to_string());
         let json = format!(
-            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"code_opened_at\": {code_opened_at}, \"code_cursor\": {code_cursor}, \"reviewed\": {reviewed}, \"to_review\": {to_review}, \"marks\": {marks}, \"notes\": {notes}}}\n",
+            "{{\"base\": \"{}\", \"head\": \"{}\", \"findings\": {}, \"changed\": {}, \"map_nodes\": {}, \"code_rows\": {code_rows}, \"code_opened_at\": {code_opened_at}, \"code_cursor\": {code_cursor}, \"reviewed\": {reviewed}, \"to_review\": {to_review}, \"marks\": {marks}, \"notes\": {notes}, \"peak_resident_bytes\": {peak}}}\n",
             r.base,
             r.head,
             r.findings,
