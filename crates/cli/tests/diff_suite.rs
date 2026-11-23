@@ -1026,6 +1026,157 @@ fn every_hand_written_change_gives_its_expected_diff() {
                 "+edge\tL1:python:web# -> L1:python:core#\tdepends-on",
             ],
         },
+        Case {
+            name: "py-import-adds-a-module-dependency",
+            base: &[PYPROJECT, PY_A, PY_B],
+            head: &[
+                PYPROJECT,
+                PY_A,
+                (
+                    "src/app/b.py",
+                    "from app.a import f\nclass K:\n    def go(self):\n        return 1\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:python:#app/b -> L2:python:#app/a\tdepends-on",
+                "+edge\tL2:python:#app/b -> L2:python:#app/a\tdepends-on",
+            ],
+        },
+        Case {
+            name: "py-relative-import-closes-a-cycle",
+            base: &[
+                PYPROJECT,
+                ("src/app/a.py", "from . import b\ndef f(x):\n    return x\n"),
+                PY_B,
+            ],
+            head: &[
+                PYPROJECT,
+                ("src/app/a.py", "from . import b\ndef f(x):\n    return x\n"),
+                (
+                    "src/app/b.py",
+                    "from .a import f\nclass K:\n    def go(self):\n        return 1\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:python:#app/b -> L2:python:#app/a\tdepends-on",
+                "finding\tnew-cycle\tL2\tL2:python:#app/a, L2:python:#app/b\tnew: L2:python:#app/b -> L2:python:#app/a",
+                "+edge\tL2:python:#app/b -> L2:python:#app/a\tdepends-on",
+            ],
+        },
+        Case {
+            name: "py-class-extends-an-imported-base",
+            base: &[
+                PYPROJECT,
+                (
+                    "src/app/a.py",
+                    "class Base:\n    def run(self):\n        return 0\n",
+                ),
+                (
+                    "src/app/b.py",
+                    "import app.a\nclass K:\n    def go(self):\n        return self.run()\n",
+                ),
+            ],
+            head: &[
+                PYPROJECT,
+                (
+                    "src/app/a.py",
+                    "class Base:\n    def run(self):\n        return 0\n",
+                ),
+                (
+                    "src/app/b.py",
+                    "import app.a\nclass K(app.a.Base):\n    def go(self):\n        return self.run()\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:python:#app/b -> L2:python:#app/a\tcalls",
+                "finding\tnew-dependency\tL2:python:#app/b -> L2:python:#app/a\textends",
+                "surface\tL3:python:#app/b/K",
+                // `self.run()` now resolves through the base.
+                "+edge\tL4:python:#app/b/K/go -> L4:python:#app/a/Base/run\tcalls",
+                "+edge\tL3:python:#app/b/K -> L3:python:#app/a/Base\tcalls",
+                "+edge\tL3:python:#app/b/K -> L3:python:#app/a/Base\textends",
+                "+edge\tL2:python:#app/b -> L2:python:#app/a\tcalls",
+                "+edge\tL2:python:#app/b -> L2:python:#app/a\textends",
+            ],
+        },
+        Case {
+            name: "py-call-through-an-import",
+            base: &[
+                PYPROJECT,
+                PY_A,
+                (
+                    "src/app/b.py",
+                    "from app.a import f\ndef g():\n    return 1\n",
+                ),
+            ],
+            head: &[
+                PYPROJECT,
+                PY_A,
+                (
+                    "src/app/b.py",
+                    "from app.a import f\ndef g():\n    return f(1)\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:python:#app/b -> L2:python:#app/a\tcalls",
+                "changed\tL4:python:#app/b/(functions)/g",
+                "+edge\tL4:python:#app/b/(functions)/g -> L4:python:#app/a/(functions)/f\tcalls",
+                "+edge\tL3:python:#app/b/(functions) -> L3:python:#app/a/(functions)\tcalls",
+                "+edge\tL2:python:#app/b -> L2:python:#app/a\tcalls",
+            ],
+        },
+        Case {
+            name: "py-import-from-a-dependency-project",
+            base: &[
+                PY_CORE,
+                ("core/core/util.py", "def helper():\n    return 1\n"),
+                (
+                    "web/pyproject.toml",
+                    "[project]\nname = \"web\"\ndependencies = [\"core\"]\n",
+                ),
+                ("web/web/app.py", "def run():\n    return 0\n"),
+            ],
+            head: &[
+                PY_CORE,
+                ("core/core/util.py", "def helper():\n    return 1\n"),
+                (
+                    "web/pyproject.toml",
+                    "[project]\nname = \"web\"\ndependencies = [\"core\"]\n",
+                ),
+                (
+                    "web/web/app.py",
+                    "from core.util import helper\ndef run():\n    return helper()\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:python:web#web/app -> L2:python:core#core/util\tcalls",
+                "finding\tnew-dependency\tL2:python:web#web/app -> L2:python:core#core/util\tdepends-on",
+                "changed\tL4:python:web#web/app/(functions)/run",
+                "+edge\tL4:python:web#web/app/(functions)/run -> L4:python:core#core/util/(functions)/helper\tcalls",
+                "+edge\tL3:python:web#web/app/(functions) -> L3:python:core#core/util/(functions)\tcalls",
+                "+edge\tL2:python:web#web/app -> L2:python:core#core/util\tcalls",
+                "+edge\tL2:python:web#web/app -> L2:python:core#core/util\tdepends-on",
+            ],
+        },
+        Case {
+            name: "py-import-of-an-undeclared-project-is-not-a-dependency",
+            base: &[
+                PY_CORE,
+                ("core/core/util.py", "def helper():\n    return 1\n"),
+                PY_WEB,
+                ("web/web/app.py", "def run():\n    return 0\n"),
+            ],
+            head: &[
+                PY_CORE,
+                ("core/core/util.py", "def helper():\n    return 1\n"),
+                PY_WEB,
+                (
+                    "web/web/app.py",
+                    "from core.util import helper\ndef run():\n    return helper()\n",
+                ),
+            ],
+            expect: &["contained\tL4:python:web#web/app/(functions)/run"],
+        },
     ];
     assert!(cases.len() >= 30, "the exit test asks for at least 30");
     let mut failed = Vec::new();

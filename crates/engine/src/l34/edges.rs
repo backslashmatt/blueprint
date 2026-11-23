@@ -14,6 +14,8 @@
 //!   no edge.
 //! - **C#:** `using`s, bases and calls resolved within a project and the
 //!   projects it references ([`csharp`], #150).
+//! - **Python:** imports, base classes and calls resolved within a project
+//!   and the Python projects it depends on ([`python`], #157).
 //! - **TypeScript and JavaScript:** packages' files resolve their module
 //!   specifiers, `extends`/`implements` and calls by their own rules
 //!   ([`ts`], #139).
@@ -38,6 +40,7 @@ use super::{Builder, FUNCTIONS, Parsed};
 use crate::l1::Read;
 
 mod csharp;
+mod python;
 mod ts;
 
 /// The names each module binds with `use`: (system, module) -> name -> path.
@@ -149,6 +152,7 @@ pub(crate) struct Context {
     index: Index,
     packages: ts::Packages,
     projects: csharp::Projects,
+    py_projects: python::Projects,
 }
 
 /// Adds every edge the facts give, rolled up. With `keep`, also returns the
@@ -176,6 +180,7 @@ pub(super) fn add(
     let index = Index::build(b.model);
     let packages = ts::Packages::build(b.model, parsed);
     let projects = csharp::Projects::build(b.model, parsed);
+    let py_projects = python::Projects::build(b.model, parsed);
     let r = Resolver {
         model: &*b.model,
         crates: &crates,
@@ -183,6 +188,7 @@ pub(super) fn add(
         index: &index,
         packages: &packages,
         projects: &projects,
+        py_projects: &py_projects,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
     let mut kept = Vec::with_capacity(if keep { parsed.len() } else { 0 });
@@ -240,6 +246,7 @@ pub(super) fn add(
             index,
             packages,
             projects,
+            py_projects,
         },
         kept,
     ))
@@ -413,6 +420,7 @@ pub(crate) fn edges_of<'n>(
         index: &ctx.index,
         packages: &ctx.packages,
         projects: &ctx.projects,
+        py_projects: &ctx.py_projects,
     };
     contributions(&r.file_edges(path, system, file_module, facts, node))
 }
@@ -435,6 +443,7 @@ pub(crate) fn calls_of<'n>(
         index: &ctx.index,
         packages: &ctx.packages,
         projects: &ctx.projects,
+        py_projects: &ctx.py_projects,
     };
     r.file_calls(path, system, file_module, facts, node)
         .into_iter()
@@ -530,6 +539,7 @@ struct Resolver<'a> {
     index: &'a Index,
     packages: &'a ts::Packages,
     projects: &'a csharp::Projects,
+    py_projects: &'a python::Projects,
 }
 
 /// What resolution looks up, per system: the module paths, and the names
@@ -608,6 +618,9 @@ impl Resolver<'_> {
         if csharp::is_project(system) {
             return self.cs_file_edges(system, file_module, facts, node);
         }
+        if python::is_project(system) {
+            return self.py_file_edges(path, system, file_module, facts, node);
+        }
         if !resolved(system) {
             return Vec::new();
         }
@@ -681,6 +694,9 @@ impl Resolver<'_> {
         }
         if csharp::is_project(system) {
             return self.cs_file_calls(system, file_module, facts, node);
+        }
+        if python::is_project(system) {
+            return self.py_file_calls(path, system, file_module, facts, node);
         }
         if !resolved(system) {
             return Vec::new();

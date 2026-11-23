@@ -60,6 +60,8 @@ nodes:
   L2:cargo:crates/engine#l34  Module  "l34"  Exact  crates/engine/src/l34.rs  Public
   L2:cargo:crates/engine#l34/edges  Module  "l34::edges"  Exact  crates/engine/src/l34/edges.rs  Private
   L2:cargo:crates/engine#l34/edges/csharp  Module  "l34::edges::csharp"  Exact  crates/engine/src/l34/edges/csharp.rs  Private
+  L2:cargo:crates/engine#l34/edges/python  Module  "l34::edges::python"  Exact  crates/engine/src/l34/edges/python.rs  Private
+  L2:cargo:crates/engine#l34/edges/python/tests  Module  "l34::edges::python::tests"  Exact  crates/engine/src/l34/edges/python.rs  Private
   L2:cargo:crates/engine#l34/edges/ts  Module  "l34::edges::ts"  Exact  crates/engine/src/l34/edges/ts.rs  Private
   L2:cargo:crates/engine#lang  Module  "lang"  Exact  crates/engine/src/lang.rs  Public
   L2:cargo:crates/engine#lang/tests  Module  "lang::tests"  Exact  crates/engine/src/lang.rs  Private

@@ -909,3 +909,74 @@ fn a_crate_beside_an_npm_package_keeps_its_path_module() {
     change(&mut r, &mut tree, "src/lib.rs", "pub fn top() {}\n");
     delete(&mut r, &mut tree, "package.json");
 }
+
+#[test]
+fn python_edges_follow_edits_across_modules_and_projects() {
+    let mut tree = files(&[
+        ("core/pyproject.toml", "[project]\nname = \"core\"\n"),
+        (
+            "core/src/core/base.py",
+            "class Base:\n    def run(self):\n        return 0\n\ndef helper():\n    return 1\n",
+        ),
+        (
+            "web/pyproject.toml",
+            "[project]\nname = \"web\"\ndependencies = [\"core\"]\n",
+        ),
+        (
+            "web/web/app.py",
+            "from core.base import Base, helper\nfrom . import views\n\nclass App(Base):\n    def go(self):\n        return self.run() + helper()\n",
+        ),
+        (
+            "web/web/views.py",
+            "from .app import App\n\ndef index():\n    return App()\n",
+        ),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    let before = calls(&r);
+    assert!(
+        before.iter().any(|c| c.ends_with("core/base/Base/run")),
+        "{before:?}"
+    );
+    // The callee is renamed, then comes back; a constructor appears.
+    change(
+        &mut r,
+        &mut tree,
+        "core/src/core/base.py",
+        "class Base:\n    def start(self):\n        return 0\n\ndef helper():\n    return 1\n",
+    );
+    assert!(!calls(&r).iter().any(|c| c.ends_with("Base/run")));
+    change(
+        &mut r,
+        &mut tree,
+        "core/src/core/base.py",
+        "class Base:\n    def run(self):\n        return 0\n\ndef helper():\n    return 1\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "web/web/app.py",
+        "from core.base import Base, helper\nfrom . import views\n\nclass App(Base):\n    def __init__(self):\n        pass\n    def go(self):\n        return self.run() + helper()\n",
+    );
+    assert!(
+        calls(&r)
+            .iter()
+            .any(|c| c.ends_with("web/app/App/__init__")),
+        "{:?}",
+        calls(&r)
+    );
+    // A body edit in place; a removed import.
+    change(
+        &mut r,
+        &mut tree,
+        "web/web/views.py",
+        "from .app import App\n\ndef index():\n    x = 1\n    return App()\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "web/web/views.py",
+        "def index():\n    return 2\n",
+    );
+    delete(&mut r, &mut tree, "core/src/core/base.py");
+}

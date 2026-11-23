@@ -568,9 +568,20 @@ pub(crate) fn update_items(
     let package = |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Npm | Ecosystem::Nx);
     let extern_names = state.context.extern_names(&system);
     let mut touched: BTreeSet<RepoPath> = BTreeSet::from([path.clone()]);
+    // A method that comes or goes is reached through its type too: a
+    // Python `C()` calls `C.__init__`, and a call through `self` looks in
+    // the bases.
+    let owners: BTreeSet<&str> = old_names
+        .symmetric_difference(&new_names)
+        .filter_map(|(_, _, k)| match k {
+            ItemKind::Method { self_type, .. } => Some(self_type.as_str()),
+            _ => None,
+        })
+        .collect();
     // A nested type is `Outer.Inner`, mentioned as `Outer` and `Inner`.
     let lookups: BTreeSet<&str> = changed
         .iter()
+        .chain(&owners)
         .flat_map(|n| std::iter::once(*n).chain(n.split('.')))
         .collect();
     for name in &lookups {
@@ -584,9 +595,11 @@ pub(crate) fn update_items(
             // C#: a name reaches another file through its namespace's
             // `using`s or a qualified name, in its project or one that
             // references it, so any C# file that mentions it can change.
-            let dotnet = |s: &SystemKey| s.ecosystem == Ecosystem::Dotnet;
-            if dotnet(&system) || dotnet(&f.system) {
-                if dotnet(&system) && dotnet(&f.system) {
+            // Python: through an import, from any Python project (#157).
+            let by_name =
+                |s: &SystemKey| matches!(s.ecosystem, Ecosystem::Dotnet | Ecosystem::Python);
+            if by_name(&system) || by_name(&f.system) {
+                if system.ecosystem == f.system.ecosystem {
                     touched.insert(g.clone());
                 }
                 continue;
