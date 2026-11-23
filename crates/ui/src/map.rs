@@ -423,18 +423,81 @@ fn view(
         edges,
     }
 }
-/// How the map view is looked at (#92): the selection is centred, moved
-/// by `pan` (screen pixels) and scaled by `zoom`, which is a whole number of
+/// How the map view is looked at (#92): placed by [`view_centre`] (the
+/// whole map when it fits, else the selection, held to the map's edges),
+/// moved by `pan` (screen pixels) and scaled by `zoom`, which is a whole number of
 /// [`Camera::ZOOM_STEP`]s from 100%, so zooming back always meets 100%.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
-    /// Offset from centring the selection, in screen pixels.
+    /// Offset from where [`view_centre`] places the view, in screen pixels.
     pub pan: (f32, f32),
     /// Scale: [`Camera::ZOOM_STEP`] to the power `steps`.
     pub zoom: f32,
     /// Zoom steps from 100%, within [`Camera::MIN_STEPS`] and
     /// [`Camera::MAX_STEPS`].
     pub steps: i32,
+}
+
+/// A margin kept between the map's content and the viewport's edges, in
+/// screen pixels.
+pub const VIEW_MARGIN: f32 = 24.0;
+
+/// The least the map is scaled down to fit its area: smaller, its labels
+/// would be hard to read, and the view centres on the selection instead.
+pub const MIN_FIT: f32 = 0.75;
+
+/// The scale that fits content spanning `bounds` into `viewport` with
+/// [`VIEW_MARGIN`] around it (#148): 1 when it already fits, never below
+/// [`MIN_FIT`]. The camera's zoom applies on top of it.
+#[must_use]
+pub fn fit_scale(bounds: (f32, f32, f32, f32), viewport: (f32, f32)) -> f32 {
+    let (w, h) = (
+        (bounds.2 - bounds.0).max(1.0),
+        (bounds.3 - bounds.1).max(1.0),
+    );
+    let fx = (viewport.0 - 2.0 * VIEW_MARGIN) / w;
+    let fy = (viewport.1 - 2.0 * VIEW_MARGIN) / h;
+    let f = fx.min(fy);
+    if f.is_nan() {
+        1.0
+    } else {
+        f.clamp(MIN_FIT, 1.0)
+    }
+}
+
+/// The layout point to bring to the middle of the viewport (#148), for
+/// content spanning `bounds` `(x0, y0, x1, y1)` in layout units, the
+/// selected node's box `(x, y, w, h)` if any, a viewport of `viewport`
+/// pixels, and the map drawn at `zoom`. The canvas passes the fit scale
+/// ([`fit_scale`]) alone: the camera's zoom is applied about this point, so
+/// zooming keeps the middle of the screen in place. Along each axis:
+/// content that fits is centred whole; content that does not is centred on
+/// the selection but held so that no empty band shows past either end, and
+/// the selection stays in view.
+#[must_use]
+pub fn view_centre(
+    bounds: (f32, f32, f32, f32),
+    selected: Option<(f32, f32, f32, f32)>,
+    viewport: (f32, f32),
+    zoom: f32,
+) -> (f32, f32) {
+    let axis = |lo: f32, hi: f32, sel: Option<(f32, f32)>, vp: f32| {
+        let z = zoom.max(f32::EPSILON);
+        let (half, margin) = (vp / 2.0 / z, VIEW_MARGIN / z);
+        let mid = (lo + hi) / 2.0;
+        if hi - lo + 2.0 * margin <= 2.0 * half {
+            return mid;
+        }
+        let want = sel.map_or(mid, |(at, size)| at + size / 2.0);
+        let (first, last) = (lo + half - margin, hi - half + margin);
+        // `max` then `min`, not `clamp`: no panic on odd bounds.
+        let c = want.max(first).min(last);
+        if c.is_finite() { c } else { 0.0 }
+    };
+    (
+        axis(bounds.0, bounds.2, selected.map(|s| (s.0, s.2)), viewport.0),
+        axis(bounds.1, bounds.3, selected.map(|s| (s.1, s.3)), viewport.1),
+    )
 }
 
 impl Default for Camera {
@@ -669,6 +732,72 @@ mod tests {
             Some(&inner)
         );
         assert_eq!(m.name(&a), "a");
+    }
+
+    #[test]
+    fn content_a_little_too_large_is_scaled_to_fit_but_not_below_the_floor() {
+        let vp = (1000.0, 600.0);
+        assert_eq!(fit_scale((0.0, 0.0, 500.0, 300.0), vp), 1.0);
+        let f = fit_scale((0.0, 0.0, 1052.0, 300.0), vp);
+        assert!(
+            (f - (1000.0 - 2.0 * VIEW_MARGIN) / 1052.0).abs() < 1e-6,
+            "{f}"
+        );
+        assert_eq!(fit_scale((0.0, 0.0, 5000.0, 300.0), vp), MIN_FIT);
+        assert_eq!(fit_scale((0.0, 0.0, 10.0, 10.0), (1.0, 1.0)), MIN_FIT);
+    }
+
+    #[test]
+    fn content_that_fits_is_centred_and_larger_content_is_held_to_its_edges() {
+        // Fits: the content's middle, wherever the selection is.
+        let c = view_centre(
+            (0.0, 0.0, 600.0, 300.0),
+            Some((0.0, 0.0, 160.0, 34.0)),
+            (1200.0, 700.0),
+            1.0,
+        );
+        assert_eq!(c, (300.0, 150.0));
+        // Wider than the view, selection at the left: the left edge shows
+        // with its margin, not an empty band.
+        let (x, _) = view_centre(
+            (0.0, 0.0, 3000.0, 300.0),
+            Some((0.0, 0.0, 160.0, 34.0)),
+            (1200.0, 700.0),
+            1.0,
+        );
+        assert_eq!(x, 600.0 - VIEW_MARGIN);
+        // Selection in the middle of wide content: centred on it.
+        let (x, _) = view_centre(
+            (0.0, 0.0, 3000.0, 300.0),
+            Some((1400.0, 0.0, 200.0, 34.0)),
+            (1200.0, 700.0),
+            1.0,
+        );
+        assert_eq!(x, 1500.0);
+        // Selection at the far right: the right edge shows, and so does it.
+        let (x, _) = view_centre(
+            (0.0, 0.0, 3000.0, 300.0),
+            Some((2840.0, 0.0, 160.0, 34.0)),
+            (1200.0, 700.0),
+            1.0,
+        );
+        assert_eq!(x, 3000.0 - 600.0 + VIEW_MARGIN);
+        assert!(x + 600.0 >= 3000.0);
+        // Bounds that do not start at 0 (edges routed left of the nodes).
+        let c = view_centre((-200.0, 0.0, 400.0, 300.0), None, (1200.0, 700.0), 1.0);
+        assert_eq!(c, (100.0, 150.0));
+        // Odd values never panic and give a finite centre.
+        let c = view_centre((0.0, 0.0, f32::NAN, 300.0), None, (100.0, 100.0), 1.0);
+        assert!(c.0.is_finite() && c.1.is_finite(), "{c:?}");
+        assert_eq!(fit_scale((0.0, 0.0, f32::NAN, 10.0), (100.0, 100.0)), 1.0);
+        // Zoomed in, the same content no longer fits.
+        let (_, y) = view_centre(
+            (0.0, 0.0, 600.0, 600.0),
+            Some((0.0, 0.0, 160.0, 34.0)),
+            (1200.0, 700.0),
+            2.0,
+        );
+        assert_eq!(y, 175.0 - VIEW_MARGIN / 2.0);
     }
 
     #[test]
