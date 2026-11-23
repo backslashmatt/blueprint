@@ -51,6 +51,7 @@ nodes:
   L2:cargo:crates/engine#l2  Module  "l2"  Exact  crates/engine/src/l2/mod.rs  Public
   L2:cargo:crates/engine#l2/csharp  Module  "l2::csharp"  Exact  crates/engine/src/l2/csharp.rs  Public
   L2:cargo:crates/engine#l2/csharp/tests  Module  "l2::csharp::tests"  Exact  crates/engine/src/l2/csharp.rs  Private
+  L2:cargo:crates/engine#l2/go  Module  "l2::go"  Exact  crates/engine/src/l2/go.rs  Public
   L2:cargo:crates/engine#l2/lexer  Module  "l2::lexer"  Exact  crates/engine/src/l2/lexer.rs  Private
   L2:cargo:crates/engine#l2/lexer/tests  Module  "l2::lexer::tests"  Exact  crates/engine/src/l2/lexer.rs  Private
   L2:cargo:crates/engine#l2/python  Module  "l2::python"  Exact  crates/engine/src/l2/python.rs  Public
@@ -141,6 +142,7 @@ edges:
   L1:cargo:crates/cli# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/cli# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-csharp#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/engine# -> L1:cargo:crates/lang-go#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-python#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-rust#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/lang-ts#  DependsOn  Exact  {Normal}

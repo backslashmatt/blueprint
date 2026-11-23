@@ -980,3 +980,61 @@ fn python_edges_follow_edits_across_modules_and_projects() {
     );
     delete(&mut r, &mut tree, "core/src/core/base.py");
 }
+
+#[test]
+fn go_edits_across_a_packages_files_match_a_fresh_build() {
+    let mut tree = files(&[
+        ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+        ("main.go", "package main\n\nfunc main() {}\n"),
+        (
+            "store/store.go",
+            "package store\n\ntype Store struct{ n int }\n\nfunc New() *Store { return &Store{} }\n",
+        ),
+        (
+            "store/methods.go",
+            "package store\n\nfunc (s *Store) Get() int { return s.n }\n",
+        ),
+        ("store/store_test.go", "package store\n\nfunc helper() {}\n"),
+        ("internal/x/x.go", "package x\n\nfunc X() {}\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    // A body edit applies in place.
+    assert_eq!(
+        change(
+            &mut r,
+            &mut tree,
+            "store/methods.go",
+            "package store\n\nfunc (s *Store) Get() int { return s.n + 1 }\n",
+        ),
+        Update::InPlace
+    );
+    // The type's file renames it: the method in the other file moves.
+    change(
+        &mut r,
+        &mut tree,
+        "store/store.go",
+        "package store\n\ntype Box struct{ n int }\n\nfunc New() *Box { return &Box{} }\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "store/store.go",
+        "package store\n\ntype Store struct{ n int }\n\nfunc New() *Store { return &Store{} }\n",
+    );
+    // Free functions come and go in a file that is not the group's first.
+    change(&mut r, &mut tree, "store/store_test.go", "package store\n");
+    change(
+        &mut r,
+        &mut tree,
+        "store/store_test.go",
+        "package store\n\nfunc helper() {}\nfunc other() {}\n",
+    );
+    delete(&mut r, &mut tree, "store/store.go");
+    change(
+        &mut r,
+        &mut tree,
+        "vendor/v/v.go",
+        "package v\n\nfunc V() {}\n",
+    );
+}

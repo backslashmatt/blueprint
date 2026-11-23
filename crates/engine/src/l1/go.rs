@@ -74,7 +74,7 @@ fn node_id(dir: &[String]) -> NodeId {
 }
 
 /// Whether the go tool would skip this file's directory.
-fn ignored(path: &RepoPath) -> bool {
+pub(crate) fn ignored(path: &RepoPath) -> bool {
     let segs = path.segments();
     segs[..segs.len().saturating_sub(1)]
         .iter()

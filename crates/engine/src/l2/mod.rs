@@ -10,6 +10,8 @@
 //! - **Python:** each file of a Python project is a module, named by its
 //!   dotted path below the import root (`src/` or the project's directory)
 //!   ([`python`], DR 0014).
+//! - **Go:** each package (a directory of `.go` files) of a Go module is a
+//!   module, named by its path in the module ([`go`], DR 0015).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -19,6 +21,7 @@
 //! Every L2 node's parent is its L1 system; nesting is in the node's path.
 
 pub mod csharp;
+pub mod go;
 mod lexer;
 pub mod python;
 pub mod rust;
@@ -102,17 +105,30 @@ fn run(
     let mut unowned: Vec<&RepoPath> = Vec::new();
     for p in paths {
         let segs = p.segments();
-        let owner = (0..segs.len())
-            .rev()
-            .find_map(|n| by_dir.get(&segs[..n]))
-            .and_then(|keys| match keys.as_slice() {
-                [one] => Some(*one),
-                many => many
+        // A `.go` file belongs to its nearest `go.mod`, whatever other
+        // manifests sit between (a `package.json` beside an `embed.go`).
+        let go_owner = crate::lang::analyser_in(p, Ecosystem::Go).and_then(|_| {
+            (0..segs.len()).rev().find_map(|n| {
+                by_dir
+                    .get(&segs[..n])?
                     .iter()
-                    .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
-                    .or_else(|| many.first())
-                    .copied(),
-            });
+                    .find(|k| k.ecosystem == Ecosystem::Go)
+                    .copied()
+            })
+        });
+        let owner = go_owner.or_else(|| {
+            (0..segs.len())
+                .rev()
+                .find_map(|n| by_dir.get(&segs[..n]))
+                .and_then(|keys| match keys.as_slice() {
+                    [one] => Some(*one),
+                    many => many
+                        .iter()
+                        .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
+                        .or_else(|| many.first())
+                        .copied(),
+                })
+        });
         match owner {
             Some(k) => owned.entry(k.clone()).or_default().push(p),
             None => unowned.push(p),
@@ -161,6 +177,7 @@ fn run(
             Ecosystem::Npm | Ecosystem::Nx => ts::analyse_package(id, key, &own, model, &mut diags),
             Ecosystem::Dotnet => csharp::analyse_project(id, key, &own, read, model, &mut diags),
             Ecosystem::Python => python::analyse_project(id, key, &own, model, &mut diags),
+            Ecosystem::Go => go::analyse_module(id, key, &own, model, &mut diags),
             _ => None,
         };
         let files = own;

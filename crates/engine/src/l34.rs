@@ -511,6 +511,12 @@ pub(crate) fn update_items(
     if shares_partial(&file.facts) || shares_partial(&facts) {
         return Err(NotBody::Structure);
     }
+    // Go: a package's files share its `(functions)` group, and its methods
+    // attach to types in other files, so an item change in one file can
+    // move nodes another file made (DR 0015).
+    if file.system.ecosystem == Ecosystem::Go {
+        return Err(NotBody::Structure);
+    }
     let (system, module) = (file.system.clone(), file.module.clone());
     let module_id = NodeId::within(Level::Module, system.clone(), module.clone());
     // A crate root's own L2 node exists only while something needs it
