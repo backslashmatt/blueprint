@@ -1953,6 +1953,12 @@ fn border_colour(selected: bool, status: Status, dark: bool) -> u32 {
     }
 }
 
+/// An edge's line weight on screen, in pixels, at any zoom.
+const EDGE_PX: f32 = 2.0;
+
+/// The weight of the selected node's edges (#148).
+const EDGE_SELECTED_PX: f32 = 4.0;
+
 fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     match (status, dark) {
         (EdgeStatus::Added, _) => 0x2f9e44,
@@ -2013,24 +2019,40 @@ fn canvas(
         sx + w * z >= 0.0 && sx <= vw && sy + h * z >= 0.0 && sy <= vh
     };
     let mut c = div().relative().w(px(vw)).h(px(vh)).overflow_hidden();
-    for (edge, points) in map.view.edges.iter().zip(&l.edges) {
+    // The selected node's edges are drawn last and heavier, so that they
+    // can be followed through channels the others share (#148). Colour
+    // still says how each changed, and every edge keeps its contrast.
+    for (i, touches) in map.view.edge_order(map.selected) {
+        let (Some(edge), Some(points)) = (map.view.edges.get(i), l.edges.get(i)) else {
+            continue;
+        };
         let colour = edge_colour(edge.status, dark);
+        let weight = if touches { EDGE_SELECTED_PX } else { EDGE_PX };
         for seg in points.windows(2) {
             let (p, q) = (seg[0], seg[1]);
             let (x, y) = (p.x.min(q.x), p.y.min(q.y));
             let (w, h) = ((p.x - q.x).abs().max(2.0), (p.y - q.y).abs().max(2.0));
             if visible(x, y, w, h) {
                 let (sx, sy) = at(x, y);
-                // Lines keep their 2 px weight at any zoom.
+                // Lines keep their weight at any zoom; a horizontal run
+                // reaches across the vertical ones at its ends.
                 let (sw, sh) = (
-                    if w > 2.0 { w * z } else { 2.0 },
-                    if h > 2.0 { h * z } else { 2.0 },
+                    if w > 2.0 {
+                        w * z + weight - 2.0
+                    } else {
+                        weight
+                    },
+                    if h > 2.0 {
+                        h * z + weight - 2.0
+                    } else {
+                        weight
+                    },
                 );
                 c = c.child(
                     div()
                         .absolute()
-                        .left(px(sx - 1.0))
-                        .top(px(sy - 1.0))
+                        .left(px(sx - weight / 2.0))
+                        .top(px(sy - weight / 2.0))
                         .w(px(sw))
                         .h(px(sh))
                         .bg(rgb(colour)),
