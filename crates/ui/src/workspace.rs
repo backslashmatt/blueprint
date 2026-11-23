@@ -2034,19 +2034,12 @@ fn canvas(
             let (w, h) = ((p.x - q.x).abs().max(2.0), (p.y - q.y).abs().max(2.0));
             if visible(x, y, w, h) {
                 let (sx, sy) = at(x, y);
-                // Lines keep their weight at any zoom; a horizontal run
-                // reaches across the vertical ones at its ends.
+                // Lines keep their weight at any zoom, and each segment
+                // reaches half its weight past both ends, so the corners
+                // where runs meet are square whichever way a run turns.
                 let (sw, sh) = (
-                    if w > 2.0 {
-                        w * z + weight - 2.0
-                    } else {
-                        weight
-                    },
-                    if h > 2.0 {
-                        h * z + weight - 2.0
-                    } else {
-                        weight
-                    },
+                    if w > 2.0 { w * z + weight } else { weight },
+                    if h > 2.0 { h * z + weight } else { weight },
                 );
                 c = c.child(
                     div()
