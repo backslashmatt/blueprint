@@ -1023,8 +1023,9 @@ const UI_SESSIONS: usize = 3;
 /// milliseconds to its first painted frame and to its settled one.
 type KeyTime = (String, bool, f64, f64);
 
-/// One timed session: its `--timings` keys.
-fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Error> {
+/// One timed session: its `--timings` keys, and the app's peak resident
+/// memory in bytes at the end of it, where the platform reports one (#163).
+fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<(Vec<KeyTime>, Option<u64>), Error> {
     let dir = std::env::temp_dir();
     let report = dir.join(format!("bp-bench-ui-review-{}.json", std::process::id()));
     let timings = dir.join(format!("bp-bench-ui-timings-{}.json", std::process::id()));
@@ -1039,6 +1040,7 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()?;
+    let review = std::fs::read_to_string(&report);
     let _ = std::fs::remove_file(&report);
     if !out.status.success() {
         let _ = std::fs::remove_file(&timings);
@@ -1050,6 +1052,8 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
         )
         .into());
     }
+    let review: serde_json::Value = serde_json::from_str(&review?)?;
+    let peak = review["peak_resident_bytes"].as_u64();
     let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&timings)?)?;
     let _ = std::fs::remove_file(&timings);
     let keys = json["keys"].as_array().ok_or("timings have no `keys`")?;
@@ -1059,7 +1063,8 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
     if keys.len() != expected {
         return Err(format!("the UI session timed {} of {expected} keys", keys.len()).into());
     }
-    keys.iter()
+    let keys = keys
+        .iter()
         .map(|k| {
             Ok((
                 k["action"].as_str().unwrap_or("").to_owned(),
@@ -1068,7 +1073,8 @@ fn ui_run(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<KeyTime>, Err
                 k["settled_ms"].as_f64().ok_or("no settled_ms")?,
             ))
         })
-        .collect()
+        .collect::<Result<_, Error>>()?;
+    Ok((keys, peak))
 }
 
 /// Actions that scroll or move about without new data: their first frame
@@ -1118,11 +1124,17 @@ fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
 }
 
 fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurement>, Error> {
-    ui_run(app, checkout, cache)?;
+    // The first session indexes the checkout into an empty cache, as a
+    // first open does; its memory peak is reported but not held to budget.
+    let (_, first_peak) = ui_run(app, checkout, cache)?;
     let mut best: [f64; 3] = [f64::INFINITY; 3];
     let mut drills = 0;
+    let mut peak: Option<u64> = None;
     for _ in 0..UI_SESSIONS {
-        let keys = ui_run(app, checkout, cache)?;
+        let (keys, session_peak) = ui_run(app, checkout, cache)?;
+        // Memory varies little between runs, so the highest session is
+        // kept: the budget is a ceiling.
+        peak = peak.max(session_peak);
         let worst = |pick: &dyn Fn(&KeyTime) -> Option<f64>| {
             keys.iter().filter_map(pick).fold(0.0_f64, f64::max)
         };
@@ -1159,7 +1171,13 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
         gated: false,
     };
     let session = format!("best of {UI_SESSIONS} scripted sessions (`blueprint --timings`)");
-    Ok(vec![
+    // On Linux the app always reports its peak; a missing one would drop
+    // the §4 memory row without failing the run.
+    if cfg!(target_os = "linux") && (peak.is_none() || first_peak.is_none()) {
+        return Err("the app reported no peak resident memory".into());
+    }
+    let mut out = memory_rows(peak, first_peak);
+    out.extend([
         row(
             "drill",
             best[0],
@@ -1184,7 +1202,49 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
             best[2],
             format!("the frame_time row against the 120 Hz budget; {session}"),
         ),
-    ])
+    ]);
+    Ok(out)
+}
+
+/// The §4 memory row (#163) from the scripted sessions' peaks, in MB of
+/// 1,000,000 bytes (as installed size), and the first open's peak, which
+/// includes indexing into an empty cache. Empty where the platform reports
+/// no peak.
+fn memory_rows(peak: Option<u64>, first_peak: Option<u64>) -> Vec<Measurement> {
+    let mb = |b: u64| b as f64 / 1e6;
+    let row = |name: &str, bytes: u64, budget: Option<&str>, samples, note: &str| Measurement {
+        name: name.into(),
+        repo: Some("medium".into()),
+        value: mb(bytes),
+        base: None,
+        unit: "MB".into(),
+        budget: budget.map(Into::into),
+        samples,
+        note: Some(note.into()),
+        gated: false,
+    };
+    let mut out = Vec::new();
+    if let Some(b) = peak {
+        out.push(row(
+            "memory_medium",
+            b,
+            Some("memory_medium"),
+            UI_SESSIONS,
+            &format!(
+                "the app's peak resident memory (`VmHWM`) with the medium checkout's review open, map laid out and a scripted session done; indexed beforehand; highest of {UI_SESSIONS} sessions"
+            ),
+        ));
+    }
+    if let Some(b) = first_peak {
+        out.push(row(
+            "memory_medium_first_open",
+            b,
+            None,
+            1,
+            "as memory_medium, but the first open, which indexes the checkout into an empty cache",
+        ));
+    }
+    out
 }
 
 /// A Rust file of `lines` lines, the same every run: functions of ten lines
