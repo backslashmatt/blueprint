@@ -480,9 +480,17 @@ fn calls(src: &[u8], func: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> 
     }
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<Vec<String>> = HashSet::new();
+    // Type-switch aliases waiting for their value to be walked.
+    let mut pending: Vec<(usize, Vec<String>)> = Vec::new();
     walk(body, |n, entering| {
         let kind = n.kind();
         if !entering {
+            if let Some(i) = pending.iter().position(|(id, _)| *id == n.id()) {
+                let (_, names) = pending.swap_remove(i);
+                for name in names {
+                    scopes.bind(name);
+                }
+            }
             // Bindings that take effect after their statement.
             match kind {
                 "short_var_declaration" | "range_clause" | "receive_statement" if defines(n) => {
@@ -530,10 +538,14 @@ fn calls(src: &[u8], func: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> 
                     scopes.bind(name);
                 }
             }
+            // `switch v := x.(type)`: `v` is in scope in the cases, not in
+            // `x`; it is bound when the walk leaves the value.
             "type_switch_statement" => {
                 if let Some(alias) = n.child_by_field_name("alias") {
-                    for name in identifiers(src, alias) {
-                        scopes.bind(name);
+                    let names = identifiers(src, alias);
+                    match n.child_by_field_name("value") {
+                        Some(v) => pending.push((v.id(), names)),
+                        None => names.into_iter().for_each(|m| scopes.bind(m)),
                     }
                 }
             }
@@ -708,38 +720,104 @@ fn atomic(kind: &str) -> bool {
     )
 }
 
+/// Whether a node is a statement or declaration: what `;` and newlines
+/// separate.
+fn is_unit(kind: &str) -> bool {
+    kind.ends_with("_statement")
+        || kind.ends_with("_declaration")
+        || matches!(
+            kind,
+            "field_declaration"
+                | "method_elem"
+                | "type_elem"
+                | "import_spec"
+                | "var_spec"
+                | "const_spec"
+                | "type_spec"
+                | "type_alias"
+        )
+}
+
 /// FNV-1a over the leaf tokens of `roots`, in order, skipping comments and
 /// the subtrees in `skip`, with a separator after each token.
 fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
     let skip: HashSet<usize> = skip.iter().map(Node::id).collect();
     let mut h = FNV_OFFSET;
+    let mut mix = |b: u8| h = (h ^ u64::from(b)).wrapping_mul(FNV_PRIME);
     for root in roots {
-        preorder(*root, |n| {
-            if n.kind() == "comment" || skip.contains(&n.id()) {
-                return false;
+        // One cursor, and the kinds above it: asking a node for its parent
+        // or next sibling walks down from the root, quadratic when deep.
+        let mut cursor = root.walk();
+        let mut above: Vec<&str> = Vec::new();
+        // A comma waits, at its depth, for the next token beside it: it is
+        // hashed only if that is not a closing bracket.
+        let mut comma: Option<usize> = None;
+        loop {
+            let n = cursor.node();
+            let depth = above.len();
+            if comma == Some(depth) && n.kind() != "comment" {
+                comma = None;
+                if !matches!(n.kind(), ")" | "}" | "]") {
+                    mix(b',');
+                    mix(0x1f);
+                }
             }
-            // gofmt's choices: `;` or a newline, and a trailing comma before
-            // a closing bracket, mean the same.
-            if !n.is_named() {
+            let mut descend = !(n.kind() == "comment" || skip.contains(&n.id()));
+            // gofmt's choices mean the same: `;` or a newline between
+            // statements, and a trailing comma before a closing bracket. In
+            // a type parameter list the comma matters (`[P *C,]` is
+            // generic, `[P *C]` an array length), so it stays. What the
+            // separators delimit is hashed instead: a marker opens every
+            // statement and declaration, so `{ x; y }` (two fields) and
+            // `{ x y }` (one) still differ.
+            if descend && !n.is_named() {
                 match n.kind() {
-                    ";" | "\n" => return false,
-                    "," if n
-                        .next_sibling()
-                        .is_none_or(|s| matches!(s.kind(), ")" | "}" | "]")) =>
-                    {
-                        return false;
+                    ";" | "\n" => descend = false,
+                    "," if above.last() != Some(&"type_parameter_list") => {
+                        comma = Some(depth);
+                        descend = false;
                     }
                     _ => {}
                 }
+            } else if descend && is_unit(n.kind()) {
+                mix(0x1e);
             }
-            let whole = atomic(n.kind());
-            if (whole || n.child_count() == 0) && n.end_byte() > n.start_byte() {
-                for b in src[n.byte_range()].iter().chain(std::iter::once(&0x1f)) {
-                    h = (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME);
+            if descend {
+                let whole = atomic(n.kind());
+                if (whole || n.child_count() == 0) && n.end_byte() > n.start_byte() {
+                    for b in &src[n.byte_range()] {
+                        mix(*b);
+                    }
+                    mix(0x1f);
+                }
+                if !whole && cursor.goto_first_child() {
+                    above.push(n.kind());
+                    continue;
                 }
             }
-            !whole
-        });
+            let mut done = false;
+            loop {
+                if cursor.node().id() == root.id() {
+                    done = true;
+                    break;
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                // Nothing follows at this depth: a waiting comma trailed.
+                if comma == Some(above.len()) {
+                    comma = None;
+                }
+                if !cursor.goto_parent() {
+                    done = true;
+                    break;
+                }
+                above.pop();
+            }
+            if done {
+                break;
+            }
+        }
     }
     h
 }
