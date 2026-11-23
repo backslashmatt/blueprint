@@ -1116,8 +1116,8 @@ fn scrolls(action: &str) -> bool {
     )
 }
 
-/// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on the
-/// medium checkout: each row is the worst key of its kind in a session, and
+/// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on one
+/// checkout (medium and large, #173): each row is the worst key of its kind in a session, and
 /// the lowest of those over the sessions is kept (DR 0002). Times end with
 /// the paint of the frame that shows the key: the scene is built, and the
 /// renderer's rasterizing and presenting are not included.
