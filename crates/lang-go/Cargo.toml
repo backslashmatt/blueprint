@@ -1,0 +1,16 @@
+[package]
+name = "blueprint-lang-go"
+description = "Go analyser: L3 types and L4 functions and methods from tree-sitter-go (REQUIREMENTS §3.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blueprint-model.workspace = true
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+
+[lints]
+workspace = true
