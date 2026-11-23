@@ -23,7 +23,10 @@
 //! - **Calls:** `f()`, `pkg.F()`, `x.y.M()` as written, type arguments
 //!   dropped (`F[int]()` is `F`, but `handlers[0]()` is no call); a call
 //!   through a name local where the call is, by Go's lexical scopes, is
-//!   skipped (see [`calls`]). In a method, a call through its receiver is
+//!   skipped: parameters, results and type parameters (the receiver's
+//!   too) everywhere; `:=`, `var`, `const` and local types from their
+//!   statement to the end of their block; a function literal's parameters
+//!   in it. In a method, a call through its receiver is
 //!   written `["self", …]`, whatever the receiver is called, wherever no
 //!   inner binding shadows it.
 //! - **Interfaces:** an element that is a predeclared type (`interface {
