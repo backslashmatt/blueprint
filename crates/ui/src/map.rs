@@ -98,6 +98,23 @@ impl View {
         self.nodes.iter().map(|n| n.id.to_string()).collect()
     }
 
+    /// The order to draw the edges in, as indices into [`View::edges`], each
+    /// with whether it touches `selected`: those that do come last, so that
+    /// they are drawn over the others where they share a channel (#148).
+    #[must_use]
+    pub fn edge_order(&self, selected: Option<usize>) -> Vec<(usize, bool)> {
+        let touches = |e: &MapEdge| selected.is_some_and(|s| e.from == s || e.to == s);
+        let (mut on, off): (Vec<_>, Vec<_>) = self
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i, touches(e)))
+            .partition(|(_, t)| *t);
+        let mut order = off;
+        order.append(&mut on);
+        order
+    }
+
     /// The edges as `(from, to)` index pairs, as the layout takes them.
     #[must_use]
     pub fn pairs(&self) -> Vec<(usize, usize)> {
@@ -597,6 +614,31 @@ mod tests {
 
     fn named<'a>(v: &'a View, name: &str) -> Option<&'a MapNode> {
         v.nodes.iter().find(|n| n.name == name)
+    }
+
+    #[test]
+    fn the_selected_nodes_edges_are_drawn_last_and_marked() {
+        let edge = |from, to| MapEdge {
+            from,
+            to,
+            status: EdgeStatus::Unchanged,
+        };
+        let view = View {
+            edges: vec![edge(0, 1), edge(1, 2), edge(2, 3), edge(3, 1)],
+            ..View::default()
+        };
+        // Nothing selected: every edge in order, none marked.
+        assert_eq!(
+            view.edge_order(None),
+            [(0, false), (1, false), (2, false), (3, false)]
+        );
+        // Node 1: its edges in and out come after the others, marked.
+        assert_eq!(
+            view.edge_order(Some(1)),
+            [(2, false), (0, true), (1, true), (3, true)]
+        );
+        // A selection no edge touches changes nothing.
+        assert_eq!(view.edge_order(Some(9)), view.edge_order(None));
     }
 
     #[test]
