@@ -23,7 +23,7 @@ CI (`.github/workflows/bench.yml`) runs this on every pull request and every pus
 
 ## Installed size
 
-The 50 MB installed-size budget is measured by CI's `package` job (`.github/workflows/ci.yml`, #162, [decision 0016](decisions/0016-unsigned-installers.md)), not by `bp-bench`, because it needs the installer. On Linux the job unpacks the `.deb` and sums its files. On Windows it runs the NSIS installer silently and sums what it installed. Each number goes to the job summary, and the job fails over 50 MB (counting 1 MB as 1,000,000 bytes). First local measurement: the `.deb` installs 37.9 MB.
+The 50 MB installed-size budget is measured by CI's `package` job (`.github/workflows/ci.yml`, #162, [decision 0016](decisions/0016-unsigned-installers.md)), not by `bp-bench`, because it needs the installer. On Linux the job unpacks the `.deb` and sums its files. On Windows it runs the NSIS installer silently and sums what it installed. Each number goes to the job summary, and the job fails over 50 MB (counting 1 MB as 1,000,000 bytes). First measurements (CI, PR #168): the `.deb` installs 37.9 MB, and the NSIS installer (8.6 MB) installs 26.5 MB.
 
 ## Re-index after a one-file change
 

@@ -35,7 +35,7 @@ Measured on Linux, in a release build with `lto = "fat"`:
 ## Measured
 
 - **Linux `.deb`:** installs 37.9 MB (`/usr/bin/blueprint`, a desktop entry, the icon, the licences and 434 KB of notices).
-- **Windows:** measured by CI, and recorded on #162.
+- **Windows NSIS:** the installer is 8.6 MB and installs 26.5 MB (CI, PR #168).
 
 ## Revisit when
 
