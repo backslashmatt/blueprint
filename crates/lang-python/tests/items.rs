@@ -491,3 +491,80 @@ fn class_and_concatenated_docstrings_ignore_reindenting() {
     );
     assert_eq!(c.body_hash, d.body_hash);
 }
+
+// Regressions from the third review (#153).
+
+#[test]
+fn class_scope_rules_hold_in_defaults_bases_and_nested_classes() {
+    for (src, want) in [
+        // A lambda or comprehension in a method's default does not see the class.
+        (
+            "def f():\n class C:\n  x = 1\n  def m(self, a=lambda: x()): pass\n",
+            vec![p(&["x"])],
+        ),
+        (
+            "def f():\n class C:\n  x = 1\n  def m(self, a=[x() for _ in y]): pass\n",
+            vec![p(&["x"])],
+        ),
+        (
+            "def f():\n class C:\n  x = 1\n  ys = [0 for a in [x() for b in c]]\n",
+            vec![p(&["x"])],
+        ),
+        // A class's bases are read outside it.
+        ("def f():\n class C(g()):\n  g = 1\n", vec![p(&["g"])]),
+        // Class scopes do not nest.
+        (
+            "def f():\n class C:\n  x = 1\n  class D:\n   y = x()\n",
+            vec![p(&["x"])],
+        ),
+        // A method's default does see the class.
+        (
+            "def f():\n class C:\n  x = 1\n  def m(self, a=x()): pass\n",
+            vec![],
+        ),
+    ] {
+        assert_eq!(item(src, "f").calls, want, "{src}");
+    }
+}
+
+#[test]
+fn a_comprehension_as_first_iterable_leaves_the_outer_one_intact() {
+    assert!(
+        item(
+            "def f(c):\n return [1 for a in [b for b in c] if a()]\n",
+            "f"
+        )
+        .calls
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_walrus_in_a_default_binds_outside() {
+    assert!(
+        item("def f():\n def g(a=(y := 1)): pass\n y()\n", "f")
+            .calls
+            .is_empty()
+    );
+    assert!(
+        item("def f():\n h = lambda a=(y := 1): 0\n y()\n", "f")
+            .calls
+            .is_empty()
+    );
+}
+
+#[test]
+fn many_names_and_scopes_in_one_class_stay_linear() {
+    let n = 20000;
+    let mut src = "def f():\n class C:\n".to_owned();
+    for i in 0..n {
+        src.push_str(&format!("  a{i} = lambda: 0\n"));
+    }
+    for i in 0..n {
+        src.push_str(&format!("  def m{i}(self): pass\n"));
+    }
+    let t = std::time::Instant::now();
+    let _ = py(&src);
+    // Was minutes; generous for debug builds on CI.
+    assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+}

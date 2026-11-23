@@ -545,86 +545,117 @@ fn is_scope(kind: &str) -> bool {
     )
 }
 
+/// One scope in a function: the function itself, or a `def`, lambda,
+/// class or comprehension inside it.
+#[derive(Default)]
+struct Scope {
+    /// The scope it is written in; `None` for the function.
+    parent: Option<usize>,
+    class: bool,
+    comprehension: bool,
+    bound: HashSet<String>,
+    globals: HashSet<String>,
+}
+
+/// The parts of a scope node that Python evaluates in the scope around it:
+/// a def's parameters (defaults, annotations) and return annotation, a
+/// lambda's parameters, a class's bases, a comprehension's first iterable.
+fn outer_parts(n: Node<'_>) -> Vec<usize> {
+    match n.kind() {
+        "function_definition" => ["parameters", "return_type"]
+            .iter()
+            .filter_map(|f| n.child_by_field_name(f))
+            .map(|c| c.id())
+            .collect(),
+        "lambda" => n
+            .child_by_field_name("parameters")
+            .map(|c| c.id())
+            .into_iter()
+            .collect(),
+        "class_definition" => n
+            .child_by_field_name("superclasses")
+            .map(|c| c.id())
+            .into_iter()
+            .collect(),
+        k if is_comprehension(k) => named_children(n)
+            .into_iter()
+            .find(|c| c.kind() == "for_in_clause")
+            .and_then(|f| f.child_by_field_name("right"))
+            .map(|c| c.id())
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Walks `body` calling `f(node, entering, scope)`, where `scope` is the
+/// scope the node is evaluated in: a scope node's outer parts are in the
+/// scope around it, the rest of it in itself.
+fn scoped_walk<'t>(
+    body: Node<'t>,
+    root: usize,
+    mut f: impl FnMut(Node<'t>, bool, usize, Option<usize>),
+) {
+    // The current scope, and per open node how many entries it pushed.
+    let mut current: Vec<usize> = vec![root];
+    let mut pushed: Vec<u8> = Vec::new();
+    // Outer parts of the open scope nodes, with the scope around each.
+    let mut outer: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    walk(body, |n, entering| {
+        if entering {
+            let mut count = 0;
+            if let Some(&around) = outer.get(&n.id()) {
+                current.push(around);
+                count += 1;
+            }
+            let here = *current.last().unwrap_or(&root);
+            if is_scope(n.kind()) {
+                // A scope's parent is where it is written.
+                f(n, true, here, Some(here));
+                for part in outer_parts(n) {
+                    outer.insert(part, here);
+                }
+                current.push(n.id());
+                count += 1;
+            } else {
+                f(n, true, here, None);
+            }
+            pushed.push(count);
+        } else {
+            for _ in 0..pushed.pop().unwrap_or(0) {
+                current.pop();
+            }
+            outer.remove(&n.id());
+            f(n, false, *current.last().unwrap_or(&root), None);
+        }
+    });
+}
+
 /// The paths a function's body calls, in source order, without repeats.
-///
-/// Names are scoped as in Python: a nested `def`'s or a lambda's
-/// parameters, and a comprehension's variables, are local to it only.
 fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> Vec<Vec<String>> {
     use std::collections::HashMap;
-    // The names each scope binds, and those it declares `global`, by the
-    // scope's node; the function's own scope is `def`.
-    let mut bound: HashMap<usize, HashSet<String>> = HashMap::new();
-    let mut globals: HashMap<usize, HashSet<String>> = HashMap::new();
+    let root = def.id();
+    let mut scopes: HashMap<usize, Scope> = HashMap::new();
+    let mut own = Scope::default();
+    bind_signature(src, def, &mut own.bound);
+    scopes.insert(root, own);
     let mut outward: Vec<(usize, String)> = Vec::new();
-    let mut own = HashSet::new();
-    bind_signature(src, def, &mut own);
-    bound.insert(def.id(), own);
-    let mut stack: Vec<(usize, bool)> = vec![(def.id(), false)];
-    walk(body, |n, entering| {
+    scoped_walk(body, root, |n, entering, here, parent| {
         if !entering {
-            if is_scope(n.kind()) {
-                stack.pop();
-            }
             return;
         }
-        let top = stack.last().map_or(def.id(), |s| s.0);
-        let mut add = |scope: usize, names: HashSet<String>| {
-            bound.entry(scope).or_default().extend(names);
-        };
-        match n.kind() {
-            "assignment" | "augmented_assignment" | "for_statement" => {
-                if let Some(left) = n.child_by_field_name("left") {
-                    let mut names = HashSet::new();
-                    bind_target(src, left, &mut names);
-                    add(top, names);
-                }
-            }
-            // `(x := …)` binds in the nearest scope that is not a
-            // comprehension (PEP 572).
-            "named_expression" => {
-                let scope = stack.iter().rev().find(|s| !s.1).map_or(def.id(), |s| s.0);
-                add(scope, field_text(src, n, "name").into_iter().collect());
-            }
-            // `with … as f`, `except E as e`.
-            "as_pattern_target" => {
-                let mut names = HashSet::new();
-                bind_target(src, n, &mut names);
-                add(top, names);
-            }
-            "case_clause" => {
-                let mut names = HashSet::new();
-                for c in named_children(n) {
-                    if c.kind() == "case_pattern" {
-                        bind_captures(src, c, &mut names);
-                    }
-                }
-                add(top, names);
-            }
-            "global_statement" => {
-                for c in named_children(n) {
-                    let name = text(src, c);
-                    globals.entry(top).or_default().insert(name.clone());
-                    outward.push((top, name));
-                }
-            }
-            "nonlocal_statement" => {
-                for c in named_children(n) {
-                    outward.push((top, text(src, c)));
-                }
-            }
-            _ => {}
-        }
-        if is_scope(n.kind()) {
-            // A `def` or `class` binds its name where it is written.
-            if matches!(n.kind(), "function_definition" | "class_definition") {
-                add(top, field_text(src, n, "name").into_iter().collect());
-            }
-            let mut inner = HashSet::new();
+        if let Some(parent) = parent {
+            let mut scope = Scope {
+                parent: Some(parent),
+                class: n.kind() == "class_definition",
+                comprehension: is_comprehension(n.kind()),
+                ..Scope::default()
+            };
             match n.kind() {
-                "function_definition" => bind_signature(src, n, &mut inner),
+                "function_definition" => bind_signature(src, n, &mut scope.bound),
                 "lambda" => {
                     if let Some(p) = n.child_by_field_name("parameters") {
-                        bind_params(src, p, &mut inner);
+                        bind_params(src, p, &mut scope.bound);
                     }
                 }
                 "class_definition" => {}
@@ -634,74 +665,102 @@ fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> V
                         if c.kind() == "for_in_clause"
                             && let Some(left) = c.child_by_field_name("left")
                         {
-                            bind_target(src, left, &mut inner);
+                            bind_target(src, left, &mut scope.bound);
                         }
                     }
                 }
             }
-            add(n.id(), inner);
-            stack.push((n.id(), is_comprehension(n.kind())));
+            scopes.insert(n.id(), scope);
+            // A `def` or `class` binds its name where it is written.
+            if matches!(n.kind(), "function_definition" | "class_definition")
+                && let Some(name) = field_text(src, n, "name")
+            {
+                scopes.entry(parent).or_default().bound.insert(name);
+            }
+            return;
+        }
+        let mut names = HashSet::new();
+        let mut target = here;
+        match n.kind() {
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                if let Some(left) = n.child_by_field_name("left") {
+                    bind_target(src, left, &mut names);
+                }
+            }
+            // `(x := …)` binds in the nearest scope that is not a
+            // comprehension (PEP 572).
+            "named_expression" => {
+                names.extend(field_text(src, n, "name"));
+                let mut steps = 0;
+                while let Some(s) = scopes.get(&target)
+                    && s.comprehension
+                    && let Some(p) = s.parent
+                    && steps < MAX_DEPTH
+                {
+                    target = p;
+                    steps += 1;
+                }
+            }
+            // `with … as f`, `except E as e`.
+            "as_pattern_target" => bind_target(src, n, &mut names),
+            "case_clause" => {
+                for c in named_children(n) {
+                    if c.kind() == "case_pattern" {
+                        bind_captures(src, c, &mut names);
+                    }
+                }
+            }
+            "global_statement" => {
+                for c in named_children(n) {
+                    let name = text(src, c);
+                    scopes.entry(here).or_default().globals.insert(name.clone());
+                    outward.push((here, name));
+                }
+            }
+            "nonlocal_statement" => {
+                for c in named_children(n) {
+                    outward.push((here, text(src, c)));
+                }
+            }
+            _ => {}
+        }
+        if !names.is_empty() {
+            scopes.entry(target).or_default().bound.extend(names);
         }
     });
     // `global x` and `nonlocal x` refer outwards: not the scope's own.
     for (scope, name) in outward {
-        if let Some(set) = bound.get_mut(&scope) {
-            set.remove(&name);
+        if let Some(s) = scopes.get_mut(&scope) {
+            s.bound.remove(&name);
         }
     }
-    if let (Some(r), Some(set)) = (receiver, bound.get_mut(&def.id())) {
-        set.remove(r);
+    if let (Some(r), Some(s)) = (receiver, scopes.get_mut(&root)) {
+        s.bound.remove(r);
     }
-
-    let mut r = Resolver {
-        bound: &bound,
-        globals: &globals,
-        names: HashMap::new(),
-        frames: Vec::new(),
+    // Python's lookup: the scope itself, then the functions it is written
+    // in; a class's names are seen only from its own body. Scopes nested
+    // deeper than MAX_DEPTH are not searched, so a lookup is bounded.
+    let is_local = |name: &str, from: usize| {
+        let mut cur = Some(from);
+        for step in 0..MAX_DEPTH {
+            let Some(s) = cur.and_then(|c| scopes.get(&c)) else {
+                return false;
+            };
+            if step == 0 || !s.class {
+                if s.globals.contains(name) {
+                    return false;
+                }
+                if s.bound.contains(name) {
+                    return true;
+                }
+            }
+            cur = s.parent;
+        }
+        false
     };
-    r.push(def.id(), false);
-    // The parts of a scope evaluated in the scope around it: a def's
-    // parameters (their defaults and annotations) and return annotation,
-    // a lambda's parameters, a comprehension's first iterable.
-    let mut outer_parts: HashSet<usize> = HashSet::new();
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<Vec<String>> = HashSet::new();
-    walk(body, |n, entering| {
-        if outer_parts.contains(&n.id()) {
-            // The innermost frame is the scope this part belongs to.
-            if entering {
-                r.deactivate_top();
-            } else {
-                r.activate_top();
-            }
-        }
-        if is_scope(n.kind()) {
-            if entering {
-                r.push(n.id(), n.kind() == "class_definition");
-                match n.kind() {
-                    "function_definition" => {
-                        outer_parts.extend(n.child_by_field_name("parameters").map(|c| c.id()));
-                        outer_parts.extend(n.child_by_field_name("return_type").map(|c| c.id()));
-                    }
-                    "lambda" => {
-                        outer_parts.extend(n.child_by_field_name("parameters").map(|c| c.id()));
-                    }
-                    k if is_comprehension(k) => {
-                        let first = named_children(n)
-                            .into_iter()
-                            .find(|c| c.kind() == "for_in_clause");
-                        outer_parts.extend(
-                            first
-                                .and_then(|f| f.child_by_field_name("right"))
-                                .map(|c| c.id()),
-                        );
-                    }
-                    _ => {}
-                }
-            } else {
-                r.pop();
-            }
-        }
+    scoped_walk(body, root, |n, entering, here, _| {
         if !entering || n.kind() != "call" {
             return;
         }
@@ -712,7 +771,7 @@ fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> V
             return;
         };
         let first = path.first().cloned().unwrap_or_default();
-        let keep = if r.is_local(&first) {
+        let keep = if is_local(&first, here) {
             false
         } else if Some(first.as_str()) == receiver {
             // Only a member of the receiver is a call: `self()` is not.
@@ -737,122 +796,6 @@ fn is_comprehension(kind: &str) -> bool {
             | "dictionary_comprehension"
             | "generator_expression"
     )
-}
-
-/// One scope on the resolver's stack.
-struct Frame {
-    id: usize,
-    class: bool,
-    active: bool,
-    /// The class frames this scope hides while it is active: a class's
-    /// names are not visible in the functions and comprehensions inside it.
-    hides: Vec<usize>,
-}
-
-/// Python name lookup over the scopes the walk is in. Each name keeps the
-/// frames that bind it (`true`) or declare it `global` (`false`), innermost
-/// last, so a lookup is O(1) however deep the scopes nest.
-struct Resolver<'a> {
-    bound: &'a std::collections::HashMap<usize, HashSet<String>>,
-    globals: &'a std::collections::HashMap<usize, HashSet<String>>,
-    names: std::collections::HashMap<String, Vec<(usize, bool)>>,
-    frames: Vec<Frame>,
-}
-
-impl Resolver<'_> {
-    fn is_local(&self, name: &str) -> bool {
-        self.names
-            .get(name)
-            .and_then(|v| v.last())
-            .is_some_and(|e| e.1)
-    }
-
-    fn push(&mut self, id: usize, class: bool) {
-        self.frames.push(Frame {
-            id,
-            class,
-            active: false,
-            hides: Vec::new(),
-        });
-        self.activate_top();
-    }
-
-    fn pop(&mut self) {
-        self.deactivate_top();
-        self.frames.pop();
-    }
-
-    fn activate_top(&mut self) {
-        let Some(i) = self.frames.len().checked_sub(1) else {
-            return;
-        };
-        if self.frames[i].active {
-            return;
-        }
-        let id = self.frames[i].id;
-        // Hide the class frames right around a function or comprehension;
-        // those further out are already hidden by the scope that holds them.
-        let mut hides = Vec::new();
-        if !self.frames[i].class {
-            for j in (0..i).rev() {
-                if !self.frames[j].class {
-                    break;
-                }
-                if self.frames[j].active {
-                    hides.push(self.frames[j].id);
-                    self.frames[j].active = false;
-                    self.unregister(self.frames[j].id);
-                }
-            }
-        }
-        self.register(id);
-        let f = &mut self.frames[i];
-        f.active = true;
-        f.hides = hides;
-    }
-
-    fn deactivate_top(&mut self) {
-        let Some(i) = self.frames.len().checked_sub(1) else {
-            return;
-        };
-        if !self.frames[i].active {
-            return;
-        }
-        let id = self.frames[i].id;
-        self.unregister(id);
-        self.frames[i].active = false;
-        let hides = std::mem::take(&mut self.frames[i].hides);
-        // Shown again innermost-last, in stack order.
-        for h in hides.into_iter().rev() {
-            if let Some(j) = self.frames.iter().rposition(|f| f.id == h) {
-                self.frames[j].active = true;
-                self.register(h);
-            }
-        }
-    }
-
-    fn register(&mut self, id: usize) {
-        for (set, binds) in [(self.bound.get(&id), true), (self.globals.get(&id), false)] {
-            for name in set.into_iter().flatten() {
-                self.names
-                    .entry(name.clone())
-                    .or_default()
-                    .push((id, binds));
-            }
-        }
-    }
-
-    fn unregister(&mut self, id: usize) {
-        for set in [self.bound.get(&id), self.globals.get(&id)] {
-            for name in set.into_iter().flatten() {
-                if let Some(v) = self.names.get_mut(name)
-                    && let Some(k) = v.iter().rposition(|e| e.0 == id)
-                {
-                    v.remove(k);
-                }
-            }
-        }
-    }
 }
 
 /// Adds the names a function's parameters and type parameters bind.
