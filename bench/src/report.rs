@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::budgets::{BUDGETS, budget};
+use crate::budgets::{BUDGETS, Budget, MEASURED_ELSEWHERE, budget};
 
 /// Format version of [`Report`] JSON.
 pub const SCHEMA: u32 = 2;
@@ -186,7 +186,8 @@ pub fn markdown(report: &Report) -> String {
             m.note.as_deref().unwrap_or("")
         ));
     }
-    let pending: Vec<_> = BUDGETS
+    let elsewhere = |id: &str| MEASURED_ELSEWHERE.iter().find(|(e, _)| *e == id);
+    let (other, pending): (Vec<&Budget>, Vec<&Budget>) = BUDGETS
         .iter()
         .filter(|b| {
             !report
@@ -194,11 +195,21 @@ pub fn markdown(report: &Report) -> String {
                 .iter()
                 .any(|m| m.budget.as_deref() == Some(b.id))
         })
-        .collect();
+        .partition(|b| elsewhere(b.id).is_some());
     if !pending.is_empty() {
         out.push_str("\n§4 budgets not yet measurable (the operation does not exist yet):\n\n");
         for b in pending {
             out.push_str(&format!("- {} — {} {}\n", b.operation, b.limit, b.unit));
+        }
+    }
+    if !other.is_empty() {
+        out.push_str("\n§4 budgets measured outside bp-bench:\n\n");
+        for b in other {
+            let by = elsewhere(b.id).map_or("", |(_, by)| *by);
+            out.push_str(&format!(
+                "- {} — {} {}: {by}\n",
+                b.operation, b.limit, b.unit
+            ));
         }
     }
     out
@@ -297,6 +308,19 @@ mod tests {
         assert!(!md.contains("- Architectural diff"));
         let r = report(vec![m(1.1, Some(1.0), "ms", None)], Some("abc"));
         assert!(markdown(&r).contains("+10.0% | — | **regressed**"));
+    }
+
+    #[test]
+    fn budgets_measured_elsewhere_are_not_called_unmeasurable() {
+        let md = markdown(&report(Vec::new(), None));
+        let (pending, elsewhere) = md
+            .split_once("measured outside bp-bench")
+            .unwrap_or((md.as_str(), ""));
+        assert!(!pending.contains("- Installed size"), "{md}");
+        assert!(
+            elsewhere.contains("- Installed size — 50 MB: by CI's `package` job"),
+            "{md}"
+        );
     }
 
     #[test]
