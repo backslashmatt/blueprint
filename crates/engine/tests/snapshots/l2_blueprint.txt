@@ -131,6 +131,7 @@ nodes:
   L2:cargo:xtask#layering/tests  Module  "layering::tests"  Exact  xtask/src/layering.rs  Private
   L2:cargo:xtask#tests%2F  Directory  "tests/"  Unknown  xtask/tests
   L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
+  L2:unowned:#packaging%2F  Directory  "packaging/"  Unknown  packaging
 edges:
   L1:cargo:bench# -> L1:cargo:crates/engine#  DependsOn  Exact  {Normal}
   L1:cargo:bench# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}

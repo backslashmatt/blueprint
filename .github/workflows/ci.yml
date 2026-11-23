@@ -197,6 +197,7 @@ jobs:
         if: runner.os == 'Linux'
         run: strip target/release/blueprint
       - name: Install cargo-packager and cargo-about
+        shell: bash
         run: |
           cargo install cargo-packager --version 0.11.8 --locked
           cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --locked --features cli
