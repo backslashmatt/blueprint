@@ -231,8 +231,12 @@ pub enum Response {
     /// The answer to [`Request::FileDiff`]: first plain
     /// ([`Detail::Coarse`]), then highlighted ([`Detail::Full`]).
     FileDiff {
-        /// The file.
+        /// The file shown. For a directory, its first changed file.
         path: String,
+        /// For a directory (a node shown by directory, §3.4): every file
+        /// under it that changed, sorted, so that a front end can step
+        /// through them (#169). Empty for a file.
+        files: Vec<String>,
         /// Whether this answer is highlighted.
         detail: Detail,
         /// Its diff; a side is empty where the file does not exist.

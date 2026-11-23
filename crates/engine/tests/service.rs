@@ -271,9 +271,10 @@ fn open_refs_diff_and_source() {
         })
         .collect();
     assert_eq!(details, vec![Detail::Coarse, Detail::Full], "plain first");
-    let Response::FileDiff { diff, .. } = &r[1] else {
+    let Response::FileDiff { diff, files, .. } = &r[1] else {
         unreachable!()
     };
+    assert!(files.is_empty(), "a file's answer lists no files");
     assert_eq!(diff.base.lines, vec!["pub fn g() {}"]);
     assert_eq!(diff.head.lines.len(), 3);
     assert!(
@@ -300,10 +301,16 @@ fn open_refs_diff_and_source() {
         },
     );
     let r = until_last(&rx, 9, &mut others);
-    let Response::FileDiff { path, diff, .. } = &r[1] else {
+    let Response::FileDiff {
+        path, diff, files, ..
+    } = &r[1]
+    else {
         panic!("no file diff for a directory: {r:?}");
     };
     assert_eq!(path, "b/src/lib.rs");
+    // The directory's changed files, so the code view can step through
+    // them (#169); a file's answer lists none.
+    assert_eq!(files, &["b/src/lib.rs"]);
     assert_eq!(diff.base.lines, vec!["pub fn g() {}"]);
     assert!(others.is_empty(), "no stray replies: {others:?}");
 }

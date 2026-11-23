@@ -92,11 +92,14 @@ The **outline** (#117, §5.5) is the map as a tree, its non-visual equivalent wi
 
 Opening a node's code (#93) shows its file's diff side by side, base on the left and head on the right, scrolled to the node's lines (base's, for a node that is only in base). Removed lines are tinted red and added ones green; a changed line is tinted on both sides. The plain diff comes first, and the colours follow once the engine has highlighted the file (`open_50k_file`: 8 ms at 50,000 lines before highlighting). Only the rows on screen are drawn.
 
+A node shown by directory (files no analyser reads, §3.4) opens the diff of its first changed file. The header says which of the directory's changed files it is ("file 1 of 3"), and `]` and `[` (or `j` and `k`, on layouts where brackets need AltGr or Option) step through the others (#169). The engine reads only that directory's part of the change to list them. `r` still marks the directory's node, so step through its files before marking it.
+
 | Key | Action |
 |---|---|
 | ↑ ↓ PgUp PgDn Home End | Move |
 | ← → | Scroll both sides sideways, for lines wider than their half |
 | `n` `p` | Next or previous change |
+| `]` `[`, or `j` `k` | Next or previous changed file, in a directory's code |
 | `r` | Mark the node whose code this is reviewed, or not (see Review state) |
 | Backspace, Esc | Back to the map |
 

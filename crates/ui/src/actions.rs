@@ -292,6 +292,21 @@ pub const ACTIONS: &[ActionDef] = &[
         &["p"],
     ),
     a(
+        "code.next_file",
+        "Code: next changed file of the directory",
+        Scope::Code,
+        // `]` and `[` need AltGr or Option on some layouts (German,
+        // macOS), which GPUI reports with a modifier; letters are unshifted
+        // on every layout.
+        &["]", "j"],
+    ),
+    a(
+        "code.previous_file",
+        "Code: previous changed file of the directory",
+        Scope::Code,
+        &["[", "k"],
+    ),
+    a(
         "code.scroll_left",
         "Code: scroll left",
         Scope::Code,
@@ -576,6 +591,14 @@ mod tests {
     fn narrower_scopes_win() {
         let code = [Scope::Code, Scope::Review, Scope::Global];
         assert_eq!(for_key(&code, "escape").map(|a| a.id), Some("code.close"));
+        // A directory's files: brackets, or Shift+N and Shift+P (#169).
+        assert_eq!(for_key(&code, "]").map(|a| a.id), Some("code.next_file"));
+        assert_eq!(for_key(&code, "j").map(|a| a.id), Some("code.next_file"));
+        assert_eq!(
+            for_key(&code, "k").map(|a| a.id),
+            Some("code.previous_file")
+        );
+        assert_eq!(for_key(&code, "n").map(|a| a.id), Some("code.next_change"));
         let map = [Scope::Map, Scope::Review, Scope::Global];
         assert_eq!(for_key(&map, "escape").map(|a| a.id), Some("review.back"));
         assert_eq!(for_key(&map, "f1").map(|a| a.id), Some("global.palette"));
