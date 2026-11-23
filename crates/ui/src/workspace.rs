@@ -2244,7 +2244,7 @@ fn code_view(
     };
     // A directory's node: which of its changed files this is (#169).
     let files = code.file_position().map_or(String::new(), |(k, n)| {
-        format!(", file {k} of {n}; ] [ next or previous file")
+        format!(", file {k} of {n}; ] [ or j k next or previous file")
     });
     let header = div().child(format!(
         "{} — {} ({state}{files}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, r mark ✓ reviewed, Backspace back to the map.",

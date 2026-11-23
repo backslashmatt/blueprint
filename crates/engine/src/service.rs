@@ -400,6 +400,9 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                     .map_err(|e| e.to_string())?
                     .into_iter()
                     .filter_map(|(p, _, _)| String::from_utf8(p).ok())
+                    // Only paths the engine can open: one it rejects would
+                    // otherwise fail the directory when it came first.
+                    .filter(|p| RepoPath::parse(p).is_ok())
                     .collect();
                 let Some(first) = files.first() else {
                     return Err(format!("{path}: in neither commit"));
