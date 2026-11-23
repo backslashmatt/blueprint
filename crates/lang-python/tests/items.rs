@@ -568,3 +568,35 @@ fn many_names_and_scopes_in_one_class_stay_linear() {
     // Was minutes; generous for debug builds on CI.
     assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
 }
+
+// Regressions from the fourth review (#153).
+
+#[test]
+fn type_parameters_are_seen_where_python_sees_them() {
+    for src in [
+        "def f():\n class C[T]:\n  x = T()\n",
+        "def f():\n class C[T]:\n  def m(self): return T()\n",
+        "def f():\n class C[T](B[T]):\n  def m(self): T.x()\n",
+        "def f():\n class C[T](T.base()):\n  pass\n",
+        "def f():\n def g[T](a: T.x()) -> T.y(): pass\n",
+        "def f():\n type X = int\n X()\n",
+    ] {
+        assert!(
+            item(src, "f").calls.is_empty(),
+            "{src}: {:?}",
+            item(src, "f").calls
+        );
+    }
+    // A default is outside the type-parameter scope.
+    assert_eq!(
+        item("def f():\n def g[T](x=T()): pass\n", "f").calls,
+        vec![p(&["T"])]
+    );
+    // A module-level generic class's methods, and its nested classes'.
+    let f = py(
+        "class C[T]:\n def m(self): return T()\n class D:\n  def n(self): return T()\nclass E:\n def o(self): return T()\n",
+    );
+    assert!(by_name(&f, "m").calls.is_empty());
+    assert!(by_name(&f, "n").calls.is_empty());
+    assert_eq!(by_name(&f, "o").calls, vec![p(&["T"])]);
+}

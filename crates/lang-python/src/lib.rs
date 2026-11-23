@@ -34,7 +34,9 @@
 //!   `def`'s, lambda's or comprehension's names are local only inside it,
 //!   while its defaults, annotations and first iterable are read outside
 //!   it; a walrus binds in the nearest function; a class body's names are
-//!   not seen by the functions inside it; `global x` makes `x` not local.
+//!   not seen by the functions inside it; a generic class's or def's type
+//!   parameters are seen from its body, methods, annotations and bases
+//!   (PEP 695); `global x` makes `x` not local.
 //!   In a method, a call through its first parameter (`self`, `cls`) is
 //!   written `["self", …]`, whatever the parameter is called; a
 //!   `@staticmethod` has no such parameter.
@@ -83,6 +85,10 @@ impl LanguageAnalyser for Python {
     }
 }
 
+/// A statement list to read: its classes, depth, and the type parameters
+/// of the classes around it.
+type Work<'t> = (Node<'t>, Vec<String>, usize, Vec<String>);
+
 struct Out<'s> {
     src: &'s [u8],
     items: Vec<(usize, Item)>,
@@ -109,10 +115,10 @@ pub fn analyse(src: &[u8]) -> FileFacts {
         references: Vec::new(),
     };
     // (a statement list, the classes it is in, how deep it is)
-    let mut work: Vec<(Node<'_>, Vec<String>, usize)> = vec![(root, Vec::new(), 0)];
-    while let Some((list, classes, depth)) = work.pop() {
+    let mut work: Vec<Work<'_>> = vec![(root, Vec::new(), 0, Vec::new())];
+    while let Some((list, classes, depth, tparams)) = work.pop() {
         for node in named_children(list) {
-            out.statement(node, &classes, depth, &mut work);
+            out.statement(node, &classes, &tparams, depth, &mut work);
         }
     }
     out.imports(root);
@@ -158,19 +164,20 @@ impl Out<'_> {
         &mut self,
         node: Node<'t>,
         classes: &[String],
+        tparams: &[String],
         depth: usize,
-        work: &mut Vec<(Node<'t>, Vec<String>, usize)>,
+        work: &mut Vec<Work<'t>>,
     ) {
         if depth >= MAX_DEPTH {
             return;
         }
         let def = definition(node);
         match def.kind() {
-            "class_definition" => self.class(node, def, classes, depth, work),
-            "function_definition" => self.function(node, def, classes),
+            "class_definition" => self.class(node, def, classes, tparams, depth, work),
+            "function_definition" => self.function(node, def, classes, tparams),
             "type_alias_statement" if classes.is_empty() => self.alias(node),
             // A block's statements, read as the module's (or class's).
-            "block" => work.push((def, classes.to_vec(), depth + 1)),
+            "block" => work.push((def, classes.to_vec(), depth + 1, tparams.to_vec())),
             // Statements that hold definitions conditionally: their
             // definitions are still the module's (or class's). Their
             // blocks and clauses are read as lists of statements.
@@ -197,12 +204,12 @@ impl Out<'_> {
                             | "finally_clause"
                             | "case_clause"
                     ) {
-                        work.push((c, classes.to_vec(), depth + 1));
+                        work.push((c, classes.to_vec(), depth + 1, tparams.to_vec()));
                     }
                 }
             }
             // Parser recovery: what it could read is inside.
-            "ERROR" => work.push((node, classes.to_vec(), depth + 1)),
+            "ERROR" => work.push((node, classes.to_vec(), depth + 1, tparams.to_vec())),
             _ => {}
         }
     }
@@ -212,8 +219,9 @@ impl Out<'_> {
         outer: Node<'t>,
         node: Node<'t>,
         classes: &[String],
+        tparams: &[String],
         depth: usize,
-        work: &mut Vec<(Node<'t>, Vec<String>, usize)>,
+        work: &mut Vec<Work<'t>>,
     ) {
         let src = self.src;
         let Some(name) = field_text(src, node, "name") else {
@@ -294,11 +302,19 @@ impl Out<'_> {
         };
         self.items.push((outer.start_byte(), item));
         if let Some(b) = block {
-            work.push((b, path, depth + 1));
+            // `class C[T]`: its body and methods see `T`.
+            let inner = [tparams.to_vec(), type_param_names(src, node)].concat();
+            work.push((b, path, depth + 1, inner));
         }
     }
 
-    fn function(&mut self, outer: Node<'_>, node: Node<'_>, classes: &[String]) {
+    fn function(
+        &mut self,
+        outer: Node<'_>,
+        node: Node<'_>,
+        classes: &[String],
+        tparams: &[String],
+    ) {
         let src = self.src;
         let Some(name) = field_text(src, node, "name") else {
             return;
@@ -347,7 +363,7 @@ impl Out<'_> {
             signature_hash: hash(src, &[outer], &skip),
             body_hash: block.map(|b| hash(src, &[b], &[])),
             calls: block
-                .map(|b| calls(src, node, b, receiver.as_deref()))
+                .map(|b| calls(src, node, b, receiver.as_deref(), tparams))
                 .unwrap_or_default(),
         };
         self.items.push((outer.start_byte(), item));
@@ -557,35 +573,69 @@ struct Scope {
     globals: HashSet<String>,
 }
 
-/// The parts of a scope node that Python evaluates in the scope around it:
-/// a def's parameters (defaults, annotations) and return annotation, a
-/// lambda's parameters, a class's bases, a comprehension's first iterable.
-fn outer_parts(n: Node<'_>) -> Vec<usize> {
+/// Where a part of a scope node is evaluated, when not in the scope itself.
+#[derive(Clone, Copy)]
+enum Part {
+    /// In the scope around it: a def's parameters (their defaults), a
+    /// lambda's parameters, a class's bases when it has no type parameters,
+    /// a comprehension's first iterable.
+    Around,
+    /// In the def's or class's type-parameter scope (PEP 695): its
+    /// annotations, return annotation and bases.
+    TypeParams,
+}
+
+/// The parts of a scope node that Python evaluates outside its body.
+fn outer_parts(n: Node<'_>) -> Vec<(usize, Part)> {
+    let generic = n.child_by_field_name("type_parameters").is_some();
+    let typed = if generic {
+        Part::TypeParams
+    } else {
+        Part::Around
+    };
+    let mut out = Vec::new();
     match n.kind() {
-        "function_definition" => ["parameters", "return_type"]
-            .iter()
-            .filter_map(|f| n.child_by_field_name(f))
-            .map(|c| c.id())
-            .collect(),
-        "lambda" => n
-            .child_by_field_name("parameters")
-            .map(|c| c.id())
-            .into_iter()
-            .collect(),
-        "class_definition" => n
-            .child_by_field_name("superclasses")
-            .map(|c| c.id())
-            .into_iter()
-            .collect(),
-        k if is_comprehension(k) => named_children(n)
-            .into_iter()
-            .find(|c| c.kind() == "for_in_clause")
-            .and_then(|f| f.child_by_field_name("right"))
-            .map(|c| c.id())
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
+        "function_definition" => {
+            if let Some(params) = n.child_by_field_name("parameters") {
+                out.push((params.id(), Part::Around));
+                if generic {
+                    for p in named_children(params) {
+                        out.extend(
+                            p.child_by_field_name("type")
+                                .map(|t| (t.id(), Part::TypeParams)),
+                        );
+                    }
+                }
+            }
+            out.extend(
+                n.child_by_field_name("return_type")
+                    .map(|c| (c.id(), typed)),
+            );
+        }
+        "lambda" => out.extend(
+            n.child_by_field_name("parameters")
+                .map(|c| (c.id(), Part::Around)),
+        ),
+        "class_definition" => out.extend(
+            n.child_by_field_name("superclasses")
+                .map(|c| (c.id(), typed)),
+        ),
+        k if is_comprehension(k) => out.extend(
+            named_children(n)
+                .into_iter()
+                .find(|c| c.kind() == "for_in_clause")
+                .and_then(|f| f.child_by_field_name("right"))
+                .map(|c| (c.id(), Part::Around)),
+        ),
+        _ => {}
     }
+    out
+}
+
+/// The id of a generic def's or class's type-parameter scope: its
+/// `type_parameters` node.
+fn type_param_scope(n: Node<'_>) -> Option<usize> {
+    n.child_by_field_name("type_parameters").map(|t| t.id())
 }
 
 /// Walks `body` calling `f(node, entering, scope)`, where `scope` is the
@@ -612,8 +662,12 @@ fn scoped_walk<'t>(
             if is_scope(n.kind()) {
                 // A scope's parent is where it is written.
                 f(n, true, here, Some(here));
-                for part in outer_parts(n) {
-                    outer.insert(part, here);
+                for (part, at) in outer_parts(n) {
+                    let scope = match (at, type_param_scope(n)) {
+                        (Part::TypeParams, Some(tp)) => tp,
+                        _ => here,
+                    };
+                    outer.insert(part, scope);
                 }
                 current.push(n.id());
                 count += 1;
@@ -632,12 +686,30 @@ fn scoped_walk<'t>(
 }
 
 /// The paths a function's body calls, in source order, without repeats.
-fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> Vec<Vec<String>> {
+fn calls(
+    src: &[u8],
+    def: Node<'_>,
+    body: Node<'_>,
+    receiver: Option<&str>,
+    outer_type_params: &[String],
+) -> Vec<Vec<String>> {
     use std::collections::HashMap;
     let root = def.id();
     let mut scopes: HashMap<usize, Scope> = HashMap::new();
     let mut own = Scope::default();
     bind_signature(src, def, &mut own.bound);
+    // A method of `class C[T]`: `T` is seen from it. Node ids are
+    // addresses, so `usize::MAX` is no node's.
+    if !outer_type_params.is_empty() {
+        own.parent = Some(usize::MAX);
+        scopes.insert(
+            usize::MAX,
+            Scope {
+                bound: outer_type_params.iter().cloned().collect(),
+                ..Scope::default()
+            },
+        );
+    }
     scopes.insert(root, own);
     let mut outward: Vec<(usize, String)> = Vec::new();
     scoped_walk(body, root, |n, entering, here, parent| {
@@ -645,6 +717,22 @@ fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> V
             return;
         }
         if let Some(parent) = parent {
+            // A generic def or class sits in a scope of its type parameters.
+            let parent = match type_param_scope(n) {
+                Some(tp) => {
+                    let names = type_param_names(src, n);
+                    scopes.insert(
+                        tp,
+                        Scope {
+                            parent: Some(parent),
+                            bound: names.into_iter().collect(),
+                            ..Scope::default()
+                        },
+                    );
+                    tp
+                }
+                None => parent,
+            };
             let mut scope = Scope {
                 parent: Some(parent),
                 class: n.kind() == "class_definition",
@@ -675,7 +763,7 @@ fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> V
             if matches!(n.kind(), "function_definition" | "class_definition")
                 && let Some(name) = field_text(src, n, "name")
             {
-                scopes.entry(parent).or_default().bound.insert(name);
+                scopes.entry(here).or_default().bound.insert(name);
             }
             return;
         }
@@ -720,6 +808,19 @@ fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> V
             "nonlocal_statement" => {
                 for c in named_children(n) {
                     outward.push((here, text(src, c)));
+                }
+            }
+            // `type X = …` binds `X`.
+            "type_alias_statement" => {
+                if let Some(left) = n.child_by_field_name("left") {
+                    let mut first = None;
+                    preorder(left, |c| {
+                        if first.is_none() && c.kind() == "identifier" {
+                            first = Some(text(src, c));
+                        }
+                        first.is_none()
+                    });
+                    names.extend(first);
                 }
             }
             _ => {}
@@ -798,13 +899,11 @@ fn is_comprehension(kind: &str) -> bool {
     )
 }
 
-/// Adds the names a function's parameters and type parameters bind.
-fn bind_signature(src: &[u8], def: Node<'_>, names: &mut HashSet<String>) {
-    if let Some(params) = def.child_by_field_name("parameters") {
-        bind_params(src, params, names);
-    }
-    // `def f[T, *Ts, **P]()`: each parameter's first name.
-    if let Some(tps) = def.child_by_field_name("type_parameters") {
+/// The names a `def` or `class` declares as type parameters:
+/// `[T, *Ts, **P]` gives each parameter's first name.
+fn type_param_names(src: &[u8], node: Node<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(tps) = node.child_by_field_name("type_parameters") {
         for t in named_children(tps) {
             let mut first = None;
             preorder(t, |c| {
@@ -813,9 +912,18 @@ fn bind_signature(src: &[u8], def: Node<'_>, names: &mut HashSet<String>) {
                 }
                 first.is_none()
             });
-            names.extend(first);
+            out.extend(first);
         }
     }
+    out
+}
+
+/// Adds the names a function's parameters and type parameters bind.
+fn bind_signature(src: &[u8], def: Node<'_>, names: &mut HashSet<String>) {
+    if let Some(params) = def.child_by_field_name("parameters") {
+        bind_params(src, params, names);
+    }
+    names.extend(type_param_names(src, def));
 }
 
 /// Adds the names a `case` pattern captures: `case [h, *rest]`,
