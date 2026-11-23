@@ -249,10 +249,39 @@ impl Repo {
         base: ObjectId,
         head: ObjectId,
     ) -> Result<Vec<ChangedBlob>, GitError> {
-        let (a, b) = (self.tree_id(base)?, self.tree_id(head)?);
+        self.changed_blobs_under(base, head, &[])
+    }
+
+    /// As [`Repo::changed_blobs`], but only the files under the directory
+    /// `dir` (its segments; empty for the root), with whole paths. Only
+    /// that directory's subtrees are read (#169). Where `dir` is not a
+    /// directory in either commit, nothing has changed under it.
+    pub fn changed_blobs_under(
+        &self,
+        base: ObjectId,
+        head: ObjectId,
+        dir: &[String],
+    ) -> Result<Vec<ChangedBlob>, GitError> {
+        let subtree = |commit: ObjectId| -> Result<Option<ObjectId>, GitError> {
+            if dir.is_empty() {
+                return self.tree_id(commit).map(Some);
+            }
+            let tree = self
+                .inner
+                .find_commit(commit)
+                .map_err(read_err)?
+                .tree()
+                .map_err(read_err)?;
+            Ok(tree
+                .lookup_entry(dir.iter().map(|s| s.as_bytes()))
+                .map_err(read_err)?
+                .filter(|e| e.mode().is_tree())
+                .map(|e| e.object_id()))
+        };
+        let (a, b) = (subtree(base)?, subtree(head)?);
         let mut out = Vec::new();
         let mut seen = 0usize;
-        let mut queue = std::collections::VecDeque::from([(Vec::<u8>::new(), Some(a), Some(b))]);
+        let mut queue = std::collections::VecDeque::from([(dir.join("/").into_bytes(), a, b)]);
         while let Some((prefix, a, b)) = queue.pop_front() {
             if a == b {
                 continue;

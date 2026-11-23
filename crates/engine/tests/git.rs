@@ -495,5 +495,25 @@ fn changed_blobs_reads_only_what_differs() -> R<()> {
     ];
     assert_eq!(got, want);
     assert!(r.changed_blobs(h, h)?.is_empty());
+    // Under one directory (#169): only its subtree is read, paths stay
+    // whole, and a name that only starts the same is not inside it.
+    let under = |dir: &[&str]| -> R<Vec<String>> {
+        let dir: Vec<String> = dir.iter().map(|s| (*s).to_owned()).collect();
+        Ok(r.changed_blobs_under(b, h, &dir)?
+            .into_iter()
+            .map(|(p, _, _)| String::from_utf8_lossy(&p).into_owned())
+            .collect())
+    };
+    assert_eq!(under(&["src"])?, ["src/added", "src/deep/f", "src/gone"]);
+    assert_eq!(under(&["src", "deep"])?, ["src/deep/f"]);
+    assert_eq!(under(&["x"])?, ["x/inside"], "a directory only in base");
+    assert!(under(&["keep"])?.is_empty(), "unchanged");
+    assert!(under(&["sr"])?.is_empty(), "not a prefix match");
+    assert!(under(&["nope"])?.is_empty());
+    assert!(
+        under(&["src", "added"])?.is_empty(),
+        "a file is no directory"
+    );
+    assert_eq!(under(&[])?.len(), want.len(), "the root is everything");
     Ok(())
 }

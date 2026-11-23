@@ -390,27 +390,28 @@ fn run(job: &Job, stale: &dyn Fn() -> bool, emit: &dyn Fn(Response) -> bool) -> 
                     .map_err(|e| e.to_string())
             };
             let (mut b, mut h) = (read(base_id, &file)?, read(head_id, &file)?);
+            let mut files = Vec::new();
             if b.is_none() && h.is_none() {
                 // A directory (a node shown by directory, with no analyser,
-                // §3.4): its first file that changed, as plain text.
-                let prefix = format!("{}/", file);
-                let first = repo
-                    .changed_blobs(base_id, head_id)
+                // §3.4): its changed files, reading only its subtree, and
+                // the first of them as plain text.
+                files = repo
+                    .changed_blobs_under(base_id, head_id, file.segments())
                     .map_err(|e| e.to_string())?
                     .into_iter()
-                    .find_map(|(p, _, _)| {
-                        String::from_utf8(p).ok().filter(|p| p.starts_with(&prefix))
-                    });
-                let Some(first) = first else {
+                    .filter_map(|(p, _, _)| String::from_utf8(p).ok())
+                    .collect();
+                let Some(first) = files.first() else {
                     return Err(format!("{path}: in neither commit"));
                 };
-                file = RepoPath::parse(&first).map_err(|e| format!("{first}: {e}"))?;
+                file = RepoPath::parse(first).map_err(|e| format!("{first}: {e}"))?;
                 (b, h) = (read(base_id, &file)?, read(head_id, &file)?);
             }
             let shown = file.to_string();
             // The plain diff first: highlighting parses both files whole.
             let answer = |detail: Detail| Response::FileDiff {
                 path: shown.clone(),
+                files: files.clone(),
                 detail,
                 diff: Arc::new(crate::source_diff::file_diff(
                     &file,

@@ -292,6 +292,18 @@ pub const ACTIONS: &[ActionDef] = &[
         &["p"],
     ),
     a(
+        "code.next_file",
+        "Code: next changed file of the directory",
+        Scope::Code,
+        &["]"],
+    ),
+    a(
+        "code.previous_file",
+        "Code: previous changed file of the directory",
+        Scope::Code,
+        &["["],
+    ),
+    a(
         "code.scroll_left",
         "Code: scroll left",
         Scope::Code,

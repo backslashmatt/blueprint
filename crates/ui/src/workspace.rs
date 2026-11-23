@@ -377,9 +377,19 @@ impl Workspace {
             && review.code_request == Some(reply.id)
         {
             match (&reply.response, review.code.as_mut()) {
-                (Response::FileDiff { detail, diff, path }, Some(code)) => {
-                    // A directory's node opens its first changed file.
+                (
+                    Response::FileDiff {
+                        detail,
+                        diff,
+                        path,
+                        files,
+                    },
+                    Some(code),
+                ) => {
+                    // A directory's node opens its first changed file,
+                    // and lists them all for `]` and `[` (#169).
                     code.path.clone_from(path);
+                    code.take_files(files.clone());
                     let first = code.diff.is_none();
                     code.receive(*detail, diff.clone());
                     if first {
@@ -1170,6 +1180,22 @@ impl Workspace {
         if id == "code.close" {
             review.code = None;
             review.code_request = None;
+            return;
+        }
+        if matches!(id, "code.next_file" | "code.previous_file") {
+            let forward = id == "code.next_file";
+            let Some(path) = review.code.as_mut().and_then(|c| c.step_file(forward)) else {
+                return;
+            };
+            let (base, head) = (review.base.clone(), review.head.clone());
+            // Its rows are measured afresh, not taken from the last file's.
+            self.code_scroll = UniformListScrollHandle::new();
+            self.next_id += 1;
+            let request = self.next_id;
+            (self.send)(request, Request::FileDiff { base, head, path });
+            if let Screen::Review(review) = &mut self.screen {
+                review.code_request = Some(request);
+            }
             return;
         }
         let Some(key) = code_key(id) else {
@@ -2216,8 +2242,12 @@ fn code_view(
         (None, Some(Detail::Coarse)) => "highlighting…".to_string(),
         (None, Some(Detail::Full)) => format!("{} rows", code.rows()),
     };
+    // A directory's node: which of its changed files this is (#169).
+    let files = code.file_position().map_or(String::new(), |(k, n)| {
+        format!(", file {k} of {n}; ] [ next or previous file")
+    });
     let header = div().child(format!(
-        "{} — {} ({state}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, r mark ✓ reviewed, Backspace back to the map.",
+        "{} — {} ({state}{files}). ↑↓ PgUp PgDn Home End move, ←→ scroll sideways, n p next or previous change, r mark ✓ reviewed, Backspace back to the map.",
         code.path, code.title
     ));
     let Some(diff) = code.diff.clone() else {
@@ -2377,7 +2407,10 @@ mod tests {
         for a in actions::ACTIONS {
             let handled = match a.scope {
                 Scope::List => review_list::Action::from_id(a.id).is_some(),
-                Scope::Code => a.id == "code.close" || code_key(a.id).is_some(),
+                Scope::Code => {
+                    matches!(a.id, "code.close" | "code.next_file" | "code.previous_file")
+                        || code_key(a.id).is_some()
+                }
                 Scope::Map => {
                     matches!(a.id, "map.findings" | "map.outline") || map_op(a.id).is_some()
                 }

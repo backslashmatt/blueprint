@@ -52,6 +52,9 @@ pub struct CodeView {
     pub page: usize,
     /// Why the diff could not be had, if it could not.
     pub error: Option<String>,
+    /// For a node shown by directory: its changed files, which `]` and
+    /// `[` step through (#169). Empty for a file.
+    pub files: Vec<String>,
 }
 
 impl CodeView {
@@ -75,7 +78,47 @@ impl CodeView {
             opened_at: 0,
             page: PAGE,
             error: None,
+            files: Vec::new(),
         }
+    }
+
+    /// Takes the changed files an answer lists. Only a directory's answer
+    /// lists any; the answers for its files, when stepping, list none and
+    /// leave the list as it was.
+    pub fn take_files(&mut self, files: Vec<String>) {
+        if !files.is_empty() {
+            self.files = files;
+        }
+    }
+
+    /// Which of the directory's changed files is shown, counted from 1,
+    /// and how many there are; `None` unless there are two or more.
+    #[must_use]
+    pub fn file_position(&self) -> Option<(usize, usize)> {
+        if self.files.len() < 2 {
+            return None;
+        }
+        let i = self.files.iter().position(|f| *f == self.path)?;
+        Some((i + 1, self.files.len()))
+    }
+
+    /// Moves to the next (or previous) changed file of the directory, with
+    /// no wrapping: the file to ask the engine for, if there is one. The
+    /// view starts it afresh, waiting for its diff.
+    pub fn step_file(&mut self, forward: bool) -> Option<String> {
+        let (at, _) = self.file_position()?;
+        let i = at - 1;
+        let next = if forward { i + 1 } else { i.checked_sub(1)? };
+        let path = self.files.get(next)?.clone();
+        self.path.clone_from(&path);
+        self.lines = None;
+        self.column = 0;
+        self.diff = None;
+        self.detail = None;
+        self.cursor = 0;
+        self.opened_at = 0;
+        self.error = None;
+        Some(path)
     }
 
     /// Takes in a diff. The first one puts the cursor on the node's first
@@ -95,7 +138,10 @@ impl CodeView {
     /// node, and the row under the cursor with its lines on both sides.
     #[must_use]
     pub fn a11y_label(&self) -> String {
-        let head = format!("Code of {} in {}", self.title, self.path);
+        let head = match self.file_position() {
+            Some((k, n)) => format!("Code of {} in {}, file {k} of {n}", self.title, self.path),
+            None => format!("Code of {} in {}", self.title, self.path),
+        };
         if let Some(e) = &self.error {
             return format!("{head}: cannot open: {e}");
         }
@@ -284,6 +330,34 @@ mod tests {
         assert_eq!(page_rows(0.0, 18.0), None);
         assert_eq!(page_rows(640.0, 0.0), None);
         assert_eq!(page_rows(f32::NAN, 18.0), None);
+    }
+
+    #[test]
+    fn a_directorys_code_view_steps_through_its_changed_files() {
+        let mut v = CodeView::new("docs".into(), "docs/".into(), None, false);
+        // A file's view, or a directory with one file, has nowhere to go.
+        assert_eq!(v.step_file(true), None);
+        v.take_files(vec![
+            "docs/a.md".into(),
+            "docs/b.md".into(),
+            "docs/c.md".into(),
+        ]);
+        v.path = "docs/a.md".into();
+        assert_eq!(v.file_position(), Some((1, 3)));
+        assert_eq!(v.step_file(false), None, "no wrapping before the first");
+        assert_eq!(v.step_file(true).as_deref(), Some("docs/b.md"));
+        // Stepping starts the new file afresh.
+        assert_eq!(v.path, "docs/b.md");
+        assert!(v.diff.is_none() && v.detail.is_none() && v.error.is_none());
+        assert_eq!((v.cursor, v.column), (0, 0));
+        assert_eq!(v.file_position(), Some((2, 3)));
+        assert!(v.a11y_label().contains("file 2 of 3"), "{}", v.a11y_label());
+        assert_eq!(v.step_file(true).as_deref(), Some("docs/c.md"));
+        assert_eq!(v.step_file(true), None, "no wrapping past the last");
+        assert_eq!(v.step_file(false).as_deref(), Some("docs/b.md"));
+        // A file's own answer lists no files: the directory's list stays.
+        v.take_files(Vec::new());
+        assert_eq!(v.file_position(), Some((2, 3)));
     }
 
     #[test]
