@@ -164,6 +164,18 @@ const PY_B: (&str, &str) = (
 const PY_CORE: (&str, &str) = ("core/pyproject.toml", "[project]\nname = \"core\"\n");
 const PY_WEB: (&str, &str) = ("web/pyproject.toml", "[project]\nname = \"web\"\n");
 
+// A Go module with package `store`, its type and methods in two files
+// (DR 0015).
+const GO_MOD: (&str, &str) = ("go.mod", "module example.com/app\n\ngo 1.22\n");
+const GO_TYPE: (&str, &str) = (
+    "store/store.go",
+    "package store\n\ntype Store struct{ n int }\n\nfunc New() *Store { return &Store{} }\n",
+);
+const GO_METHODS: (&str, &str) = (
+    "store/methods.go",
+    "package store\n\nfunc (s *Store) Get() int { return s.n }\n",
+);
+
 #[test]
 fn every_hand_written_change_gives_its_expected_diff() {
     let cases: &[Case<'_>] = &[
@@ -1176,6 +1188,50 @@ fn every_hand_written_change_gives_its_expected_diff() {
                 ),
             ],
             expect: &["contained\tL4:python:web#web/app/(functions)/run"],
+        },
+        Case {
+            name: "go-method-body-in-another-file-is-contained",
+            base: &[GO_MOD, GO_TYPE, GO_METHODS],
+            head: &[
+                GO_MOD,
+                GO_TYPE,
+                (
+                    "store/methods.go",
+                    "package store\n\nfunc (s *Store) Get() int { return s.n + 1 }\n",
+                ),
+            ],
+            expect: &["contained\tL4:go:#store/Store/Get"],
+        },
+        Case {
+            name: "go-field-added-is-surface",
+            base: &[GO_MOD, GO_TYPE, GO_METHODS],
+            head: &[
+                GO_MOD,
+                (
+                    "store/store.go",
+                    "package store\n\ntype Store struct{ n int; m int }\n\nfunc New() *Store { return &Store{} }\n",
+                ),
+                GO_METHODS,
+            ],
+            expect: &["surface\tL3:go:#store/Store"],
+        },
+        Case {
+            name: "go-new-package",
+            base: &[GO_MOD, GO_TYPE, GO_METHODS],
+            head: &[
+                GO_MOD,
+                GO_TYPE,
+                GO_METHODS,
+                (
+                    "internal/cache/cache.go",
+                    "package cache\n\nfunc Put() {}\n",
+                ),
+            ],
+            expect: &[
+                "added\tL2:go:#internal/cache",
+                "added\tL3:go:#internal/cache/(functions)",
+                "added\tL4:go:#internal/cache/(functions)/Put",
+            ],
         },
     ];
     assert!(cases.len() >= 30, "the exit test asks for at least 30");

@@ -10,6 +10,8 @@
 //! - **Python:** each file of a Python project is a module, named by its
 //!   dotted path below the import root (`src/` or the project's directory)
 //!   ([`python`], DR 0014).
+//! - **Go:** each package (a directory of `.go` files) of a Go module is a
+//!   module, named by its path in the module ([`go`], DR 0015).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -19,6 +21,7 @@
 //! Every L2 node's parent is its L1 system; nesting is in the node's path.
 
 pub mod csharp;
+pub mod go;
 mod lexer;
 pub mod python;
 pub mod rust;
@@ -161,6 +164,7 @@ fn run(
             Ecosystem::Npm | Ecosystem::Nx => ts::analyse_package(id, key, &own, model, &mut diags),
             Ecosystem::Dotnet => csharp::analyse_project(id, key, &own, read, model, &mut diags),
             Ecosystem::Python => python::analyse_project(id, key, &own, model, &mut diags),
+            Ecosystem::Go => go::analyse_module(id, key, &own, model, &mut diags),
             _ => None,
         };
         let files = own;
