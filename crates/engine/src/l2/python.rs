@@ -36,7 +36,7 @@ pub fn analyse_project(
     let mut taken: BTreeSet<Vec<String>> = BTreeSet::new();
     let mut reached = BTreeMap::new();
     for file in files {
-        if !lang::analyser_for(file).is_some_and(|a| a.name() == "python") {
+        if lang::analyser_in(file, key.ecosystem).is_none() {
             continue;
         }
         let Some(module) = module_of(&file.segments()[depth..]) else {
@@ -53,7 +53,8 @@ pub fn analyse_project(
                 source: (*file).clone(),
                 parent: Some(system.clone()),
                 confidence: Confidence::Exact,
-                visibility: Some(if module.iter().any(|s| s.starts_with('_')) {
+                // `_x` is private; a dunder (`__main__`) is not.
+                visibility: Some(if module.iter().any(|s| is_private(s)) {
                     Visibility::Private
                 } else {
                     Visibility::Public
@@ -71,6 +72,12 @@ pub fn analyse_project(
         reached.insert((*file).clone(), module);
     }
     (!reached.is_empty()).then_some(reached)
+}
+
+/// Python's naming convention for one name.
+fn is_private(name: &str) -> bool {
+    let dunder = name.len() > 4 && name.starts_with("__") && name.ends_with("__");
+    name.starts_with('_') && !dunder
 }
 
 /// The module a file at `rel` (its path in the project) is. `None` under an

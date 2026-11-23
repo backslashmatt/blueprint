@@ -194,3 +194,46 @@ fn broken_and_ambiguous_manifests_degrade() {
     assert!(messages[1].contains("`x` is a workspace source"));
     assert!(messages[2].contains("outside the repository"));
 }
+
+// Regressions from review (#154).
+
+#[test]
+fn a_tool_only_pyproject_beside_setup_files_is_inferred() {
+    let (model, _) = run(&files(&[
+        ("pyproject.toml", "[tool.black]\nline-length = 100\n"),
+        ("setup.py", "setup()\n"),
+        ("x/pyproject.toml", "[tool.ruff]\n"),
+    ]));
+    let n: Vec<String> = model
+        .nodes()
+        .map(|n| format!("{} {:?} {}", n.id, n.confidence, n.source))
+        .collect();
+    assert_eq!(n, ["L1:python:# Inferred setup.py"]);
+}
+
+#[test]
+fn poetry_optional_dependencies_make_no_edges() {
+    let (model, _) = run(&files(&[
+        (
+            "a/pyproject.toml",
+            "[tool.poetry]\nname = \"a\"\n[tool.poetry.dependencies]\nPython = \"^3\"\nb = { version = \"^1\", optional = true }\nc = [{ version = \"^1\", optional = true }]\n",
+        ),
+        ("b/pyproject.toml", "[project]\nname = \"b\"\n"),
+        ("c/pyproject.toml", "[project]\nname = \"c\"\n"),
+        ("python/pyproject.toml", "[project]\nname = \"python\"\n"),
+    ]));
+    assert!(edges(&model).is_empty(), "{:?}", edges(&model));
+}
+
+#[test]
+fn empty_names_fall_back_and_never_match() {
+    let (model, _) = run(&files(&[
+        ("a/pyproject.toml", "[project]\nname = \"\"\n"),
+        (
+            "b/pyproject.toml",
+            "[project]\nname = \"b\"\ndependencies = [\"-\", \"\"]\n",
+        ),
+    ]));
+    assert!(edges(&model).is_empty(), "{:?}", edges(&model));
+    assert!(systems(&model).contains(&("a".into(), "a".into(), Confidence::Exact)));
+}

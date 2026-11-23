@@ -74,33 +74,46 @@ impl Project {
         self.pyproject.as_ref()?.as_ref()
     }
 
-    /// Whether the directory is a project at all.
-    fn is_system(&self) -> bool {
+    /// Whether the `pyproject.toml` declares a project, rather than only
+    /// configuring tools. One that did not parse may: it counts.
+    fn declares(&self) -> bool {
         match &self.pyproject {
             Some(None) => true,
             Some(Some(t)) => {
                 t.contains_key("project")
                     || t.contains_key("build-system")
                     || poetry(t).is_some_and(|p| p.contains_key("name"))
-                    || self.setup
             }
-            None => self.setup,
+            None => false,
         }
+    }
+
+    /// Whether the directory is a project at all.
+    fn is_system(&self) -> bool {
+        self.declares() || self.setup
     }
 
     fn name(&self) -> Option<String> {
         let t = self.table();
+        let given = |n: &&str| !n.trim().is_empty();
         t.and_then(|t| t.get("project")?.get("name")?.as_str())
-            .or_else(|| t.and_then(|t| poetry(t)?.get("name")?.as_str()))
+            .filter(given)
+            .or_else(|| {
+                t.and_then(|t| poetry(t)?.get("name")?.as_str())
+                    .filter(given)
+            })
             .map(str::to_owned)
             .or_else(|| self.cfg_name.clone())
     }
 
+    /// `exact` from a `pyproject.toml` that declares the project; from
+    /// `setup.cfg` or `setup.py` alone (a tool-only `pyproject.toml` beside
+    /// them declares nothing), `inferred`.
     fn confidence(&self) -> Confidence {
         match &self.pyproject {
-            Some(Some(_)) => Confidence::Exact,
             Some(None) => Confidence::Unknown,
-            None => Confidence::Inferred,
+            Some(Some(_)) if self.declares() => Confidence::Exact,
+            _ => Confidence::Inferred,
         }
     }
 }
@@ -144,7 +157,8 @@ fn requirement_name(req: &str) -> Option<String> {
             .trim_start(),
         None => rest,
     };
-    (!name.is_empty() && !rest.starts_with('@')).then(|| normalise_name(name))
+    let name = normalise_name(name);
+    (!name.is_empty() && !rest.starts_with('@')).then_some(name)
 }
 
 /// `setup.cfg`'s `[metadata] name`.
@@ -250,7 +264,19 @@ fn dependencies(t: &Table) -> Vec<Dependency> {
         .and_then(|p| p.get("dependencies"))
         .and_then(Value::as_table);
     for (k, v) in poetry_deps.into_iter().flatten() {
-        if k == "python" {
+        if k.eq_ignore_ascii_case("python") {
+            continue;
+        }
+        // `optional = true`: an extra, which does not ship by default.
+        let first = match v {
+            Value::Array(a) => a.first(),
+            v => Some(v),
+        };
+        if first
+            .and_then(|f| f.get("optional"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
             continue;
         }
         let source = source_of(v);
@@ -267,10 +293,10 @@ fn dependencies(t: &Table) -> Vec<Dependency> {
 pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let mut projects: BTreeMap<Dir, Project> = BTreeMap::new();
-    for path in paths.iter().filter(|p| !ignored(p)) {
+    for path in paths {
         let segs = path.segments();
         let Some(file) = segs.last() else { continue };
-        if !matches!(file.as_str(), PYPROJECT | SETUP_CFG | SETUP_PY) {
+        if !matches!(file.as_str(), PYPROJECT | SETUP_CFG | SETUP_PY) || ignored(path) {
             continue;
         }
         let dir: Dir = segs[..segs.len() - 1].to_vec();
@@ -280,7 +306,6 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
         });
         match file.as_str() {
             PYPROJECT => {
-                p.manifest = Some(path.clone());
                 let parsed = read(path)
                     .and_then(|b| String::from_utf8(b).ok())
                     .ok_or_else(|| "cannot be read as UTF-8".to_owned())
@@ -304,9 +329,8 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
                 p.cfg_name = read(path)
                     .and_then(|b| String::from_utf8(b).ok())
                     .and_then(|t| setup_cfg_name(&t));
-                if p.manifest.is_none() {
-                    p.manifest = Some(path.clone());
-                }
+                // `setup.cfg` is a better source than `setup.py`.
+                p.manifest = Some(path.clone());
             }
             _ => {
                 p.setup = true;
@@ -319,7 +343,7 @@ pub fn analyse(paths: &[RepoPath], read: Read<'_>, model: &mut Model) -> Vec<Dia
     // `pyproject.toml` is the node's source when there is one, whatever
     // order the files came in.
     for p in projects.values_mut() {
-        if p.pyproject.is_some() {
+        if p.declares() {
             p.manifest = Some(repo_path(
                 &[p.dir.clone(), vec![PYPROJECT.to_owned()]].concat(),
             ));
@@ -454,6 +478,7 @@ mod tests {
         assert_eq!(requirement_name("pkg @ https://x/y.whl"), None);
         assert_eq!(requirement_name("pkg[e] @ file:///x"), None);
         assert_eq!(requirement_name(">=1"), None);
+        assert_eq!(requirement_name("-"), None);
     }
 
     #[test]

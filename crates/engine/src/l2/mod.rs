@@ -90,19 +90,31 @@ fn run(
         .collect();
 
     // Each file belongs to the system with the deepest enclosing directory.
-    // Several ecosystems can share a directory; the first (in key order) owns
-    // its files. Looking up each ancestor keeps this linear in path depth.
-    let mut by_dir: BTreeMap<&[String], &SystemKey> = BTreeMap::new();
+    // Several ecosystems can share a directory (a maturin crate's
+    // `Cargo.toml` and `pyproject.toml`): a file goes to the one whose
+    // language it is, else the first in key order. Looking up each ancestor
+    // keeps this linear in path depth.
+    let mut by_dir: BTreeMap<&[String], Vec<&SystemKey>> = BTreeMap::new();
     for (_, k) in &systems {
-        by_dir.entry(k.dir.segments()).or_insert(k);
+        by_dir.entry(k.dir.segments()).or_default().push(k);
     }
     let mut owned: BTreeMap<SystemKey, Vec<&RepoPath>> = BTreeMap::new();
     let mut unowned: Vec<&RepoPath> = Vec::new();
     for p in paths {
         let segs = p.segments();
-        let owner = (0..segs.len()).rev().find_map(|n| by_dir.get(&segs[..n]));
+        let owner = (0..segs.len())
+            .rev()
+            .find_map(|n| by_dir.get(&segs[..n]))
+            .and_then(|keys| match keys.as_slice() {
+                [one] => Some(*one),
+                many => many
+                    .iter()
+                    .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
+                    .or_else(|| many.first())
+                    .copied(),
+            });
         match owner {
-            Some(k) => owned.entry((*k).clone()).or_default().push(p),
+            Some(k) => owned.entry(k.clone()).or_default().push(p),
             None => unowned.push(p),
         }
     }

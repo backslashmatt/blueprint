@@ -42,14 +42,16 @@ Python packaging is varied:
   - `[project].name`, else `[tool.poetry].name`, else `setup.cfg`'s `[metadata] name`, else the directory.
   - A computed name (`attr:`) is not read.
 - **Confidence:**
-  - `exact` from a parsed `pyproject.toml`;
+  - `exact` from a parsed `pyproject.toml` that declares the project;
   - `inferred` from `setup.cfg` or `setup.py` alone, because their real metadata can be computed when they run, and `setup.py` is never read;
   - `unknown` when `pyproject.toml` does not parse.
 - **Ignored directories:** a hidden directory (`.venv`, `.tox`, `.nox`), `venv`, `site-packages`, `__pycache__` and `node_modules`. They hold installed or generated code, not the repository's own.
 
+**Shared directories.** A Python project often shares its directory with another system: a maturin crate has `Cargo.toml` beside `pyproject.toml`, and a tools `pyproject.toml` can sit beside a `package.json`. Until now, the first system in key order owned every file of a shared directory. Now each file goes to the system whose language it is (`lang::analyser_in`), and only otherwise to the first system. An npm package's L2 pass reads only its own languages' files, so a stray `.py` or `.cs` file in a package is shown by directory, not taken as a module.
+
 **2. Dependency edges, by PEP 503-normalised name.**
 - **Sources:** `[project].dependencies` and `[tool.poetry.dependencies]`, without `python`.
-- **Not read:** optional, dev and group dependencies, because they do not ship, as with npm's `devDependencies`.
+- **Not read:** optional, dev and group dependencies, including Poetry dependencies marked `optional = true` (extras), because they do not ship, as with npm's `devDependencies`. An empty name is no name: the directory names the node, and it matches nothing.
 - **`exact`:**
   - a uv source or a Poetry dependency with a `path` to a system;
   - a uv `workspace = true` source naming exactly one system.
@@ -71,7 +73,7 @@ Python packaging is varied:
 - **Collisions:** when two files would be one module (`x.py` and `x.pyi`, or `src/pkg` beside `pkg`), the first in path order wins, and the others are shown by directory with `unknown` confidence.
 - **Confidence and visibility:**
   - modules are `exact`;
-  - a module with a `_`-prefixed segment is private;
+  - a module with a `_`-prefixed segment is private, except a dunder such as `__main__`;
   - items follow the analyser's convention (a leading `_` is private, except dunders).
 - **L2 shape:** placement depends only on paths, so the resident engine treats a Python file's shape as its path. Body edits apply in place, item edits by item, and structural changes (files added or removed, manifests edited) rebuild.
 

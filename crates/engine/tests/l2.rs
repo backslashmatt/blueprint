@@ -388,3 +388,76 @@ fn module_visibility_is_recorded() {
         ]
     );
 }
+
+fn modules(model: &Model) -> Vec<String> {
+    model
+        .level(Level::Module)
+        .filter(|n| n.kind == NodeKind::Module)
+        .map(|n| format!("{}", n.id))
+        .collect()
+}
+
+#[test]
+fn systems_sharing_a_directory_each_get_their_own_languages_files() {
+    // A maturin crate: Cargo and Python in one directory.
+    let (model, _) = run(&files(&[
+        ("Cargo.toml", "[package]\nname = \"ext\"\n"),
+        ("src/lib.rs", "pub fn f() {}\n"),
+        ("pyproject.toml", "[project]\nname = \"ext\"\n"),
+        ("python/ext/__init__.py", ""),
+        ("python/ext/util.py", "def g(): pass\n"),
+    ]));
+    let got = modules(&model);
+    assert!(got.contains(&"L2:python:#python/ext".to_owned()), "{got:?}");
+    assert!(
+        got.contains(&"L2:python:#python/ext/util".to_owned()),
+        "{got:?}"
+    );
+    // npm and Python in one directory; a `.py` file is never an npm module.
+    let (model, _) = run(&files(&[
+        ("package.json", "{ \"name\": \"web\" }"),
+        ("pyproject.toml", "[project]\nname = \"tools\"\n"),
+        ("src/a.ts", "export function f() {}\n"),
+        ("src/a.py", "print(1)\n"),
+        ("app/__init__.py", ""),
+    ]));
+    let got = modules(&model);
+    assert!(got.contains(&"L2:npm:#src/a".to_owned()), "{got:?}");
+    assert!(got.contains(&"L2:python:#app".to_owned()), "{got:?}");
+    // `src/` is the import root: `src/a.py` is `a`.
+    assert!(got.contains(&"L2:python:#a".to_owned()), "{got:?}");
+    let a = model
+        .level(Level::Module)
+        .find(|n| n.id.to_string() == "L2:npm:#src/a")
+        .unwrap();
+    assert_eq!(a.source.to_string(), "src/a.ts");
+    // A `.py` file in an npm package alone is shown by directory.
+    let (model, _) = run(&files(&[
+        ("package.json", "{ \"name\": \"web\" }"),
+        ("scripts/build.py", "print(1)\n"),
+    ]));
+    assert!(modules(&model).is_empty(), "{:?}", modules(&model));
+}
+
+#[test]
+fn dunder_modules_are_public() {
+    let (model, _) = run(&files(&[
+        ("pyproject.toml", "[project]\nname = \"p\"\n"),
+        ("pkg/__main__.py", ""),
+        ("pkg/_impl.py", ""),
+    ]));
+    let vis = |id: &str| {
+        model
+            .level(Level::Module)
+            .find(|n| n.id.to_string() == id)
+            .and_then(|n| n.visibility)
+    };
+    assert_eq!(
+        vis("L2:python:#pkg/__main__"),
+        Some(blueprint_model::Visibility::Public)
+    );
+    assert_eq!(
+        vis("L2:python:#pkg/_impl"),
+        Some(blueprint_model::Visibility::Private)
+    );
+}

@@ -863,4 +863,19 @@ fn python_edits_match_a_fresh_build() {
     delete(&mut r, &mut tree, "web/app.py");
     // A file in a virtual environment is not the project's.
     change(&mut r, &mut tree, "web/.venv/lib/x.py", "def x(): pass\n");
+    // A crate beside the project: each keeps its own language's files.
+    change(
+        &mut r,
+        &mut tree,
+        "web/Cargo.toml",
+        "[package]\nname = \"web\"\n",
+    );
+    change(&mut r, &mut tree, "web/src/lib.rs", "pub fn f() {}\n");
+    change(
+        &mut r,
+        &mut tree,
+        "web/views.py",
+        "def index():\n    return 2\n",
+    );
+    delete(&mut r, &mut tree, "web/Cargo.toml");
 }
