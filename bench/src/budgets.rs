@@ -136,5 +136,9 @@ mod tests {
             );
         }
         assert_eq!(BUDGETS.len(), 15);
+        // A typo here would leave the budget among the unmeasurable.
+        for (id, _) in MEASURED_ELSEWHERE {
+            assert!(budget(id).is_some(), "unknown budget {id}");
+        }
     }
 }
