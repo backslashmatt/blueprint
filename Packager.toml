@@ -1,0 +1,37 @@
+# Installers for the app, built by CI's `package` job (#162, DR 0016) with
+# cargo-packager. Unsigned until the owner chooses signing (#159).
+#
+# Only the app is installed: `bp` is the headless front end for tests and
+# benchmarks (REQUIREMENTS §5.3), and with it the install would exceed the
+# 50 MB budget (§4). The binary is stripped before packaging.
+
+product-name = "Blueprint"
+# Keep in step with `[workspace.package] version` (CI checks).
+version = "0.1.0"
+identifier = "io.github.backslashmatt.blueprint"
+description = "Code review by architecture: a change shown as a change to the system's design."
+authors = ["Blueprint developers"]
+publisher = "Blueprint"
+category = "DeveloperTool"
+license-file = "LICENSE-MIT"
+icons = ["packaging/icon.png"]
+binaries-dir = "target/release"
+out-dir = "target/packages"
+binaries = [{ path = "blueprint", main = true }]
+
+[deb]
+# What the app links and loads at run time (ldd, and GPUI's Wayland, Vulkan
+# and fontconfig loaders).
+depends = [
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libwayland-client0",
+    "libvulkan1",
+    "libfontconfig1",
+]
+section = "devel"
+
+[nsis]
+# Per-user install: no administrator rights needed.
+installMode = "currentUser"
