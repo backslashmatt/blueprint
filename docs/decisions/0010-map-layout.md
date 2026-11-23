@@ -35,14 +35,14 @@ The views the reference repositories give are of two kinds (`crates/ui/examples/
   - Long edges get a virtual node per layer they cross, up to 8 per node and edge in the view. Beyond that budget, as in a chain with a common sink (quadratic bends), long edges are drawn straight down without bends and may cross nodes, so that the layout stays fast.
   - Rows start in id order and get 8 barycentre sweeps, with ties kept in place.
   - Rows are centred.
-  - Nodes with no edge go in a grid of about √n columns, in id order, to the right of the graph.
+  - Nodes with no edge go in a grid, in id order, beside the graph (about √n columns) or below it (as wide as the graph, and no narrower than beside). The fresh layout picks the side that lets the whole map fit a 16:10 area at the larger scale (`ASPECT`), so a wide, shallow graph no longer pushes its unconnected nodes off the right of the screen (#148).
   - The input order never matters: everything is computed in id order.
 - Metrics that are not finite and positive fall back to the defaults.
 - **`relayout(ids, edges, metrics, &seed)`**, where `seed = previous.seed(ids)`, lays out a view that has changed a little. A seed taken with other metrics is ignored (a fresh layout):
   - A node keeps its old layer unless a new edge needs it deeper.
   - It keeps its old x in that layer, and each bend of a long edge keeps its x as well.
   - New nodes go into the free place nearest their neighbours, so nothing already placed is pushed.
-  - Grid nodes keep their cells, and new ones take the first free cells. The grid moves only if the graph now reaches into it.
+  - Grid nodes keep their cells, and new ones take the first free cells. The grid keeps its side and columns, and moves away from the graph, as a whole, only if the graph now reaches into it: sideways when it is beside, down when it is below.
 - **Edges** are orthogonal polylines: down from the bottom centre of a node, across in the channel below its layer, into the top centre of the next node or bend.
 - **Base and head share one layout.** The map lays out the union of the view's nodes and edges in base and head, so switching between them, or drawing the diff overlay, moves nothing at all. `relayout`, seeded from the view's previous layout, is used when the model under an open view changes (a new head, a re-index, and the live model in M6).
 - Layouts are computed off the UI thread and cached per view (§4: the UI thread never lays out off-screen content).

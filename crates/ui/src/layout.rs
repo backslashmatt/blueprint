@@ -3,9 +3,11 @@
 //! same nodes and edges always give the same layout, whatever order they
 //! are given in. Headless; the map view draws what this returns.
 //!
-//! 1. Nodes with no edge in the view are packed in a grid to the right of
-//!    the graph, sorted by id, so that the edge-free views of tens of
-//!    thousands of nodes (test directories) cost almost nothing.
+//! 1. Nodes with no edge in the view are packed in a grid, sorted by id,
+//!    so that the edge-free views of tens of thousands of nodes (test
+//!    directories) cost almost nothing. The grid goes beside the graph or
+//!    below it, whichever keeps the map closer to a landscape area's
+//!    shape ([`ASPECT`]); once placed, it keeps its side.
 //! 2. Cycles are broken by a depth-first search in id order: an edge back
 //!    to a node on the search stack is laid out reversed.
 //! 3. Each node's layer is its longest path from a node nothing depends
@@ -22,6 +24,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Barycentre passes (down and up count as one each).
 pub const SWEEPS: usize = 8;
+
+/// The width-to-height ratio of the area a map is assumed to fill when its
+/// grid of unconnected nodes is placed: a landscape window (16:10). The
+/// side that lets the whole map fit such an area at the larger scale wins.
+pub const ASPECT: f32 = 1.6;
+
+/// Where the grid of nodes without edges is: beside the graph, starting at
+/// x = `at`, or below it, starting at y = `at`, in `cols` columns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Grid {
+    below: bool,
+    at: f32,
+    cols: usize,
+}
 
 /// A node's size and the gaps between nodes, in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,8 +86,8 @@ pub struct Layout {
     pub height: f32,
     /// Each node's cell in the grid of nodes without edges, if it is in it.
     cells: Vec<Option<usize>>,
-    /// The grid's left edge and its number of columns, if there is a grid.
-    grid: Option<(f32, usize)>,
+    /// Where the grid is, if there is one.
+    grid: Option<Grid>,
     /// The metrics it was laid out with.
     metrics: Option<Metrics>,
     /// Each bend of a long edge: the edge's ends (indices into the ids,
@@ -85,7 +101,7 @@ pub struct Layout {
 pub struct Seed {
     metrics: Option<Metrics>,
     at: HashMap<String, (Point, Option<usize>)>,
-    grid: Option<(f32, usize)>,
+    grid: Option<Grid>,
     bends: HashMap<(String, String, usize), f32>,
 }
 
@@ -374,21 +390,62 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
         depth as f32 * (m.height + m.channel) - m.channel
     };
 
-    // Unconnected nodes: a grid to the right of the graph, in id order, so
-    // that the graph growing taller never moves it. Seeded, each keeps its
-    // cell, new ones take the first free cells, and the grid moves right
-    // only if the graph has grown into it.
+    // Unconnected nodes: a grid in id order, beside the graph or below it,
+    // whichever keeps the map closer to a landscape area's shape. Seeded,
+    // it keeps its side and columns, each node keeps its cell, new ones
+    // take the first free cells, and the grid moves away from the graph,
+    // as a whole, only if the graph has grown into it.
     let loose: Vec<usize> = (0..n).filter(|r| !connected[*r]).collect();
     let mut height = graph_height;
     let mut width = full;
     let mut cells = vec![None; n];
     let mut grid = None;
     if !loose.is_empty() {
+        let row_step = m.height + m.gap;
         let fresh_cols = (loose.len() as f32).sqrt().ceil().max(1.0) as usize;
-        let beside = if full > 0.0 { full + m.channel } else { 0.0 };
-        let cols = seed
-            .and_then(|s| s.grid)
-            .map_or(fresh_cols, |(_, c)| c.max(1));
+        let beside_at = if full > 0.0 { full + m.channel } else { 0.0 };
+        let below_at = if graph_height > 0.0 {
+            graph_height + m.channel
+        } else {
+            0.0
+        };
+        let place = match seed.and_then(|s| s.grid) {
+            Some(g) => Grid {
+                cols: g.cols.max(1),
+                ..g
+            },
+            None => {
+                // Below, the grid is as wide as the graph, and no
+                // narrower than it would be beside.
+                let below_cols = ((((full + m.gap) / step).floor()) as usize)
+                    .max(fresh_cols)
+                    .min(loose.len());
+                let size = |cols: usize| {
+                    let rows = loose.len().div_ceil(cols);
+                    (row_width(cols), rows as f32 * row_step - m.gap)
+                };
+                let (bw, bh) = size(fresh_cols);
+                let beside = (beside_at + bw, graph_height.max(bh));
+                let (lw, lh) = size(below_cols);
+                let below = (full.max(lw), below_at + lh);
+                // The scale at which each fits an ASPECT area, inverted.
+                let fit = |(w, h): (f32, f32)| (w / ASPECT).max(h);
+                if full > 0.0 && fit(below) < fit(beside) {
+                    Grid {
+                        below: true,
+                        at: below_at,
+                        cols: below_cols,
+                    }
+                } else {
+                    Grid {
+                        below: false,
+                        at: beside_at,
+                        cols: fresh_cols,
+                    }
+                }
+            }
+        };
+        let cols = place.cols;
         let mut taken = std::collections::BTreeSet::new();
         let mut placed = Vec::new();
         let mut new = Vec::new();
@@ -405,30 +462,54 @@ fn lay_out(ids: &[&str], edges: &[(usize, usize)], m: Metrics, seed: Option<&See
             }
         }
         let last = placed.iter().map(|(_, c)| *c).max().unwrap_or(0);
-        let bottom = (last / cols + 1) as f32 * (m.height + m.gap);
-        let left = match seed.and_then(|s| s.grid) {
-            // It stays unless something in the graph now reaches into it.
-            Some((left, _)) => {
-                let reached = pos[..next_id]
-                    .iter()
-                    .enumerate()
-                    .filter(|(v, _)| *v >= n || connected[*v])
-                    .any(|(_, p)| p.x + m.width > left && p.y < bottom);
-                if reached { left.max(beside) } else { left }
+        let rows_used = last / cols + 1;
+        let grid_w = row_width(cols.min(last + 1));
+        let grid_h = rows_used as f32 * row_step - m.gap;
+        // Anything of the graph (a node or a bend) that reaches into the
+        // grid's box pushes the grid away from the graph.
+        let graph = || {
+            pos[..next_id]
+                .iter()
+                .enumerate()
+                .filter(|(v, _)| *v >= n || connected[*v])
+                .map(|(_, p)| *p)
+        };
+        let at = if seed.and_then(|s| s.grid).is_some() {
+            if place.below {
+                let reached = graph().any(|p| p.y + m.height > place.at && p.x < grid_w);
+                if reached {
+                    place.at.max(below_at)
+                } else {
+                    place.at
+                }
+            } else {
+                let reached = graph().any(|p| p.x + m.width > place.at && p.y < grid_h);
+                if reached {
+                    place.at.max(beside_at)
+                } else {
+                    place.at
+                }
             }
-            None => beside,
+        } else {
+            place.at
         };
         for (r, c) in placed {
             cells[r] = Some(c);
-            pos[r] = Point {
-                x: left + (c % cols) as f32 * step,
-                y: (c / cols) as f32 * (m.height + m.gap),
+            let (gx, gy) = ((c % cols) as f32 * step, (c / cols) as f32 * row_step);
+            pos[r] = if place.below {
+                Point { x: gx, y: at + gy }
+            } else {
+                Point { x: at + gx, y: gy }
             };
         }
-        let rows_used = last / cols + 1;
-        height = height.max(rows_used as f32 * (m.height + m.gap) - m.gap);
-        width = width.max(left + row_width(cols.min(last + 1)));
-        grid = Some((left, cols));
+        if place.below {
+            height = height.max(at + grid_h);
+            width = width.max(grid_w);
+        } else {
+            height = height.max(grid_h);
+            width = width.max(at + grid_w);
+        }
+        grid = Some(Grid { at, ..place });
     }
 
     // Each node with edges leaving it gets its own lane in the channel
@@ -708,12 +789,19 @@ mod tests {
     }
 
     #[test]
-    fn nodes_without_edges_go_in_a_grid_beside() {
+    fn nodes_without_edges_go_in_a_grid_clear_of_the_graph() {
         let ids: Vec<String> = (0..100).map(|i| format!("n{i:03}")).collect();
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         let l = lay(&ids, &[(0, 1)]);
-        let graph_right = l.nodes[0].x.max(l.nodes[1].x) + Metrics::default().width;
-        assert!(l.nodes[2..].iter().all(|p| p.x > graph_right));
+        let m = Metrics::default();
+        let graph_right = l.nodes[0].x.max(l.nodes[1].x) + m.width;
+        let graph_bottom = l.nodes[0].y.max(l.nodes[1].y) + m.height;
+        assert!(
+            l.nodes[2..]
+                .iter()
+                .all(|p| p.x > graph_right || p.y > graph_bottom)
+        );
+        assert!(sound(&l), "{l:?}");
         let distinct: std::collections::BTreeSet<(u32, u32)> = l
             .nodes
             .iter()
@@ -746,6 +834,72 @@ mod tests {
 
     fn names(prefix: &str, k: usize) -> Vec<String> {
         (0..k).map(|i| format!("{prefix}{i:03}")).collect()
+    }
+
+    /// `k` independent pairs `a -> b`: a wide, shallow graph.
+    fn pairs(k: usize) -> (Vec<String>, Vec<(usize, usize)>) {
+        let ids: Vec<String> = (0..k)
+            .flat_map(|i| [format!("a{i:03}"), format!("b{i:03}")])
+            .collect();
+        let edges = (0..k).map(|i| (2 * i, 2 * i + 1)).collect();
+        (ids, edges)
+    }
+
+    #[test]
+    fn a_wide_graph_puts_its_grid_below() {
+        // Eight pairs side by side are much wider than tall: the grid
+        // beside them would make the map wider still (#148).
+        let (mut ids, edges) = pairs(8);
+        ids.extend(names("z", 9));
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let l = lay(&ids, &edges);
+        let m = Metrics::default();
+        let graph_right = l.nodes[..16].iter().map(|p| p.x).fold(0.0, f32::max) + m.width;
+        let graph_bottom = l.nodes[..16].iter().map(|p| p.y).fold(0.0, f32::max) + m.height;
+        assert!(l.nodes[16..].iter().all(|p| p.y > graph_bottom), "{l:?}");
+        assert!(
+            l.width <= graph_right + 0.5,
+            "the grid below is no wider than the graph: {l:?}"
+        );
+        assert!(sound(&l), "{l:?}");
+    }
+
+    #[test]
+    fn a_tall_graph_keeps_its_grid_beside() {
+        let chain = names("p", 8);
+        let mut ids: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let loose = names("z", 9);
+        ids.extend(loose.iter().map(String::as_str));
+        let edges: Vec<(usize, usize)> = (0..7).map(|i| (i, i + 1)).collect();
+        let l = lay(&ids, &edges);
+        let right = Metrics::default().width;
+        assert!(l.nodes[8..].iter().all(|p| p.x > right), "{l:?}");
+        assert!(sound(&l), "{l:?}");
+    }
+
+    #[test]
+    fn a_grid_below_keeps_its_cells_and_moves_down_whole_when_the_graph_deepens() {
+        let (mut ids, edges) = pairs(8);
+        ids.extend(names("z", 9));
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let base = lay(&ids, &edges);
+        let seed = base.seed(&ids);
+        // Nothing changes: nothing moves.
+        assert_eq!(relayout(&ids, &edges, Metrics::default(), &seed), base);
+        // b000 gains a dependency: the graph is one layer deeper.
+        let mut deeper = edges.clone();
+        deeper.push((1, 2));
+        let l = relayout(&ids, &deeper, Metrics::default(), &seed);
+        assert!(sound(&l), "{l:?}");
+        let dy = l.nodes[16].y - base.nodes[16].y;
+        assert!(dy > 0.0, "the grid moved down: {l:?}");
+        for i in 16..ids.len() {
+            assert_eq!(l.nodes[i].x, base.nodes[i].x, "cell kept");
+            assert!(
+                (l.nodes[i].y - base.nodes[i].y - dy).abs() < 1e-3,
+                "moved whole"
+            );
+        }
     }
 
     #[test]
