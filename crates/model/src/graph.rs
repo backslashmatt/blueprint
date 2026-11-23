@@ -30,19 +30,22 @@ pub enum Ecosystem {
     Nx,
     /// Bazel `BUILD`.
     Bazel,
+    /// `pyproject.toml`, `setup.cfg` or `setup.py`.
+    Python,
     /// Files owned by no manifest.
     Unowned,
 }
 
 impl Ecosystem {
     /// Every ecosystem.
-    const ALL: [Ecosystem; 7] = [
+    const ALL: [Ecosystem; 8] = [
         Ecosystem::Cargo,
         Ecosystem::Npm,
         Ecosystem::Go,
         Ecosystem::Dotnet,
         Ecosystem::Nx,
         Ecosystem::Bazel,
+        Ecosystem::Python,
         Ecosystem::Unowned,
     ];
 
@@ -60,6 +63,7 @@ impl Ecosystem {
             Ecosystem::Dotnet => "dotnet",
             Ecosystem::Nx => "nx",
             Ecosystem::Bazel => "bazel",
+            Ecosystem::Python => "python",
             Ecosystem::Unowned => "unowned",
         }
     }

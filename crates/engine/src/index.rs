@@ -25,7 +25,7 @@ use crate::l1::Diagnostic;
 /// The version of every analyser's output. Bump it whenever any analyser
 /// would produce a different model for the same files, so that indexes
 /// written by older code are not used.
-pub const ANALYSER_VERSION: u32 = 4;
+pub const ANALYSER_VERSION: u32 = 5;
 
 /// Overrides the cache directory, for tests and for users who keep caches
 /// elsewhere.

@@ -817,3 +817,95 @@ fn renaming_a_nested_csharp_type_matches_a_fresh_build() {
     let iface = "namespace N { public class Outer { public interface Inner { } } }\n";
     assert_eq!(change(&mut r, &mut tree, "Core/a.cs", iface), Update::Items);
 }
+
+#[test]
+fn python_edits_match_a_fresh_build() {
+    let mut tree = files(&[
+        (
+            "pyproject.toml",
+            "[tool.uv.workspace]\nmembers = [\"core\", \"web\"]\n",
+        ),
+        ("core/pyproject.toml", "[project]\nname = \"core\"\n"),
+        ("core/src/core/__init__.py", ""),
+        (
+            "core/src/core/graph.py",
+            "class Graph:\n    def add(self, n):\n        return n\n",
+        ),
+        ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+        ("web/app.py", "def main():\n    pass\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    // A body edit, then a new function: in place, then by item.
+    let body = "class Graph:\n    def add(self, n):\n        return n + 1\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/core/graph.py", body),
+        Update::InPlace
+    );
+    let item = "class Graph:\n    def add(self, n):\n        return n + 1\n\ndef build():\n    return Graph()\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/core/graph.py", item),
+        Update::Items
+    );
+    // A dependency, a new module, and a deleted one.
+    change(
+        &mut r,
+        &mut tree,
+        "web/pyproject.toml",
+        "[project]\nname = \"web\"\ndependencies = [\"core\"]\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "web/views.py",
+        "def index():\n    return 1\n",
+    );
+    delete(&mut r, &mut tree, "web/app.py");
+    // A file in a virtual environment is not the project's.
+    change(&mut r, &mut tree, "web/.venv/lib/x.py", "def x(): pass\n");
+    // A crate beside the project: each keeps its own language's files.
+    change(
+        &mut r,
+        &mut tree,
+        "web/Cargo.toml",
+        "[package]\nname = \"web\"\n",
+    );
+    change(&mut r, &mut tree, "web/src/lib.rs", "pub fn f() {}\n");
+    change(
+        &mut r,
+        &mut tree,
+        "web/views.py",
+        "def index():\n    return 2\n",
+    );
+    delete(&mut r, &mut tree, "web/Cargo.toml");
+}
+
+#[test]
+fn a_crate_beside_an_npm_package_keeps_its_path_module() {
+    let mut tree = files(&[
+        ("Cargo.toml", "[package]\nname = \"c\"\n"),
+        (
+            "src/lib.rs",
+            "#[path = \"gen.js\"]\nmod gen;\npub fn top() {}\n",
+        ),
+        ("src/gen.js", "pub fn a() {}\n"),
+        ("src/other.ts", "export function b() {}\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    change(&mut r, &mut tree, "package.json", "{ \"name\": \"c\" }");
+    change(
+        &mut r,
+        &mut tree,
+        "src/gen.js",
+        "pub fn a() { let _ = 1; }\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "src/other.ts",
+        "export function b() { return 1; }\n",
+    );
+    change(&mut r, &mut tree, "src/lib.rs", "pub fn top() {}\n");
+    delete(&mut r, &mut tree, "package.json");
+}

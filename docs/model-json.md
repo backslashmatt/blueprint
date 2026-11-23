@@ -37,15 +37,15 @@
 }
 ```
 
-- **`id`**: `L<level>:<ecosystem>:<manifest directory>#<path within the system>`, for example `L2:cargo:crates/engine#git/tree`.
+- **`id`**: `L<level>:<ecosystem>:<manifest directory>#<path within the system>`, for example `L2:cargo:crates/engine#git/tree`. The ecosystem is one of `cargo`, `npm`, `go`, `dotnet`, `nx`, `bazel`, `python` and `unowned`.
   - In segments, `%`, `/`, `#` and `:` are escaped as `%25`, `%2F`, `%23` and `%3A`, so two locations never share an id.
   - The id comes from location, never content, so renaming a package keeps its id.
   - Moving a directory changes the id. Detecting a move is the diff's job (M2).
-- **`kind`**: `system` or `unowned` at L1, `module` or `directory` at L2, `component` at L3, and `function` at L4. The level is the one encoded in the `id`. L2 is flat within a system: the nested module `git/tree` is its own L2 node. In an npm or Nx package each TypeScript or JavaScript file is a module named by its path without the extension, and an `index.*` file is its directory's (DR 0012). In a .NET project each namespace its C# files declare is a module (`App.Core`), and the parts of a `partial` type are one component (DR 0013).
+- **`kind`**: `system` or `unowned` at L1, `module` or `directory` at L2, `component` at L3, and `function` at L4. The level is the one encoded in the `id`. L2 is flat within a system: the nested module `git/tree` is its own L2 node. In an npm or Nx package each TypeScript or JavaScript file is a module named by its path without the extension, and an `index.*` file is its directory's (DR 0012). In a .NET project each namespace its C# files declare is a module (`App.Core`), and the parts of a `partial` type are one component (DR 0013). In a Python project each `.py` or `.pyi` file is a module named by its dotted path below the import root (`src/` in the src layout, otherwise the project's directory), and a package's `__init__` is the package (`pkg.sub`) (DR 0014).
 - **`source`**: the repository-relative file or directory that defines the node, `/`-separated and normalised.
 - **`parent`**: the node one level up, in the same system; `null` only at L1.
 - **`confidence`**: `exact`, `inferred` or `unknown` (§3.2).
-- **`visibility`** (optional): `public`, `restricted` or `private`, where the language defines it. For a Rust module, these are `pub`, `pub(crate)`/`pub(super)`/`pub(in ..)`, and no `pub`. For TypeScript and JavaScript, `export` is public and anything else private; a class member is public unless `private` or `#name` (private) or `protected` (restricted) (DR 0012). It is omitted when unknown or not applicable, as for systems and directories.
+- **`visibility`** (optional): `public`, `restricted` or `private`, where the language defines it. For a Rust module, these are `pub`, `pub(crate)`/`pub(super)`/`pub(in ..)`, and no `pub`. For TypeScript and JavaScript, `export` is public and anything else private; a class member is public unless `private` or `#name` (private) or `protected` (restricted) (DR 0012). For Python, a name with a leading `_` is private, except a dunder, and any other public (DR 0014). It is omitted when unknown or not applicable, as for systems and directories.
 - **`code`** (optional, L3 and L4 only): where the node's code is, and fingerprints of it for the diff (DR 0008):
   - `lines`: the first and last line in `source`, 1-based and inclusive, starting at the first outer attribute;
   - `body_line` (optional): the line the body starts on, so lines before it are signature;

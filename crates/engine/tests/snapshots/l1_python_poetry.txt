@@ -1,0 +1,9 @@
+nodes:
+  L1:python:legacy#  System  "Legacy"  Inferred  legacy/setup.cfg
+  L1:python:lib#  System  "lib"  Exact  lib/pyproject.toml
+  L1:python:svc#  System  "svc"  Exact  svc/pyproject.toml
+  L1:python:tools#  System  "tools"  Inferred  tools/setup.py
+edges:
+  L1:python:svc# -> L1:python:legacy#  DependsOn  Inferred  {Normal}
+  L1:python:svc# -> L1:python:lib#  DependsOn  Exact  {Normal}
+diagnostics:

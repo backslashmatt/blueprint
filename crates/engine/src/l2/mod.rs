@@ -7,6 +7,9 @@
 //!   module, named by its path ([`ts`]).
 //! - **C#:** one module per namespace a .NET project's files declare
 //!   ([`csharp`], DR 0013).
+//! - **Python:** each file of a Python project is a module, named by its
+//!   dotted path below the import root (`src/` or the project's directory)
+//!   ([`python`], DR 0014).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -17,6 +20,7 @@
 
 pub mod csharp;
 mod lexer;
+pub mod python;
 pub mod rust;
 pub mod ts;
 
@@ -86,35 +90,80 @@ fn run(
         .collect();
 
     // Each file belongs to the system with the deepest enclosing directory.
-    // Several ecosystems can share a directory; the first (in key order) owns
-    // its files. Looking up each ancestor keeps this linear in path depth.
-    let mut by_dir: BTreeMap<&[String], &SystemKey> = BTreeMap::new();
+    // Several ecosystems can share a directory (a maturin crate's
+    // `Cargo.toml` and `pyproject.toml`): a file goes to the one whose
+    // language it is, else the first in key order. Looking up each ancestor
+    // keeps this linear in path depth.
+    let mut by_dir: BTreeMap<&[String], Vec<&SystemKey>> = BTreeMap::new();
     for (_, k) in &systems {
-        by_dir.entry(k.dir.segments()).or_insert(k);
+        by_dir.entry(k.dir.segments()).or_default().push(k);
     }
     let mut owned: BTreeMap<SystemKey, Vec<&RepoPath>> = BTreeMap::new();
     let mut unowned: Vec<&RepoPath> = Vec::new();
     for p in paths {
         let segs = p.segments();
-        let owner = (0..segs.len()).rev().find_map(|n| by_dir.get(&segs[..n]));
+        let owner = (0..segs.len())
+            .rev()
+            .find_map(|n| by_dir.get(&segs[..n]))
+            .and_then(|keys| match keys.as_slice() {
+                [one] => Some(*one),
+                many => many
+                    .iter()
+                    .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
+                    .or_else(|| many.first())
+                    .copied(),
+            });
         match owner {
-            Some(k) => owned.entry((*k).clone()).or_default().push(p),
+            Some(k) => owned.entry(k.clone()).or_default().push(p),
             None => unowned.push(p),
         }
     }
 
-    for (id, key) in &systems {
-        let files: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
+    // Crates go first: a crate's module tree may reach, with `#[path]`, a
+    // file of its directory that another system there would otherwise take
+    // (a `.js` file beside a wasm-pack crate's `package.json`). What it
+    // reaches is the crate's.
+    let mut order: Vec<&(NodeId, SystemKey)> = systems.iter().collect();
+    order.sort_by_key(|(_, k)| k.ecosystem != Ecosystem::Cargo);
+    for (id, key) in order {
+        let own: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
+        let neighbours: Vec<&SystemKey> = by_dir
+            .get(key.dir.segments())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|k| *k != key)
+            .collect();
         let reached = match key.ecosystem {
             Ecosystem::Cargo => {
-                rust::analyse_crate(id, key, &files, read, model, &mut diags, placed.is_some())
+                let mut visible = own.clone();
+                for k in &neighbours {
+                    visible.extend(owned.get(*k).into_iter().flatten().copied());
+                }
+                let reached = rust::analyse_crate(
+                    id,
+                    key,
+                    &visible,
+                    read,
+                    model,
+                    &mut diags,
+                    placed.is_some(),
+                );
+                if let Some(r) = &reached {
+                    for k in &neighbours {
+                        if let Some(list) = owned.get_mut(*k) {
+                            list.retain(|f| !r.contains_key(*f));
+                        }
+                    }
+                }
+                reached
             }
-            Ecosystem::Npm | Ecosystem::Nx => {
-                ts::analyse_package(id, key, &files, model, &mut diags)
-            }
-            Ecosystem::Dotnet => csharp::analyse_project(id, key, &files, read, model, &mut diags),
+            Ecosystem::Npm | Ecosystem::Nx => ts::analyse_package(id, key, &own, model, &mut diags),
+            Ecosystem::Dotnet => csharp::analyse_project(id, key, &own, read, model, &mut diags),
+            Ecosystem::Python => python::analyse_project(id, key, &own, model, &mut diags),
             _ => None,
         };
+        let files = own;
         // Whatever the module tree did not reach (tests, benches, examples,
         // build scripts, docs, files behind unparsed macros) still shows up,
         // by directory.

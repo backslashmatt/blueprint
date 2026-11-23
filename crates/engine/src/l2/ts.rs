@@ -31,7 +31,8 @@ pub fn analyse_package(
     let mut taken: BTreeSet<Vec<String>> = BTreeSet::new();
     let mut reached = BTreeMap::new();
     for file in files {
-        if !lang::analyser_for(file).is_some_and(|a| a.name() != "rust") {
+        // The package's own languages only: not a `.py` or `.cs` file in it.
+        if lang::analyser_in(file, key.ecosystem).is_none() {
             continue;
         }
         let Some(module) = module_of(&file.segments()[depth..]) else {
