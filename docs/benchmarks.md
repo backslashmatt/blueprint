@@ -21,6 +21,10 @@ Exit codes:
 
 CI (`.github/workflows/bench.yml`) runs this on every pull request and every push to `main`, against the base commit built on the same runner. The table goes to the job summary and the JSON to the `bench-results` artifact. The agent copies the numbers into the agent log each session.
 
+## Installed size
+
+The 50 MB installed-size budget is measured by CI's `package` job (`.github/workflows/ci.yml`, #162, [decision 0016](decisions/0016-unsigned-installers.md)), not by `bp-bench`, because it needs the installer. On Linux the job unpacks the `.deb` and sums its files. On Windows it runs the NSIS installer silently and sums what it installed. Each number goes to the job summary, and the job fails over 50 MB (counting 1 MB as 1,000,000 bytes). First measurements (CI, PR #168): the `.deb` installs 37.9 MB, and the NSIS installer (8.6 MB) installs 26.5 MB.
+
 ## Re-index after a one-file change
 
 `reindex_one_file` is measured in process, with the engine resident, as the app will run it (DR 0008 decision 5). bp-bench builds the L1–L4 model of the pinned commit once with `engine::resident::Resident`. It then times applying an edit to one analysed Rust file: two blank lines added at the top and taken away again, so every item in the file moves. The budget row uses the file at the 90th percentile of size, a large but ordinary file. `reindex_one_file_p99` reports the 99th percentile, which on these repositories is generated code. `reindex_one_file_items` adds `pub fn new() {}` to the same p90 file and takes it away again. That is a change to the file's items, with a name many files mention, and it is held to the same budget. `reindex_one_file_root_items` makes the same edit to the crate root (`src/lib.rs`) at the 90th percentile of size among crate roots, held to the same budget (#141).

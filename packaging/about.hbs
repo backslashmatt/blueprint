@@ -1,0 +1,20 @@
+Blueprint third-party notices
+
+Blueprint is licensed MIT OR Apache-2.0. It includes the following crates,
+under the licences shown.
+
+{{#each overview}}
+- {{{name}}}: {{count}} crates
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
