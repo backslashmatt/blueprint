@@ -11,6 +11,7 @@ pub mod go;
 pub mod npm;
 pub mod nx;
 pub mod path;
+pub mod python;
 
 use blueprint_model::RepoPath;
 
@@ -40,6 +41,7 @@ pub fn analyse(
     diags.extend(dotnet::analyse(paths, read, model));
     diags.extend(nx::analyse(paths, read, model));
     diags.extend(bazel::analyse(paths, read, model));
+    diags.extend(python::analyse(paths, read, model));
     diags.sort();
     diags
 }

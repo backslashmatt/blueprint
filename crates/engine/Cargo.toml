@@ -13,6 +13,7 @@ blueprint-protocol.workspace = true
 blueprint-lang-rust.workspace = true
 blueprint-lang-ts.workspace = true
 blueprint-lang-csharp.workspace = true
+blueprint-lang-python.workspace = true
 blueprint-store.workspace = true
 directories = "6"
 gix = { workspace = true }

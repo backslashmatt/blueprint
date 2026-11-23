@@ -1,0 +1,10 @@
+nodes:
+  L1:python:libs/shared#  System  "shared.utils"  Exact  libs/shared/pyproject.toml
+  L1:python:packages/app#  System  "app"  Exact  packages/app/pyproject.toml
+  L1:python:packages/core#  System  "core"  Exact  packages/core/pyproject.toml
+  L1:python:tests/testkit#  System  "testkit"  Inferred  tests/testkit/setup.py
+edges:
+  L1:python:packages/app# -> L1:python:libs/shared#  DependsOn  Exact  {Normal}
+  L1:python:packages/app# -> L1:python:packages/core#  DependsOn  Exact  {Normal}
+  L1:python:packages/core# -> L1:python:libs/shared#  DependsOn  Inferred  {Normal}
+diagnostics:

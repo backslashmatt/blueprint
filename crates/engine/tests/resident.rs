@@ -817,3 +817,50 @@ fn renaming_a_nested_csharp_type_matches_a_fresh_build() {
     let iface = "namespace N { public class Outer { public interface Inner { } } }\n";
     assert_eq!(change(&mut r, &mut tree, "Core/a.cs", iface), Update::Items);
 }
+
+#[test]
+fn python_edits_match_a_fresh_build() {
+    let mut tree = files(&[
+        (
+            "pyproject.toml",
+            "[tool.uv.workspace]\nmembers = [\"core\", \"web\"]\n",
+        ),
+        ("core/pyproject.toml", "[project]\nname = \"core\"\n"),
+        ("core/src/core/__init__.py", ""),
+        (
+            "core/src/core/graph.py",
+            "class Graph:\n    def add(self, n):\n        return n\n",
+        ),
+        ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+        ("web/app.py", "def main():\n    pass\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    // A body edit, then a new function: in place, then by item.
+    let body = "class Graph:\n    def add(self, n):\n        return n + 1\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/core/graph.py", body),
+        Update::InPlace
+    );
+    let item = "class Graph:\n    def add(self, n):\n        return n + 1\n\ndef build():\n    return Graph()\n";
+    assert_eq!(
+        change(&mut r, &mut tree, "core/src/core/graph.py", item),
+        Update::Items
+    );
+    // A dependency, a new module, and a deleted one.
+    change(
+        &mut r,
+        &mut tree,
+        "web/pyproject.toml",
+        "[project]\nname = \"web\"\ndependencies = [\"core\"]\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "web/views.py",
+        "def index():\n    return 1\n",
+    );
+    delete(&mut r, &mut tree, "web/app.py");
+    // A file in a virtual environment is not the project's.
+    change(&mut r, &mut tree, "web/.venv/lib/x.py", "def x(): pass\n");
+}

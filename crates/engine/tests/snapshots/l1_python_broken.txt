@@ -1,0 +1,11 @@
+nodes:
+  L1:python:a#  System  "a"  Unknown  a/pyproject.toml
+  L1:python:b#  System  "dup"  Exact  b/pyproject.toml
+  L1:python:c#  System  "dup"  Exact  c/pyproject.toml
+  L1:python:d#  System  "d"  Exact  d/pyproject.toml
+  L1:python:e#  System  "e"  Exact  e/pyproject.toml
+edges:
+diagnostics:
+  a/pyproject.toml: TOML parse error at line 1, column 9
+  d/pyproject.toml: `x` is a workspace source but no single project is named so
+  e/pyproject.toml: `y` has a path outside the repository: ../../..

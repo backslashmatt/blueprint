@@ -7,6 +7,9 @@
 //!   module, named by its path ([`ts`]).
 //! - **C#:** one module per namespace a .NET project's files declare
 //!   ([`csharp`], DR 0013).
+//! - **Python:** each file of a Python project is a module, named by its
+//!   dotted path below the import root (`src/` or the project's directory)
+//!   ([`python`], DR 0014).
 //! - **No analyser:** files no analyser reached (a system with no Rust
 //!   crate root, or a crate's tests, benches, build script and docs) are
 //!   shown by top-level directory, with `unknown` confidence (§3.4).
@@ -17,6 +20,7 @@
 
 pub mod csharp;
 mod lexer;
+pub mod python;
 pub mod rust;
 pub mod ts;
 
@@ -113,6 +117,7 @@ fn run(
                 ts::analyse_package(id, key, &files, model, &mut diags)
             }
             Ecosystem::Dotnet => csharp::analyse_project(id, key, &files, read, model, &mut diags),
+            Ecosystem::Python => python::analyse_project(id, key, &files, model, &mut diags),
             _ => None,
         };
         // Whatever the module tree did not reach (tests, benches, examples,

@@ -150,6 +150,20 @@ const CS_B_USES_A: (&str, &str) = (
     "using App.A;\nnamespace App.B;\npublic class Y { }\n",
 );
 
+// A Python project `app` (src layout) with modules `app.a` and `app.b`,
+// and a uv workspace of projects `core` and `web` (DR 0014).
+const PYPROJECT: (&str, &str) = ("pyproject.toml", "[project]\nname = \"app\"\n");
+const PY_A: (&str, &str) = (
+    "src/app/a.py",
+    "def f(x):\n    \"\"\"Doc.\"\"\"\n    return x\n",
+);
+const PY_B: (&str, &str) = (
+    "src/app/b.py",
+    "class K:\n    def go(self):\n        return 1\n",
+);
+const PY_CORE: (&str, &str) = ("core/pyproject.toml", "[project]\nname = \"core\"\n");
+const PY_WEB: (&str, &str) = ("web/pyproject.toml", "[project]\nname = \"web\"\n");
+
 #[test]
 fn every_hand_written_change_gives_its_expected_diff() {
     let cases: &[Case<'_>] = &[
@@ -939,6 +953,77 @@ fn every_hand_written_change_gives_its_expected_diff() {
                 "+edge\tL4:dotnet:#App/B/Y/G -> L4:dotnet:#App/A/X/F\tcalls",
                 "+edge\tL3:dotnet:#App/B/Y -> L3:dotnet:#App/A/X\tcalls",
                 "+edge\tL2:dotnet:#App/B -> L2:dotnet:#App/A\tcalls",
+            ],
+        },
+        Case {
+            name: "py-body-and-docstring-change-is-contained",
+            base: &[PYPROJECT, PY_A, PY_B],
+            head: &[
+                PYPROJECT,
+                (
+                    "src/app/a.py",
+                    "def f(x):\n    \"\"\"Other.\"\"\"\n    return x + 1\n",
+                ),
+                PY_B,
+            ],
+            expect: &["contained\tL4:python:#app/a/(functions)/f"],
+        },
+        Case {
+            name: "py-parameter-added-is-surface",
+            base: &[PYPROJECT, PY_A, PY_B],
+            head: &[
+                PYPROJECT,
+                (
+                    "src/app/a.py",
+                    "def f(x, y=0):\n    \"\"\"Doc.\"\"\"\n    return x\n",
+                ),
+                PY_B,
+            ],
+            expect: &["surface\tL4:python:#app/a/(functions)/f"],
+        },
+        Case {
+            name: "py-method-body-in-a-class-is-contained",
+            base: &[PYPROJECT, PY_A, PY_B],
+            head: &[
+                PYPROJECT,
+                PY_A,
+                (
+                    "src/app/b.py",
+                    "class K:\n    def go(self):\n        return 2\n",
+                ),
+            ],
+            expect: &[
+                "contained\tL3:python:#app/b/K",
+                "contained\tL4:python:#app/b/K/go",
+            ],
+        },
+        Case {
+            name: "py-new-module-and-private-function",
+            base: &[PYPROJECT, PY_A],
+            head: &[
+                PYPROJECT,
+                PY_A,
+                ("src/app/c.py", "def _helper():\n    pass\n"),
+            ],
+            expect: &[
+                "added\tL2:python:#app/c",
+                "added\tL3:python:#app/c/(functions)",
+                "added\tL4:python:#app/c/(functions)/_helper",
+            ],
+        },
+        Case {
+            name: "py-workspace-dependency-added",
+            base: &[PY_CORE, PY_WEB],
+            head: &[
+                PY_CORE,
+                (
+                    "web/pyproject.toml",
+                    "[project]\nname = \"web\"\ndependencies = [\"core\"]\n[tool.uv.sources]\ncore = { workspace = true }\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL1:python:web# -> L1:python:core#\tdepends-on",
+                "+edge\tL1:python:web# -> L1:python:core#\tdepends-on",
             ],
         },
     ];
