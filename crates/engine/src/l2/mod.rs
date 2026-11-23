@@ -119,19 +119,51 @@ fn run(
         }
     }
 
-    for (id, key) in &systems {
-        let files: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
+    // Crates go first: a crate's module tree may reach, with `#[path]`, a
+    // file of its directory that another system there would otherwise take
+    // (a `.js` file beside a wasm-pack crate's `package.json`). What it
+    // reaches is the crate's.
+    let mut order: Vec<&(NodeId, SystemKey)> = systems.iter().collect();
+    order.sort_by_key(|(_, k)| k.ecosystem != Ecosystem::Cargo);
+    for (id, key) in order {
+        let own: BTreeSet<&RepoPath> = owned.get(key).into_iter().flatten().copied().collect();
+        let neighbours: Vec<&SystemKey> = by_dir
+            .get(key.dir.segments())
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|k| *k != key)
+            .collect();
         let reached = match key.ecosystem {
             Ecosystem::Cargo => {
-                rust::analyse_crate(id, key, &files, read, model, &mut diags, placed.is_some())
+                let mut visible = own.clone();
+                for k in &neighbours {
+                    visible.extend(owned.get(*k).into_iter().flatten().copied());
+                }
+                let reached = rust::analyse_crate(
+                    id,
+                    key,
+                    &visible,
+                    read,
+                    model,
+                    &mut diags,
+                    placed.is_some(),
+                );
+                if let Some(r) = &reached {
+                    for k in &neighbours {
+                        if let Some(list) = owned.get_mut(*k) {
+                            list.retain(|f| !r.contains_key(*f));
+                        }
+                    }
+                }
+                reached
             }
-            Ecosystem::Npm | Ecosystem::Nx => {
-                ts::analyse_package(id, key, &files, model, &mut diags)
-            }
-            Ecosystem::Dotnet => csharp::analyse_project(id, key, &files, read, model, &mut diags),
-            Ecosystem::Python => python::analyse_project(id, key, &files, model, &mut diags),
+            Ecosystem::Npm | Ecosystem::Nx => ts::analyse_package(id, key, &own, model, &mut diags),
+            Ecosystem::Dotnet => csharp::analyse_project(id, key, &own, read, model, &mut diags),
+            Ecosystem::Python => python::analyse_project(id, key, &own, model, &mut diags),
             _ => None,
         };
+        let files = own;
         // Whatever the module tree did not reach (tests, benches, examples,
         // build scripts, docs, files behind unparsed macros) still shows up,
         // by directory.

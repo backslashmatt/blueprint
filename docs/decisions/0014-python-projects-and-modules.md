@@ -47,7 +47,7 @@ Python packaging is varied:
   - `unknown` when `pyproject.toml` does not parse.
 - **Ignored directories:** a hidden directory (`.venv`, `.tox`, `.nox`), `venv`, `site-packages`, `__pycache__` and `node_modules`. They hold installed or generated code, not the repository's own.
 
-**Shared directories.** A Python project often shares its directory with another system: a maturin crate has `Cargo.toml` beside `pyproject.toml`, and a tools `pyproject.toml` can sit beside a `package.json`. Until now, the first system in key order owned every file of a shared directory. Now each file goes to the system whose language it is (`lang::analyser_in`), and only otherwise to the first system. An npm package's L2 pass reads only its own languages' files, so a stray `.py` or `.cs` file in a package is shown by directory, not taken as a module.
+**Shared directories.** A Python project often shares its directory with another system: a maturin crate has `Cargo.toml` beside `pyproject.toml`, and a tools `pyproject.toml` can sit beside a `package.json`. Until now, the first system in key order owned every file of a shared directory. Now each file goes to the system whose language it is (`lang::analyser_in`), and only otherwise to the first system. A crate's module tree is read first and may still claim any file of its directory that it reaches with `#[path]` (a `.js` file beside a wasm-pack crate's `package.json`), which keeps the rule that such a file is Rust's. An npm package's L2 pass reads only its own languages' files, so a stray `.py` or `.cs` file in a package is shown by directory, not taken as a module.
 
 **2. Dependency edges, by PEP 503-normalised name.**
 - **Sources:** `[project].dependencies` and `[tool.poetry.dependencies]`, without `python`.

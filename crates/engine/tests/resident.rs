@@ -879,3 +879,33 @@ fn python_edits_match_a_fresh_build() {
     );
     delete(&mut r, &mut tree, "web/Cargo.toml");
 }
+
+#[test]
+fn a_crate_beside_an_npm_package_keeps_its_path_module() {
+    let mut tree = files(&[
+        ("Cargo.toml", "[package]\nname = \"c\"\n"),
+        (
+            "src/lib.rs",
+            "#[path = \"gen.js\"]\nmod gen;\npub fn top() {}\n",
+        ),
+        ("src/gen.js", "pub fn a() {}\n"),
+        ("src/other.ts", "export function b() {}\n"),
+    ]);
+    let paths: Vec<RepoPath> = tree.keys().cloned().collect();
+    let mut r = Resident::build(&paths, &|p| tree.get(p).cloned());
+    change(&mut r, &mut tree, "package.json", "{ \"name\": \"c\" }");
+    change(
+        &mut r,
+        &mut tree,
+        "src/gen.js",
+        "pub fn a() { let _ = 1; }\n",
+    );
+    change(
+        &mut r,
+        &mut tree,
+        "src/other.ts",
+        "export function b() { return 1; }\n",
+    );
+    change(&mut r, &mut tree, "src/lib.rs", "pub fn top() {}\n");
+    delete(&mut r, &mut tree, "package.json");
+}

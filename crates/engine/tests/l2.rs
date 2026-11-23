@@ -461,3 +461,26 @@ fn dunder_modules_are_public() {
         Some(blueprint_model::Visibility::Private)
     );
 }
+
+#[test]
+fn a_crate_keeps_the_js_file_its_path_module_reaches_beside_package_json() {
+    let (model, diags) = run(&files(&[
+        ("Cargo.toml", "[package]\nname = \"c\"\n"),
+        ("package.json", "{ \"name\": \"c\" }"),
+        (
+            "src/lib.rs",
+            "#[path = \"gen.js\"]\nmod gen;\npub fn top() {}\n",
+        ),
+        ("src/gen.js", "export function a() {}\n"),
+        ("src/other.ts", "export function b() {}\n"),
+    ]));
+    assert!(diags.is_empty(), "{diags:?}");
+    let module = model
+        .level(Level::Module)
+        .find(|n| n.id.to_string() == "L2:cargo:#gen")
+        .unwrap();
+    assert_eq!(module.source.to_string(), "src/gen.js");
+    let got = modules(&model);
+    assert!(!got.contains(&"L2:npm:#src/gen".to_owned()), "{got:?}");
+    assert!(got.contains(&"L2:npm:#src/other".to_owned()), "{got:?}");
+}
