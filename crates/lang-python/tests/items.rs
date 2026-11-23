@@ -291,3 +291,114 @@ fn broken_and_hostile_input_never_panics() {
     assert!(!f.clean);
     assert!(f.items.iter().any(|i| i.name == "m"), "{:#?}", f.items);
 }
+
+// Regressions from review (#153).
+
+fn names(f: &FileFacts) -> Vec<&str> {
+    f.items.iter().map(|i| i.name.as_str()).collect()
+}
+
+#[test]
+fn definitions_under_every_clause_are_items() {
+    let f = py("try:\n import x\nexcept ImportError:\n def f(): pass\nelse:\n def g(): pass\nfinally:\n def h(): pass\nif a:\n pass\nelif b:\n def i(): pass\nelse:\n def j(): pass\nfor _ in y:\n pass\nelse:\n def k(): pass\nmatch v:\n case 1:\n  def l(): pass\n");
+    assert_eq!(names(&f), ["f", "g", "h", "i", "j", "k", "l"]);
+    let c = py("class A:\n if X:\n  def m(self): pass\n else:\n  def m(self): pass\n");
+    assert_eq!(names(&c), ["A", "m", "m"]);
+}
+
+#[test]
+fn string_text_counts_even_with_escapes() {
+    let a = item("def f(x=\"abc\\n\"):\n return \"abc\\n\"\n", "f");
+    let b = item("def f(x=\"xyz\\n\"):\n return \"abc\\n\"\n", "f");
+    let c = item("def f(x=\"abc\\n\"):\n return \"xyz\\n\"\n", "f");
+    assert_ne!(a.signature_hash, b.signature_hash);
+    assert_ne!(a.body_hash, c.body_hash);
+    let d = item("def f(x):\n return f\"a{{b}}{x}\"\n", "f");
+    let e = item("def f(x):\n return f\"z{{b}}{x}\"\n", "f");
+    assert_ne!(d.body_hash, e.body_hash);
+}
+
+#[test]
+fn nested_scopes_keep_their_names_to_themselves() {
+    assert!(item("def f():\n def g(cb):\n  cb()\n return g\n", "f").calls.is_empty());
+    assert!(
+        item("def f():\n class K:\n  def m(self):\n   self.go()\n", "f")
+            .calls
+            .is_empty()
+    );
+    // A lambda's parameter is not the function's.
+    assert_eq!(
+        item("def f():\n g = lambda helper: 0\n helper()\n", "f").calls,
+        vec![p(&["helper"])]
+    );
+    // Nor a comprehension's variable.
+    assert_eq!(
+        item("def f(xs):\n [run for run in xs]\n run()\n", "f").calls,
+        vec![p(&["run"])]
+    );
+    // An outer name is seen inside.
+    assert!(
+        item("def f(cb):\n return lambda: cb()\n", "f")
+            .calls
+            .is_empty()
+    );
+}
+
+#[test]
+fn match_captures_are_locals() {
+    let f = item(
+        "def f(x):\n match x:\n  case [handler, *rest]:\n   handler()\n   rest.pop()\n  case Foo(a=k) as h:\n   h.run()\n   k()\n  case {\"k\": v, **kw}:\n   v()\n   kw.get()\n  case m.CONST:\n   m.go()\n  case Point(px):\n   Point.make()\n",
+        "f",
+    );
+    assert_eq!(f.calls, vec![p(&["m", "go"]), p(&["Point", "make"])]);
+}
+
+#[test]
+fn receiver_rules() {
+    let q = item("class C:\n @builtins.staticmethod\n def m(x):\n  x.run()\n", "m");
+    assert!(q.calls.is_empty());
+    let d = item("class C:\n def m(self=None):\n  self.go()\n", "m");
+    assert_eq!(d.calls, vec![p(&["self", "go"])]);
+    let t = item("def f[T](x):\n return T()\n", "f");
+    assert!(t.calls.is_empty());
+}
+
+#[test]
+fn reindenting_a_docstring_with_its_definition_changes_nothing() {
+    let a = item("def f():\n    \"\"\"a\n    b\"\"\"\n", "f");
+    let b = item("def f():\n        \"\"\"a\n        b\"\"\"\n", "f");
+    assert_eq!(a.body_hash, b.body_hash);
+    // Its words still count.
+    let c = item("def f():\n    \"\"\"a\n    c\"\"\"\n", "f");
+    assert_ne!(a.body_hash, c.body_hash);
+}
+
+#[test]
+fn chained_class_attributes_are_names() {
+    let a = item("class C:\n    x = y = 1\n", "C");
+    let b = item("class C:\n    x = z = 1\n", "C");
+    let c = item("class C:\n    x = y = 2\n", "C");
+    assert_ne!(a.signature_hash, b.signature_hash);
+    assert_eq!(a.signature_hash, c.signature_hash);
+    assert_ne!(a.body_hash, c.body_hash);
+}
+
+#[test]
+fn a_type_alias_rename_keeps_its_signature() {
+    let a = item("type A = list[int]\n", "A");
+    let b = item("type B = list[int]\n", "B");
+    let c = item("type A = list[str]\n", "A");
+    assert_eq!(a.signature_hash, b.signature_hash);
+    assert_ne!(a.signature_hash, c.signature_hash);
+}
+
+#[test]
+fn deep_nesting_is_not_quadratic() {
+    let n = 8000;
+    let src = format!("x = {}{}{}\n", "[".repeat(n), "a, ".repeat(n), "]".repeat(n));
+    let t = std::time::Instant::now();
+    let _ = Python.highlight(src.as_bytes());
+    let _ = py(&src);
+    // Was 1.5 s in release; generous for debug builds on CI.
+    assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+}

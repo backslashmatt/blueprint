@@ -24,13 +24,20 @@ pub fn highlight(src: &[u8]) -> Vec<Highlight> {
     let root = tree.root_node();
     let mut cursor = root.walk();
     let mut ancestors: Vec<Node<'_>> = Vec::new();
+    // Running counts over `ancestors`, so no leaf scans them: how many are
+    // decorators, argument lists inside a decorator, and annotations.
+    let mut within: Vec<Within> = vec![Within::default()];
     loop {
         let node = cursor.node();
         let whole = class_of_whole(node);
         let leaf = node.child_count() == 0;
         let class = whole.or_else(|| {
             if leaf {
-                class_of_leaf(node, &ancestors)
+                class_of_leaf(
+                    node,
+                    &ancestors,
+                    *within.last().unwrap_or(&Within::default()),
+                )
             } else {
                 None
             }
@@ -45,6 +52,14 @@ pub fn highlight(src: &[u8]) -> Vec<Highlight> {
             out.push(Highlight { start, end, class });
         }
         if whole.is_none() && cursor.goto_first_child() {
+            let mut w = *within.last().unwrap_or(&Within::default());
+            match node.kind() {
+                "decorator" => w.decorator += 1,
+                "argument_list" if w.decorator > 0 => w.decorator_args += 1,
+                "type" => w.annotation += 1,
+                _ => {}
+            }
+            within.push(w);
             ancestors.push(node);
             continue;
         }
@@ -62,6 +77,7 @@ pub fn highlight(src: &[u8]) -> Vec<Highlight> {
                 break;
             }
             ancestors.pop();
+            within.pop();
         }
         if done {
             break;
@@ -88,8 +104,16 @@ fn class_of_whole(node: Node<'_>) -> Option<TokenClass> {
     }
 }
 
+/// How many of a node's ancestors are of each kind that colours it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Within {
+    decorator: u32,
+    decorator_args: u32,
+    annotation: u32,
+}
+
 /// Leaves coloured by their kind and place.
-fn class_of_leaf(node: Node<'_>, ancestors: &[Node<'_>]) -> Option<TokenClass> {
+fn class_of_leaf(node: Node<'_>, ancestors: &[Node<'_>], within: Within) -> Option<TokenClass> {
     let kind = node.kind();
     if !node.is_named() {
         // `def`, `class`, `async`, `not`, `in`, …; `@` of a decorator.
@@ -108,9 +132,8 @@ fn class_of_leaf(node: Node<'_>, ancestors: &[Node<'_>]) -> Option<TokenClass> {
             .is_some_and(|c| c.id() == node.id())
     };
     // A decorator's name, however it is written (`@a.b(1)`).
-    if ancestors.iter().any(|a| a.kind() == "decorator") {
-        let in_args = ancestors.iter().any(|a| a.kind() == "argument_list");
-        return (!in_args).then_some(TokenClass::Function);
+    if within.decorator > 0 {
+        return (within.decorator_args == 0).then_some(TokenClass::Function);
     }
     match parent.kind() {
         "function_definition" if is(parent, "name") => Some(TokenClass::Function),
@@ -129,7 +152,7 @@ fn class_of_leaf(node: Node<'_>, ancestors: &[Node<'_>]) -> Option<TokenClass> {
             Some(TokenClass::Type)
         }
         // An annotation.
-        _ if ancestors.iter().rev().any(|a| a.kind() == "type") => Some(TokenClass::Type),
+        _ if within.annotation > 0 => Some(TokenClass::Type),
         _ => None,
     }
 }

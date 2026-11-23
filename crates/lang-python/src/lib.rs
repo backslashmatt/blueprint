@@ -164,19 +164,23 @@ impl Out<'_> {
             "class_definition" => self.class(node, def, classes, depth, work),
             "function_definition" => self.function(node, def, classes),
             "type_alias_statement" if classes.is_empty() => self.alias(node),
-            // Blocks that hold definitions conditionally: their definitions
-            // are still the module's (or class's).
+            // A block's statements, read as the module's (or class's).
+            "block" => work.push((def, classes.to_vec(), depth + 1)),
+            // Statements that hold definitions conditionally: their
+            // definitions are still the module's (or class's). Their
+            // blocks and clauses are read as lists of statements.
             "if_statement"
             | "try_statement"
             | "with_statement"
             | "for_statement"
             | "while_statement"
+            | "match_statement"
             | "elif_clause"
             | "else_clause"
             | "except_clause"
             | "except_group_clause"
             | "finally_clause"
-            | "block" => {
+            | "case_clause" => {
                 for c in named_children(def) {
                     if matches!(
                         c.kind(),
@@ -186,6 +190,7 @@ impl Out<'_> {
                             | "except_clause"
                             | "except_group_clause"
                             | "finally_clause"
+                            | "case_clause"
                     ) {
                         work.push((c, classes.to_vec(), depth + 1));
                     }
@@ -243,6 +248,14 @@ impl Out<'_> {
                         // annotation signature.
                         match s.named_child(0) {
                             Some(a) if a.kind() == "assignment" => {
+                                // `x = y = 1`: every target is a name, the
+                                // last value the body.
+                                let mut a = a;
+                                while let Some(r) = a.child_by_field_name("right")
+                                    && r.kind() == "assignment"
+                                {
+                                    a = r;
+                                }
                                 body.extend(a.child_by_field_name("right"));
                             }
                             _ => body.push(s),
@@ -291,18 +304,24 @@ impl Out<'_> {
         let method = !classes.is_empty();
         let decorators = decorators(src, outer);
         // The receiver: a method's first parameter, unless it is static.
-        let receiver = (method && !decorators.iter().any(|d| d == "staticmethod"))
-            .then(|| {
-                let params = node.child_by_field_name("parameters")?;
-                let first = params.named_child(0)?;
-                let id = match first.kind() {
-                    "identifier" => first,
-                    "typed_parameter" => first.named_child(0)?,
-                    _ => return None,
-                };
-                (id.kind() == "identifier").then(|| text(src, id))
-            })
-            .flatten();
+        let receiver = (method
+            && !decorators
+                .iter()
+                .any(|d| d.rsplit('.').next() == Some("staticmethod")))
+        .then(|| {
+            let params = node.child_by_field_name("parameters")?;
+            let first = params.named_child(0)?;
+            let id = match first.kind() {
+                "identifier" => first,
+                "typed_parameter" => first.named_child(0)?,
+                "default_parameter" | "typed_default_parameter" => {
+                    first.child_by_field_name("name")?
+                }
+                _ => return None,
+            };
+            (id.kind() == "identifier").then(|| text(src, id))
+        })
+        .flatten();
         let item = Item {
             kind: if method {
                 ItemKind::Method {
@@ -335,14 +354,15 @@ impl Out<'_> {
             return;
         };
         // `type X[T] = …`: the name is the first identifier.
-        let mut name = None;
+        let mut name_node = None;
         preorder(left, |n| {
-            if name.is_none() && n.kind() == "identifier" {
-                name = Some(text(src, n));
+            if name_node.is_none() && n.kind() == "identifier" {
+                name_node = Some(n);
             }
-            name.is_none()
+            name_node.is_none()
         });
-        let Some(name) = name else { return };
+        let Some(name_node) = name_node else { return };
+        let name = text(src, name_node);
         let item = Item {
             kind: ItemKind::Type {
                 keyword: "type".into(),
@@ -355,7 +375,8 @@ impl Out<'_> {
                 line(node.end_position().row),
             ),
             body_line: None,
-            signature_hash: hash(src, &[node], &[]),
+            // The name is not signature, as for classes: a rename is a rename.
+            signature_hash: hash(src, &[node], &[name_node]),
             body_hash: None,
             calls: Vec::new(),
         };
@@ -505,74 +526,210 @@ fn visibility(name: &str) -> Visibility {
     }
 }
 
+/// Whether a node opens a scope of its own names.
+fn is_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_definition"
+            | "lambda"
+            | "class_definition"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+    )
+}
+
 /// The paths a function's body calls, in source order, without repeats.
+///
+/// Names are scoped as in Python: a nested `def`'s or a lambda's
+/// parameters, and a comprehension's variables, are local to it only.
 fn calls(src: &[u8], def: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> Vec<Vec<String>> {
-    let mut locals: HashSet<String> = HashSet::new();
-    if let Some(params) = def.child_by_field_name("parameters") {
-        bind_params(src, params, &mut locals);
-    }
-    preorder(body, |n| {
+    use std::collections::HashMap;
+    // The names each scope binds, by the scope's node; the function's own
+    // scope is `def`.
+    let mut bound: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut own = HashSet::new();
+    bind_signature(src, def, &mut own);
+    bound.insert(def.id(), own);
+    let mut stack: Vec<usize> = vec![def.id()];
+    let mut declared_outer: Vec<(usize, String)> = Vec::new();
+    walk(body, |n, entering| {
+        if !entering {
+            if is_scope(n.kind()) {
+                stack.pop();
+            }
+            return;
+        }
+        let top = *stack.last().unwrap_or(&def.id());
+        let mut here = |name: String| {
+            bound.entry(top).or_default().insert(name);
+        };
         match n.kind() {
-            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+            "assignment" | "augmented_assignment" | "for_statement" => {
                 if let Some(left) = n.child_by_field_name("left") {
-                    bind_target(src, left, &mut locals);
+                    let mut names = HashSet::new();
+                    bind_target(src, left, &mut names);
+                    names.into_iter().for_each(&mut here);
                 }
             }
-            "named_expression" => {
-                locals.extend(field_text(src, n, "name"));
-            }
+            "named_expression" => field_text(src, n, "name").into_iter().for_each(&mut here),
             // `with … as f`, `except E as e`.
-            "as_pattern_target" => bind_target(src, n, &mut locals),
-            "function_definition" | "class_definition" => {
-                locals.extend(field_text(src, n, "name"));
+            "as_pattern_target" => {
+                let mut names = HashSet::new();
+                bind_target(src, n, &mut names);
+                names.into_iter().for_each(&mut here);
             }
-            "lambda" => {
-                if let Some(p) = n.child_by_field_name("parameters") {
-                    bind_params(src, p, &mut locals);
+            "case_clause" => {
+                let mut names = HashSet::new();
+                for c in named_children(n) {
+                    if c.kind() == "case_pattern" {
+                        bind_captures(src, c, &mut names);
+                    }
+                }
+                names.into_iter().for_each(&mut here);
+            }
+            "global_statement" | "nonlocal_statement" => {
+                for c in named_children(n) {
+                    declared_outer.push((top, text(src, c)));
                 }
             }
             _ => {}
         }
-        true
+        if is_scope(n.kind()) {
+            // A `def` or `class` binds its name where it is written.
+            if matches!(n.kind(), "function_definition" | "class_definition") {
+                field_text(src, n, "name").into_iter().for_each(&mut here);
+            }
+            let mut inner = HashSet::new();
+            match n.kind() {
+                "function_definition" => bind_signature(src, n, &mut inner),
+                "lambda" => {
+                    if let Some(p) = n.child_by_field_name("parameters") {
+                        bind_params(src, p, &mut inner);
+                    }
+                }
+                "class_definition" => {}
+                // A comprehension's `for` targets.
+                _ => {
+                    for c in named_children(n) {
+                        if c.kind() == "for_in_clause"
+                            && let Some(left) = c.child_by_field_name("left")
+                        {
+                            bind_target(src, left, &mut inner);
+                        }
+                    }
+                }
+            }
+            bound.entry(n.id()).or_default().extend(inner);
+            stack.push(n.id());
+        }
     });
-    // `global x` and `nonlocal x` refer outwards: not locals.
-    preorder(body, |n| {
-        if n.kind() == "global_statement" {
-            for c in named_children(n) {
-                locals.remove(&text(src, c));
+    // `global x` and `nonlocal x` refer outwards: not the scope's own.
+    for (scope, name) in declared_outer {
+        if let Some(set) = bound.get_mut(&scope) {
+            set.remove(&name);
+        }
+    }
+    if let (Some(r), Some(set)) = (receiver, bound.get_mut(&def.id())) {
+        set.remove(r);
+    }
+    // How many scopes on the stack bind each name: a lookup is O(1) however
+    // deep the scopes nest.
+    let mut live: HashMap<String, u32> = HashMap::new();
+    let enter = |live: &mut HashMap<String, u32>, id: usize| {
+        for name in bound.get(&id).into_iter().flatten() {
+            *live.entry(name.clone()).or_default() += 1;
+        }
+    };
+    let leave = |live: &mut HashMap<String, u32>, id: usize| {
+        for name in bound.get(&id).into_iter().flatten() {
+            if let Some(c) = live.get_mut(name) {
+                *c = c.saturating_sub(1);
             }
         }
-        true
-    });
-    if let Some(r) = receiver {
-        locals.remove(r);
-    }
+    };
+    enter(&mut live, def.id());
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<Vec<String>> = HashSet::new();
-    preorder(body, |n| {
-        if n.kind() == "call"
-            && let Some(f) = n.child_by_field_name("function")
-            && let Some(mut path) = dotted(src, f)
-        {
-            let first = path.first().cloned().unwrap_or_default();
-            let keep = if Some(first.as_str()) == receiver {
-                // Only a member of the receiver is a call: `self()` is not.
-                if path.len() > 1 {
-                    path[0] = "self".into();
-                    true
-                } else {
-                    false
-                }
+    walk(body, |n, entering| {
+        if is_scope(n.kind()) {
+            if entering {
+                enter(&mut live, n.id());
             } else {
-                !locals.contains(&first)
-            };
-            if keep && seen.insert(path.clone()) {
-                out.push(path);
+                leave(&mut live, n.id());
             }
         }
-        true
+        if !entering || n.kind() != "call" {
+            return;
+        }
+        let Some(mut path) = n
+            .child_by_field_name("function")
+            .and_then(|f| dotted(src, f))
+        else {
+            return;
+        };
+        let first = path.first().cloned().unwrap_or_default();
+        let local = live.get(&first).is_some_and(|c| *c > 0);
+        let keep = if local {
+            false
+        } else if Some(first.as_str()) == receiver {
+            // Only a member of the receiver is a call: `self()` is not.
+            path[0] = "self".into();
+            path.len() > 1
+        } else {
+            true
+        };
+        if keep && seen.insert(path.clone()) {
+            out.push(path);
+        }
     });
     out
+}
+
+/// Adds the names a function's parameters and type parameters bind.
+fn bind_signature(src: &[u8], def: Node<'_>, names: &mut HashSet<String>) {
+    if let Some(params) = def.child_by_field_name("parameters") {
+        bind_params(src, params, names);
+    }
+    // `def f[T, *Ts, **P]()`: each parameter's first name.
+    if let Some(tps) = def.child_by_field_name("type_parameters") {
+        for t in named_children(tps) {
+            let mut first = None;
+            preorder(t, |c| {
+                if first.is_none() && c.kind() == "identifier" {
+                    first = Some(text(src, c));
+                }
+                first.is_none()
+            });
+            names.extend(first);
+        }
+    }
+}
+
+/// Adds the names a `case` pattern captures: `case [h, *rest]`,
+/// `case {"k": v, **kw}`, `case P(x=k) as p`; not a class's name
+/// (`Point(…)`), a dotted value (`m.CONST`) or a keyword's key.
+fn bind_captures(src: &[u8], pattern: Node<'_>, names: &mut HashSet<String>) {
+    walk_with_parent(pattern, |n, parent| match n.kind() {
+        "dotted_name" if n.named_child_count() == 1 => {
+            let class_name = parent.is_some_and(|p| {
+                p.kind() == "class_pattern" && p.named_child(0).is_some_and(|c| c.id() == n.id())
+            });
+            if !class_name && let Some(id) = n.named_child(0) {
+                let t = text(src, id);
+                if t != "_" {
+                    names.insert(t);
+                }
+            }
+        }
+        "identifier"
+            if parent.is_some_and(|p| matches!(p.kind(), "splat_pattern" | "as_pattern")) =>
+        {
+            names.insert(text(src, n));
+        }
+        _ => {}
+    });
 }
 
 /// Adds the names a parameter list binds to `names`.
@@ -612,6 +769,43 @@ fn bind_target(src: &[u8], node: Node<'_>, names: &mut HashSet<String>) {
         }
         "attribute" | "subscript" => false,
         _ => true,
+    });
+}
+
+/// Visits `root` and its descendants in source order, calling `f` with
+/// `true` on the way in and `false` on the way out of each.
+fn walk<'t>(root: Node<'t>, mut f: impl FnMut(Node<'t>, bool)) {
+    let mut cursor = root.walk();
+    loop {
+        f(cursor.node(), true);
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            f(cursor.node(), false);
+            if cursor.node().id() == root.id() {
+                return;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
+/// Visits `root` and its descendants with each one's parent within `root`.
+fn walk_with_parent<'t>(root: Node<'t>, mut f: impl FnMut(Node<'t>, Option<Node<'t>>)) {
+    let mut parents: Vec<Node<'t>> = Vec::new();
+    walk(root, |n, entering| {
+        if entering {
+            f(n, parents.last().copied());
+            parents.push(n);
+        } else {
+            parents.pop();
+        }
     });
 }
 
@@ -667,22 +861,39 @@ fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
     let mut mix = |b: u8| h = (h ^ u64::from(b)).wrapping_mul(FNV_PRIME);
     for root in roots {
         let mut cursor = root.walk();
-        let base = cursor.depth();
+        // The nodes above the cursor, within `root`.
+        let mut above: Vec<Node<'_>> = Vec::new();
         loop {
             let n = cursor.node();
             let skipped =
                 matches!(n.kind(), "comment" | "line_continuation") || skip.contains(&n.id());
-            if !skipped && n.child_count() == 0 && n.end_byte() > n.start_byte() {
-                let depth = cursor.depth() - base;
-                for b in depth.to_le_bytes() {
+            // A string is one token: its text between escapes is in no leaf.
+            let atomic = n.kind() == "string";
+            if !skipped && (atomic || n.child_count() == 0) && n.end_byte() > n.start_byte() {
+                for b in above.len().to_le_bytes() {
                     mix(b);
                 }
-                for b in &src[n.byte_range()] {
-                    mix(*b);
+                let bytes = &src[n.byte_range()];
+                if atomic && is_docstring_at(n, &above) {
+                    // A docstring's indentation follows its definition's, so
+                    // re-indenting the definition must not change it.
+                    let mut line_start = false;
+                    for &b in bytes {
+                        if line_start && (b == b' ' || b == b'\t') {
+                            continue;
+                        }
+                        line_start = b == b'\n';
+                        mix(b);
+                    }
+                } else {
+                    for &b in bytes {
+                        mix(b);
+                    }
                 }
                 mix(0x1f);
             }
-            if !skipped && cursor.goto_first_child() {
+            if !skipped && !atomic && cursor.goto_first_child() {
+                above.push(n);
                 continue;
             }
             let mut done = false;
@@ -698,6 +909,7 @@ fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
                     done = true;
                     break;
                 }
+                above.pop();
             }
             if done {
                 break;
@@ -705,4 +917,17 @@ fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
         }
     }
     h
+}
+
+/// Whether a string, with the nodes above it, is a docstring: the first
+/// statement of a block or module, and only a string.
+fn is_docstring_at(n: Node<'_>, above: &[Node<'_>]) -> bool {
+    let [.., grand, parent] = above else {
+        return false;
+    };
+    parent.kind() == "expression_statement"
+        && parent.named_child_count() == 1
+        && matches!(grand.kind(), "block" | "module")
+        && grand.named_child(0).is_some_and(|c| c.id() == parent.id())
+        && n.kind() == "string"
 }
