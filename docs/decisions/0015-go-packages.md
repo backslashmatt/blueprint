@@ -41,7 +41,18 @@ In Go the unit of code is the **package**: a directory whose files share one nam
 
 **Index keys:** `ANALYSER_VERSION` goes to 7, because Go systems now have L2–L4 nodes.
 
-**Edges** (imports, embedding, calls) come in their own slice. Until then Go files give none (§2.3).
+**Edges (#166, `l34/edges/go.rs`).**
+- An import path resolves against the module path (the L1 node's name) of the importing module and of the local modules it requires (its L1 edges). The longest module path that prefixes the import wins, and the rest is the package, which must exist. The standard library and external modules give no edge.
+- **depends-on (L2):** each import, `exact`.
+- **extends (L3):** each embedded type, `Base` in the package or `pkg.T` through an import.
+- **calls (L4):**
+  - `F()` in the package, or in the one dot import that has it;
+  - `pkg.F()` through an import;
+  - `T.M()` and `pkg.T.M()`, which are method expressions;
+  - `self.m()` to the receiver's type, then to the one embedded type (declared in the same file) that has the method.
+  - Calls through values need types and give none.
+- **Names:** an import binds its alias, or its package's directory name (for a module root, the module path's last element without `/vN`). A package whose `package` clause differs from its directory name is not reached through the clause name: a missing edge, never a wrong one. A name two imports bind differently is not bound.
+- `ANALYSER_VERSION` goes to 8 with edges.
 
 ## Measured
 

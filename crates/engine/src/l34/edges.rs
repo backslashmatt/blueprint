@@ -14,6 +14,8 @@
 //!   no edge.
 //! - **C#:** `using`s, bases and calls resolved within a project and the
 //!   projects it references ([`csharp`], #150).
+//! - **Go:** imports, embedding and calls resolved within a module and the
+//!   local modules it requires ([`go`], #166).
 //! - **Python:** imports, base classes and calls resolved within a project
 //!   and the Python projects it depends on ([`python`], #157).
 //! - **TypeScript and JavaScript:** packages' files resolve their module
@@ -40,6 +42,7 @@ use super::{Builder, FUNCTIONS, Parsed};
 use crate::l1::Read;
 
 mod csharp;
+mod go;
 mod python;
 mod ts;
 
@@ -153,6 +156,7 @@ pub(crate) struct Context {
     packages: ts::Packages,
     projects: csharp::Projects,
     py_projects: python::Projects,
+    go_modules: go::Modules,
 }
 
 /// Adds every edge the facts give, rolled up. With `keep`, also returns the
@@ -181,6 +185,7 @@ pub(super) fn add(
     let packages = ts::Packages::build(b.model, parsed);
     let projects = csharp::Projects::build(b.model, parsed);
     let py_projects = python::Projects::build(b.model, parsed);
+    let go_modules = go::Modules::build(b.model, parsed);
     let r = Resolver {
         model: &*b.model,
         crates: &crates,
@@ -189,6 +194,7 @@ pub(super) fn add(
         packages: &packages,
         projects: &projects,
         py_projects: &py_projects,
+        go_modules: &go_modules,
     };
     let mut found: Vec<(EdgeKey, Confidence, RepoPath)> = Vec::new();
     let mut kept = Vec::with_capacity(if keep { parsed.len() } else { 0 });
@@ -247,6 +253,7 @@ pub(super) fn add(
             packages,
             projects,
             py_projects,
+            go_modules,
         },
         kept,
     ))
@@ -421,6 +428,7 @@ pub(crate) fn edges_of<'n>(
         packages: &ctx.packages,
         projects: &ctx.projects,
         py_projects: &ctx.py_projects,
+        go_modules: &ctx.go_modules,
     };
     contributions(&r.file_edges(path, system, file_module, facts, node))
 }
@@ -444,6 +452,7 @@ pub(crate) fn calls_of<'n>(
         packages: &ctx.packages,
         projects: &ctx.projects,
         py_projects: &ctx.py_projects,
+        go_modules: &ctx.go_modules,
     };
     r.file_calls(path, system, file_module, facts, node)
         .into_iter()
@@ -540,6 +549,7 @@ struct Resolver<'a> {
     packages: &'a ts::Packages,
     projects: &'a csharp::Projects,
     py_projects: &'a python::Projects,
+    go_modules: &'a go::Modules,
 }
 
 /// What resolution looks up, per system: the module paths, and the names
@@ -621,6 +631,9 @@ impl Resolver<'_> {
         if python::is_project(system) {
             return self.py_file_edges(path, system, file_module, facts, node);
         }
+        if go::is_module(system) {
+            return self.go_file_edges(system, file_module, facts, node);
+        }
         if !resolved(system) {
             return Vec::new();
         }
@@ -697,6 +710,9 @@ impl Resolver<'_> {
         }
         if python::is_project(system) {
             return self.py_file_calls(path, system, file_module, facts, node);
+        }
+        if go::is_module(system) {
+            return self.go_file_calls(system, file_module, facts, node);
         }
         if !resolved(system) {
             return Vec::new();

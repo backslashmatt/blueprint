@@ -1233,6 +1233,77 @@ fn every_hand_written_change_gives_its_expected_diff() {
                 "added\tL4:go:#internal/cache/(functions)/Put",
             ],
         },
+        Case {
+            name: "go-import-adds-a-package-dependency",
+            base: &[
+                GO_MOD,
+                GO_TYPE,
+                GO_METHODS,
+                ("api/api.go", "package api\n\nfunc Serve() {}\n"),
+            ],
+            head: &[
+                GO_MOD,
+                GO_TYPE,
+                GO_METHODS,
+                (
+                    "api/api.go",
+                    "package api\n\nimport \"example.com/app/store\"\n\nfunc Serve() { store.New() }\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:go:#api -> L2:go:#store\tcalls",
+                "finding\tnew-dependency\tL2:go:#api -> L2:go:#store\tdepends-on",
+                "changed\tL4:go:#api/(functions)/Serve",
+                "+edge\tL4:go:#api/(functions)/Serve -> L4:go:#store/(functions)/New\tcalls",
+                "+edge\tL3:go:#api/(functions) -> L3:go:#store/(functions)\tcalls",
+                "+edge\tL2:go:#api -> L2:go:#store\tcalls",
+                "+edge\tL2:go:#api -> L2:go:#store\tdepends-on",
+            ],
+        },
+        Case {
+            name: "go-embedding-extends-and-promotes-methods",
+            base: &[
+                GO_MOD,
+                GO_TYPE,
+                GO_METHODS,
+                (
+                    "api/api.go",
+                    "package api\n\nimport \"example.com/app/store\"\n\ntype Cache struct{ x int }\n\nfunc (c *Cache) Hit() int { return c.Get() }\n\nvar _ = store.New\n",
+                ),
+            ],
+            head: &[
+                GO_MOD,
+                GO_TYPE,
+                GO_METHODS,
+                (
+                    "api/api.go",
+                    "package api\n\nimport \"example.com/app/store\"\n\ntype Cache struct{ *store.Store }\n\nfunc (c *Cache) Hit() int { return c.Get() }\n\nvar _ = store.New\n",
+                ),
+            ],
+            expect: &[
+                "finding\tnew-dependency\tL2:go:#api -> L2:go:#store\tcalls",
+                "finding\tnew-dependency\tL2:go:#api -> L2:go:#store\textends",
+                "surface\tL3:go:#api/Cache",
+                "+edge\tL4:go:#api/Cache/Hit -> L4:go:#store/Store/Get\tcalls",
+                "+edge\tL3:go:#api/Cache -> L3:go:#store/Store\tcalls",
+                "+edge\tL3:go:#api/Cache -> L3:go:#store/Store\textends",
+                "+edge\tL2:go:#api -> L2:go:#store\tcalls",
+                "+edge\tL2:go:#api -> L2:go:#store\textends",
+            ],
+        },
+        Case {
+            name: "go-standard-library-imports-give-no-edges",
+            base: &[GO_MOD, GO_TYPE, GO_METHODS],
+            head: &[
+                GO_MOD,
+                (
+                    "store/store.go",
+                    "package store\n\nimport \"fmt\"\n\ntype Store struct{ n int }\n\nfunc New() *Store { fmt.Println(); return &Store{} }\n",
+                ),
+                GO_METHODS,
+            ],
+            expect: &["contained\tL4:go:#store/(functions)/New"],
+        },
     ];
     assert!(cases.len() >= 30, "the exit test asks for at least 30");
     let mut failed = Vec::new();
