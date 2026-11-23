@@ -770,8 +770,13 @@ fn measure(
 
     if let Some(app) = app {
         out.push(cold_start(app, base_app)?);
-        if let Some(medium) = repos.iter().find(|r| r.name == "medium") {
-            out.extend(ui_session(app, &repos::checkout_dir(dest, medium))?);
+        // The interaction budgets hold on every repository; M5's exit test
+        // asks for them on the large one (#173). Memory's budget is the
+        // medium repository's.
+        for name in ["medium", "large"] {
+            if let Some(r) = repos.iter().find(|r| r.name == name) {
+                out.extend(ui_session(app, &repos::checkout_dir(dest, r), name)?);
+            }
         }
     }
 
@@ -1111,19 +1116,25 @@ fn scrolls(action: &str) -> bool {
     )
 }
 
-/// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on the
-/// medium checkout: each row is the worst key of its kind in a session, and
+/// The §4 interaction rows from [`UI_SESSIONS`] scripted sessions on one
+/// checkout (medium and large, #173): each row is the worst key of its kind in a session, and
 /// the lowest of those over the sessions is kept (DR 0002). Times end with
 /// the paint of the frame that shows the key: the scene is built, and the
 /// renderer's rasterizing and presenting are not included.
-fn ui_session(app: &Path, checkout: &Path) -> Result<Vec<Measurement>, Error> {
-    let cache = std::env::temp_dir().join(format!("bp-bench-ui-cache-{}", std::process::id()));
-    let result = ui_sessions(app, checkout, &cache);
+fn ui_session(app: &Path, checkout: &Path, repo: &str) -> Result<Vec<Measurement>, Error> {
+    let cache =
+        std::env::temp_dir().join(format!("bp-bench-ui-cache-{repo}-{}", std::process::id()));
+    let result = ui_sessions(app, checkout, &cache, repo);
     let _ = std::fs::remove_dir_all(&cache);
     result
 }
 
-fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurement>, Error> {
+fn ui_sessions(
+    app: &Path,
+    checkout: &Path,
+    cache: &Path,
+    repo: &str,
+) -> Result<Vec<Measurement>, Error> {
     // The first session indexes the checkout into an empty cache, as a
     // first open does; its memory peak is reported but not held to budget.
     let (_, first_peak) = ui_run(app, checkout, cache)?;
@@ -1161,7 +1172,7 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
     }
     let row = |name: &str, value: f64, note: String| Measurement {
         name: name.into(),
-        repo: Some("medium".into()),
+        repo: Some(repo.into()),
         value,
         base: None,
         unit: "ms".into(),
@@ -1176,7 +1187,7 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
     if cfg!(target_os = "linux") && (peak.is_none() || first_peak.is_none()) {
         return Err("the app reported no peak resident memory".into());
     }
-    let mut out = memory_rows(peak, first_peak);
+    let mut out = memory_rows(peak, first_peak, repo);
     out.extend([
         row(
             "drill",
@@ -1206,15 +1217,16 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
     Ok(out)
 }
 
-/// The §4 memory row (#163) from the scripted sessions' peaks, in MB of
-/// 1,000,000 bytes (as installed size), and the first open's peak, which
-/// includes indexing into an empty cache. Empty where the platform reports
+/// The memory rows (#163) from the scripted sessions' peaks on `repo`, in
+/// MB of 1,000,000 bytes (as installed size), and the first open's peak,
+/// which includes indexing into an empty cache. Only the medium
+/// repository's is held to the §4 budget. Empty where the platform reports
 /// no peak.
-fn memory_rows(peak: Option<u64>, first_peak: Option<u64>) -> Vec<Measurement> {
+fn memory_rows(peak: Option<u64>, first_peak: Option<u64>, repo: &str) -> Vec<Measurement> {
     let mb = |b: u64| b as f64 / 1e6;
     let row = |name: &str, bytes: u64, budget: Option<&str>, samples, note: &str| Measurement {
         name: name.into(),
-        repo: Some("medium".into()),
+        repo: Some(repo.into()),
         value: mb(bytes),
         base: None,
         unit: "MB".into(),
@@ -1224,24 +1236,27 @@ fn memory_rows(peak: Option<u64>, first_peak: Option<u64>) -> Vec<Measurement> {
         gated: false,
     };
     let mut out = Vec::new();
+    let name = format!("memory_{repo}");
     if let Some(b) = peak {
         out.push(row(
-            "memory_medium",
+            &name,
             b,
-            Some("memory_medium"),
+            (repo == "medium").then_some("memory_medium"),
             UI_SESSIONS,
             &format!(
-                "the app's peak resident memory (`VmHWM`) with the medium checkout's review open, map laid out and a scripted session done; indexed beforehand; highest of {UI_SESSIONS} sessions"
+                "the app's peak resident memory (`VmHWM`) with the {repo} checkout's review open, map laid out and a scripted session done; indexed beforehand; highest of {UI_SESSIONS} sessions"
             ),
         ));
     }
     if let Some(b) = first_peak {
         out.push(row(
-            "memory_medium_first_open",
+            &format!("{name}_first_open"),
             b,
             None,
             1,
-            "as memory_medium, but the first open, which indexes the checkout into an empty cache",
+            &format!(
+                "as {name}, but the first open, which indexes the checkout into an empty cache"
+            ),
         ));
     }
     out
