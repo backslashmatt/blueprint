@@ -24,7 +24,8 @@ In Go the unit of code is the **package**: a directory whose files share one nam
 **L2 modules:**
 - Each directory of a Go module that holds `.go` files is an L2 module, named by its path in the module (`internal/store`). The module root's package is the system itself.
 - `_test.go` files, an external `x_test` package included, belong to their directory's module.
-- Directories the go tool ignores (`testdata`, `vendor`, `_x`, `.x`) are shown by directory, as L1 already ignores them.
+- Directories and files the go tool ignores (`testdata`, `vendor`, `_x`, `.x`, and files named `_x.go` or `.x.go`, such as editor lock files) are shown by directory, as L1 already ignores them. Otherwise a stray `.#main.go` would take `main`'s id and turn the real one into `main~2`.
+- A `.go` file belongs to the nearest enclosing `go.mod`, whatever other manifests sit between. A `ui/package.json` beside `ui/embed.go` does not take the Go package away from its module. Other files keep the general rule: the deepest system, then the one whose language they are.
 - A package under an `internal` directory is restricted (only its parent's tree may import it); any other is public.
 
 **L3–L4:**

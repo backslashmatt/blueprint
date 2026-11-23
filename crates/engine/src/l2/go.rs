@@ -5,8 +5,8 @@
 //! files, an external `x_test` package, and every file's items, which the
 //! L3–L4 pass places by the file's package.
 //!
-//! Directories the go tool ignores (`testdata`, `vendor`, a name starting
-//! with `_` or `.`) are shown by directory, as L1 ignores them too.
+//! Directories and files the go tool ignores (`testdata`, `vendor`, a name
+//! starting with `_` or `.`) are shown by directory, as L1 ignores them.
 //! A package under an `internal` directory is restricted: only its parent's
 //! tree may import it. Any other is public.
 
@@ -34,7 +34,13 @@ pub fn analyse_module(
     let mut added: BTreeSet<Vec<String>> = BTreeSet::new();
     let mut reached = BTreeMap::new();
     for file in files {
-        if lang::analyser_in(file, key.ecosystem).is_none() || ignored(file) {
+        // The go tool ignores `_x.go` and `.x.go` (scratch and editor
+        // files) as it does `_x/` and `.x/` directories.
+        let hidden = file
+            .segments()
+            .last()
+            .is_some_and(|f| f.starts_with('_') || f.starts_with('.'));
+        if lang::analyser_in(file, key.ecosystem).is_none() || ignored(file) || hidden {
             continue;
         }
         let segs = file.segments();

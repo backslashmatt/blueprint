@@ -105,17 +105,30 @@ fn run(
     let mut unowned: Vec<&RepoPath> = Vec::new();
     for p in paths {
         let segs = p.segments();
-        let owner = (0..segs.len())
-            .rev()
-            .find_map(|n| by_dir.get(&segs[..n]))
-            .and_then(|keys| match keys.as_slice() {
-                [one] => Some(*one),
-                many => many
+        // A `.go` file belongs to its nearest `go.mod`, whatever other
+        // manifests sit between (a `package.json` beside an `embed.go`).
+        let go_owner = crate::lang::analyser_in(p, Ecosystem::Go).and_then(|_| {
+            (0..segs.len()).rev().find_map(|n| {
+                by_dir
+                    .get(&segs[..n])?
                     .iter()
-                    .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
-                    .or_else(|| many.first())
-                    .copied(),
-            });
+                    .find(|k| k.ecosystem == Ecosystem::Go)
+                    .copied()
+            })
+        });
+        let owner = go_owner.or_else(|| {
+            (0..segs.len())
+                .rev()
+                .find_map(|n| by_dir.get(&segs[..n]))
+                .and_then(|keys| match keys.as_slice() {
+                    [one] => Some(*one),
+                    many => many
+                        .iter()
+                        .find(|k| crate::lang::analyser_in(p, k.ecosystem).is_some())
+                        .or_else(|| many.first())
+                        .copied(),
+                })
+        });
         match owner {
             Some(k) => owned.entry(k.clone()).or_default().push(p),
             None => unowned.push(p),
