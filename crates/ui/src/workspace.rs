@@ -377,7 +377,9 @@ impl Workspace {
             && review.code_request == Some(reply.id)
         {
             match (&reply.response, review.code.as_mut()) {
-                (Response::FileDiff { detail, diff, .. }, Some(code)) => {
+                (Response::FileDiff { detail, diff, path }, Some(code)) => {
+                    // A directory's node opens its first changed file.
+                    code.path.clone_from(path);
                     let first = code.diff.is_none();
                     code.receive(*detail, diff.clone());
                     if first {

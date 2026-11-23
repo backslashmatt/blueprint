@@ -289,6 +289,22 @@ fn open_refs_diff_and_source() {
         },
     );
     assert!(failed(&until_last(&rx, 8, &mut others)[0]).is_some());
+    // A directory (a node with no analyser, §3.4) opens its first changed
+    // file, named in the answer.
+    service.send(
+        9,
+        Request::FileDiff {
+            base: "main~1".into(),
+            head: "main".into(),
+            path: "b/src".into(),
+        },
+    );
+    let r = until_last(&rx, 9, &mut others);
+    let Response::FileDiff { path, diff, .. } = &r[1] else {
+        panic!("no file diff for a directory: {r:?}");
+    };
+    assert_eq!(path, "b/src/lib.rs");
+    assert_eq!(diff.base.lines, vec!["pub fn g() {}"]);
     assert!(others.is_empty(), "no stray replies: {others:?}");
 }
 
