@@ -457,12 +457,20 @@ pub fn fit_scale(bounds: (f32, f32, f32, f32), viewport: (f32, f32)) -> f32 {
     );
     let fx = (viewport.0 - 2.0 * VIEW_MARGIN) / w;
     let fy = (viewport.1 - 2.0 * VIEW_MARGIN) / h;
-    fx.min(fy).clamp(MIN_FIT, 1.0)
+    let f = fx.min(fy);
+    if f.is_nan() {
+        1.0
+    } else {
+        f.clamp(MIN_FIT, 1.0)
+    }
 }
 
 /// The layout point to bring to the middle of the viewport (#148), for
 /// content spanning `bounds` `(x0, y0, x1, y1)` in layout units, the
-/// selected node's box `(x, y, w, h)` if any, a viewport of `viewport` pixels and zoom `zoom`. Along each axis:
+/// selected node's box `(x, y, w, h)` if any, a viewport of `viewport`
+/// pixels, and the map drawn at `zoom`. The canvas passes the fit scale
+/// ([`fit_scale`]) alone: the camera's zoom is applied about this point, so
+/// zooming keeps the middle of the screen in place. Along each axis:
 /// content that fits is centred whole; content that does not is centred on
 /// the selection but held so that no empty band shows past either end, and
 /// the selection stays in view.
@@ -481,7 +489,10 @@ pub fn view_centre(
             return mid;
         }
         let want = sel.map_or(mid, |(at, size)| at + size / 2.0);
-        want.clamp(lo + half - margin, hi - half + margin)
+        let (first, last) = (lo + half - margin, hi - half + margin);
+        // `max` then `min`, not `clamp`: no panic on odd bounds.
+        let c = want.max(first).min(last);
+        if c.is_finite() { c } else { 0.0 }
     };
     (
         axis(bounds.0, bounds.2, selected.map(|s| (s.0, s.2)), viewport.0),
@@ -775,6 +786,10 @@ mod tests {
         // Bounds that do not start at 0 (edges routed left of the nodes).
         let c = view_centre((-200.0, 0.0, 400.0, 300.0), None, (1200.0, 700.0), 1.0);
         assert_eq!(c, (100.0, 150.0));
+        // Odd values never panic and give a finite centre.
+        let c = view_centre((0.0, 0.0, f32::NAN, 300.0), None, (100.0, 100.0), 1.0);
+        assert!(c.0.is_finite() && c.1.is_finite(), "{c:?}");
+        assert_eq!(fit_scale((0.0, 0.0, f32::NAN, 10.0), (100.0, 100.0)), 1.0);
         // Zoomed in, the same content no longer fits.
         let (_, y) = view_centre(
             (0.0, 0.0, 600.0, 600.0),

@@ -263,7 +263,7 @@ pub const ACTIONS: &[ActionDef] = &[
     ),
     a(
         "map.zoom_reset",
-        "Map: reset zoom and pan to the selection",
+        "Map: reset zoom and pan",
         Scope::Map,
         &["0"],
     ),

@@ -1300,7 +1300,7 @@ impl Workspace {
             *layout = None;
             self.lay_out(cx);
         } else if map.selected != before {
-            // The view follows the selection, at the same zoom.
+            // The view keeps the selection in sight, at the same zoom.
             camera.pan = (0.0, 0.0);
         }
     }
@@ -1999,8 +1999,11 @@ fn canvas(
     }
     // Scaled down a little to fit, if that is all it takes; the camera's
     // zoom applies on top.
-    let z = camera.zoom * crate::map::fit_scale(bounds, (vw, vh));
-    let centre = crate::map::view_centre(bounds, selected, (vw, vh), z);
+    let fit = crate::map::fit_scale(bounds, (vw, vh));
+    let z = camera.zoom * fit;
+    // Placed at the fit scale alone, so that the camera's zoom stays about
+    // the middle of the screen (no jump on `=` or `-`).
+    let centre = crate::map::view_centre(bounds, selected, (vw, vh), fit);
     let view = Camera { zoom: z, ..camera };
     let at = |x: f32, y: f32| view.to_screen((x, y), centre, (vw, vh));
     let visible = |x: f32, y: f32, w: f32, h: f32| {
