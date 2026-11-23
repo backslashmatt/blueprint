@@ -21,21 +21,54 @@
 //!   `_`). An embedded struct field or interface element (`Base`,
 //!   `*pkg.Other`) is a [`Reference::Impl`] with `extends` set.
 //! - **Calls:** `f()`, `pkg.F()`, `x.y.M()` as written, type arguments
-//!   dropped (`F[int]()` is `F`); a call through a name the function binds
-//!   (a parameter, a result, `:=`, `var`, `range`, a function literal's
-//!   parameters) is skipped. In a method, a call through its receiver is
-//!   written `["self", …]`, whatever the receiver is called.
+//!   dropped (`F[int]()` is `F`, but `handlers[0]()` is no call); a call
+//!   through a name local where the call is, by Go's lexical scopes, is
+//!   skipped (see [`calls`]). In a method, a call through its receiver is
+//!   written `["self", …]`, whatever the receiver is called, wherever no
+//!   inner binding shadows it.
+//! - **Interfaces:** an element that is a predeclared type (`interface {
+//!   int }`) is a type-set element, not embedding. Another single named
+//!   type is taken as embedded: telling a type set from an embedded
+//!   interface needs types.
 //!
 //! Hashes are over tokens, not text, so comments and formatting change
-//! nothing; a string literal is one token.
+//! nothing, gofmt's included (`;` or a newline, a trailing comma); a string
+//! literal is one token. A file without a final newline is read with one.
 
 pub mod highlight;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use blueprint_model::lang::{FileFacts, Highlight, Item, ItemKind, LanguageAnalyser, Reference};
 use blueprint_model::{RepoPath, Visibility};
 use tree_sitter::{Node, Parser};
+
+/// Go's predeclared types: in an interface they are type-set elements
+/// (`interface { int }`), never embedded interfaces, except `error`, which
+/// is an interface.
+const PREDECLARED: [&str; 21] = [
+    "any",
+    "bool",
+    "byte",
+    "comparable",
+    "complex64",
+    "complex128",
+    "float32",
+    "float64",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "rune",
+    "string",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+];
 
 /// Selector chains longer than this are not read as call paths.
 const MAX_DEPTH: usize = 64;
@@ -82,6 +115,15 @@ pub fn analyse(src: &[u8]) -> FileFacts {
     {
         return FileFacts::default();
     }
+    // Without a final newline the grammar can report a valid file as
+    // broken (`type I interface { M() }` at the end): parse it with one.
+    let owned;
+    let src = if src.last().is_some_and(|b| *b != b'\n') {
+        owned = [src, b"\n"].concat();
+        owned.as_slice()
+    } else {
+        src
+    };
     let Some(tree) = parser.parse(src, None) else {
         return FileFacts::default();
     };
@@ -184,7 +226,10 @@ impl Out<'_> {
                         if c.kind() == "type_elem" {
                             // `A | B` unions are constraints, not embedding.
                             let parts = named_children(c);
-                            if let [one] = parts.as_slice() {
+                            if let [one] = parts.as_slice()
+                                && !(one.kind() == "type_identifier"
+                                    && PREDECLARED.contains(&text(src, *one).as_str()))
+                            {
                                 embedded.push(*one);
                             }
                         }
@@ -320,59 +365,178 @@ fn visibility(name: &str) -> Visibility {
     }
 }
 
-/// The paths a function's body calls, in source order, without repeats.
-fn calls(src: &[u8], func: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> Vec<Vec<String>> {
-    let mut locals: HashSet<String> = HashSet::new();
-    for field in ["parameters", "result", "type_parameters"] {
-        if let Some(p) = func.child_by_field_name(field) {
-            bind_params(src, p, &mut locals);
+/// Whether a node opens a lexical scope (Go spec: blocks).
+fn opens_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "block"
+            | "func_literal"
+            | "if_statement"
+            | "for_statement"
+            | "expression_switch_statement"
+            | "type_switch_statement"
+            | "select_statement"
+            | "expression_case"
+            | "type_case"
+            | "default_case"
+            | "communication_case"
+    )
+}
+
+/// Whether a declaration-like node binds with `:=` rather than assigns.
+fn defines(n: Node<'_>) -> bool {
+    let mut cursor = n.walk();
+    n.children(&mut cursor)
+        .any(|c| !c.is_named() && c.kind() == ":=")
+}
+
+/// The identifiers directly in a node (an expression list, a name field).
+fn identifiers(src: &[u8], n: Node<'_>) -> Vec<String> {
+    if n.kind() == "identifier" {
+        return vec![text(src, n)];
+    }
+    named_children(n)
+        .into_iter()
+        .filter(|c| c.kind() == "identifier")
+        .map(|c| text(src, c))
+        .collect()
+}
+
+/// Names visible at a point of a function, by Go's lexical scopes: how many
+/// open scopes bind each name, so a lookup is O(1) however deep they nest.
+struct Scopes {
+    live: HashMap<String, u32>,
+    /// The names each open scope bound, innermost last.
+    frames: Vec<Vec<String>>,
+}
+
+impl Scopes {
+    fn bind(&mut self, name: String) {
+        if name == "_" {
+            return;
+        }
+        *self.live.entry(name.clone()).or_default() += 1;
+        if let Some(f) = self.frames.last_mut() {
+            f.push(name);
         }
     }
-    preorder(body, |n| {
-        match n.kind() {
-            "short_var_declaration" | "range_clause" | "receive_statement" => {
-                if let Some(left) = n.child_by_field_name("left") {
-                    for c in named_children(left) {
-                        if c.kind() == "identifier" {
-                            locals.insert(text(src, c));
+
+    fn open(&mut self) {
+        self.frames.push(Vec::new());
+    }
+
+    fn close(&mut self) {
+        for name in self.frames.pop().unwrap_or_default() {
+            if let Some(c) = self.live.get_mut(&name) {
+                *c = c.saturating_sub(1);
+            }
+        }
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        self.live.get(name).is_some_and(|c| *c > 0)
+    }
+}
+
+/// The paths a function's body calls, in source order, without repeats.
+///
+/// A name is local where Go's scoping makes it so: parameters, results and
+/// type parameters (the receiver's included) in the whole function; a `:=`,
+/// `var`, `const` or local `type` from its statement to the end of its
+/// block; a function literal's parameters in it; `range`, receive and
+/// type-switch variables in their statement. The receiver is the receiver
+/// wherever no inner binding shadows its name.
+fn calls(src: &[u8], func: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> Vec<Vec<String>> {
+    let mut scopes = Scopes {
+        live: HashMap::new(),
+        frames: vec![Vec::new()],
+    };
+    let mut names = HashSet::new();
+    for field in ["parameters", "result", "type_parameters"] {
+        if let Some(p) = func.child_by_field_name(field) {
+            bind_params(src, p, &mut names);
+        }
+    }
+    // `func (l *List[T]) …`: the receiver's type parameters.
+    if let Some(recv) = func.child_by_field_name("receiver") {
+        preorder(recv, |n| {
+            if n.kind() == "type_arguments" {
+                preorder(n, |t| {
+                    if t.kind() == "type_identifier" {
+                        names.insert(text(src, t));
+                    }
+                    true
+                });
+                return false;
+            }
+            true
+        });
+    }
+    for n in names {
+        scopes.bind(n);
+    }
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    walk(body, |n, entering| {
+        let kind = n.kind();
+        if !entering {
+            // Bindings that take effect after their statement.
+            match kind {
+                "short_var_declaration" | "range_clause" | "receive_statement" if defines(n) => {
+                    if let Some(left) = n.child_by_field_name("left") {
+                        for name in identifiers(src, left) {
+                            scopes.bind(name);
                         }
                     }
                 }
-            }
-            "var_spec" | "const_spec" => {
-                let mut cursor = n.walk();
-                for name in n.children_by_field_name("name", &mut cursor) {
-                    locals.insert(text(src, name));
+                "var_spec" | "const_spec" => {
+                    let mut cursor = n.walk();
+                    let named: Vec<Node<'_>> =
+                        n.children_by_field_name("name", &mut cursor).collect();
+                    for name in named {
+                        for id in identifiers(src, name) {
+                            scopes.bind(id);
+                        }
+                    }
                 }
+                _ => {}
             }
+            if opens_scope(kind) {
+                scopes.close();
+            }
+            return;
+        }
+        if opens_scope(kind) {
+            scopes.open();
+        }
+        match kind {
             "func_literal" => {
+                let mut bound = HashSet::new();
                 for field in ["parameters", "result"] {
                     if let Some(p) = n.child_by_field_name(field) {
-                        bind_params(src, p, &mut locals);
+                        bind_params(src, p, &mut bound);
                     }
                 }
+                for name in bound {
+                    scopes.bind(name);
+                }
             }
-            // `switch v := x.(type)`.
+            // A local type is in scope in its own declaration.
+            "type_spec" | "type_alias" => {
+                if let Some(name) = field_text(src, n, "name") {
+                    scopes.bind(name);
+                }
+            }
             "type_switch_statement" => {
                 if let Some(alias) = n.child_by_field_name("alias") {
-                    for c in named_children(alias) {
-                        if c.kind() == "identifier" {
-                            locals.insert(text(src, c));
-                        }
+                    for name in identifiers(src, alias) {
+                        scopes.bind(name);
                     }
                 }
             }
             _ => {}
         }
-        true
-    });
-    if let Some(r) = receiver {
-        locals.remove(r);
-    }
-    let mut out: Vec<Vec<String>> = Vec::new();
-    let mut seen: HashSet<Vec<String>> = HashSet::new();
-    preorder(body, |n| {
-        let target = match n.kind() {
+        let target = match kind {
             "call_expression" => n.child_by_field_name("function"),
             // `pkg.F[int](x)` reads as a conversion to a generic type.
             "type_conversion_expression" => n
@@ -382,17 +546,18 @@ fn calls(src: &[u8], func: Node<'_>, body: Node<'_>, receiver: Option<&str>) -> 
         };
         if let Some(mut path) = target.and_then(|f| call_path(src, f)) {
             let first = path.first().cloned().unwrap_or_default();
-            let keep = if Some(first.as_str()) == receiver {
+            let keep = if scopes.is_local(&first) {
+                false
+            } else if Some(first.as_str()) == receiver {
                 path[0] = "self".into();
                 path.len() > 1
             } else {
-                !locals.contains(&first)
+                true
             };
             if keep && seen.insert(path.clone()) {
                 out.push(path);
             }
         }
-        true
     });
     out
 }
@@ -418,7 +583,25 @@ fn call_path(src: &[u8], f: Node<'_>) -> Option<Vec<String>> {
             }
             // Type arguments: `F[int]`, `pkg.F[int]`.
             "generic_type" => cur = cur.child_by_field_name("type")?,
-            "index_expression" => cur = cur.child_by_field_name("operand")?,
+            // `F[T]`, not `handlers[0]` or `table["k"]`.
+            "index_expression" => {
+                let index = cur.child_by_field_name("index")?;
+                if !matches!(
+                    index.kind(),
+                    "identifier"
+                        | "type_identifier"
+                        | "qualified_type"
+                        | "selector_expression"
+                        | "generic_type"
+                        | "pointer_type"
+                        | "slice_type"
+                        | "map_type"
+                        | "array_type"
+                ) {
+                    return None;
+                }
+                cur = cur.child_by_field_name("operand")?;
+            }
             _ => return None,
         }
         if out.len() > MAX_DEPTH {
@@ -434,7 +617,9 @@ fn bind_params(src: &[u8], params: Node<'_>, names: &mut HashSet<String>) {
     for p in named_children(params) {
         let mut cursor = p.walk();
         for name in p.children_by_field_name("name", &mut cursor) {
-            names.insert(text(src, name));
+            if matches!(name.kind(), "identifier" | "type_identifier") {
+                names.insert(text(src, name));
+            }
         }
     }
 }
@@ -442,6 +627,30 @@ fn bind_params(src: &[u8], params: Node<'_>, names: &mut HashSet<String>) {
 /// A Go string literal's text without its quotes.
 fn unquote(s: &str) -> String {
     s.trim_matches(|c| c == '"' || c == '`').to_owned()
+}
+
+/// Visits `root` and its descendants in source order, calling `f` with
+/// `true` on the way in and `false` on the way out of each.
+fn walk<'t>(root: Node<'t>, mut f: impl FnMut(Node<'t>, bool)) {
+    let mut cursor = root.walk();
+    loop {
+        f(cursor.node(), true);
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            f(cursor.node(), false);
+            if cursor.node().id() == root.id() {
+                return;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
 }
 
 /// Visits `root` and its descendants in source order through a tree
@@ -505,6 +714,20 @@ fn hash(src: &[u8], roots: &[Node<'_>], skip: &[Node<'_>]) -> u64 {
         preorder(*root, |n| {
             if n.kind() == "comment" || skip.contains(&n.id()) {
                 return false;
+            }
+            // gofmt's choices: `;` or a newline, and a trailing comma before
+            // a closing bracket, mean the same.
+            if !n.is_named() {
+                match n.kind() {
+                    ";" | "\n" => return false,
+                    "," if n
+                        .next_sibling()
+                        .is_none_or(|s| matches!(s.kind(), ")" | "}" | "]")) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
             }
             let whole = atomic(n.kind());
             if (whole || n.child_count() == 0) && n.end_byte() > n.start_byte() {
