@@ -4,6 +4,7 @@ nodes:
   L1:cargo:crates/cli#  System  "blueprint-cli"  Exact  crates/cli/Cargo.toml
   L1:cargo:crates/engine#  System  "blueprint-engine"  Exact  crates/engine/Cargo.toml
   L1:cargo:crates/lang-csharp#  System  "blueprint-lang-csharp"  Exact  crates/lang-csharp/Cargo.toml
+  L1:cargo:crates/lang-python#  System  "blueprint-lang-python"  Exact  crates/lang-python/Cargo.toml
   L1:cargo:crates/lang-rust#  System  "blueprint-lang-rust"  Exact  crates/lang-rust/Cargo.toml
   L1:cargo:crates/lang-ts#  System  "blueprint-lang-ts"  Exact  crates/lang-ts/Cargo.toml
   L1:cargo:crates/model#  System  "blueprint-model"  Exact  crates/model/Cargo.toml
@@ -30,6 +31,7 @@ edges:
   L1:cargo:crates/engine# -> L1:cargo:crates/protocol#  DependsOn  Exact  {Normal}
   L1:cargo:crates/engine# -> L1:cargo:crates/store#  DependsOn  Exact  {Normal}
   L1:cargo:crates/lang-csharp# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
+  L1:cargo:crates/lang-python# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/lang-rust# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/lang-ts# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}
   L1:cargo:crates/protocol# -> L1:cargo:crates/model#  DependsOn  Exact  {Normal}

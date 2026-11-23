@@ -1,0 +1,16 @@
+[package]
+name = "blueprint-lang-python"
+description = "Python analyser: L3 classes and L4 functions from tree-sitter-python (REQUIREMENTS §3.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blueprint-model.workspace = true
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+
+[lints]
+workspace = true
