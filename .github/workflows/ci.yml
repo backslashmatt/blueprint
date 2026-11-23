@@ -155,12 +155,9 @@ jobs:
           path: screenshots/
           if-no-files-found: warn
 
-  # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
-  # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
-  # release; `latest` is not used, so a release never changes CI unannounced.
-
-  # Unsigned installers (#162, DR 0016): the app alone, stripped, packaged by cargo-packager
-  # (Packager.toml), with its installed size checked against the 50 MB budget (§4). The packages
+  # Unsigned installers (#162, DR 0016): the app alone, stripped, with its licences and
+  # third-party notices, packaged by cargo-packager (Packager.toml), with its installed size
+  # checked against the 50 MB budget (§4). The packages
   # are workflow artifacts, not releases: publishing and signing wait on the owner (#159), and
   # macOS packages on macOS CI (#133).
   package:
@@ -172,8 +169,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
-      # linuxdeploy is itself an AppImage; runners have no FUSE.
-      APPIMAGE_EXTRACT_AND_RUN: "1"
+      CARGO_ABOUT_VERSION: "0.9.3"
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml
@@ -200,12 +196,24 @@ jobs:
       - name: Strip the app
         if: runner.os == 'Linux'
         run: strip target/release/blueprint
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Install cargo-packager and cargo-about
+        run: |
+          cargo install cargo-packager --version 0.11.8 --locked
+          cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --locked --features cli
+      # The crates' licences ask for their notices to go with the binary; any licence outside
+      # packaging/about.toml's list (REQUIREMENTS §8.1) fails this step.
+      - name: Third-party notices
+        shell: bash
+        run: |
+          mkdir -p target/notices
+          cargo about generate -c packaging/about.toml -m crates/app/Cargo.toml \
+            packaging/about.hbs -o target/notices/THIRD-PARTY-NOTICES.txt
+          head -20 target/notices/THIRD-PARTY-NOTICES.txt
       - name: Package
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then formats=deb,appimage; else formats=nsis; fi
+          # No AppImage yet: its runtime embeds libfuse (LGPL-2.1), outside §8.1 (DR 0016).
+          if [ "$RUNNER_OS" = Linux ]; then formats=deb; else formats=nsis; fi
           cargo packager --release --formats "$formats"
           ls -l target/packages
       # The budget is the installed size: what the installer puts on disk.
@@ -215,26 +223,29 @@ jobs:
           deb=$(ls target/packages/*.deb)
           mkdir -p installed && dpkg-deb -x "$deb" installed
           bytes=$(du -sb installed | cut -f1)
-          image=$(ls target/packages/*.AppImage)
-          image_bytes=$(stat -c %s "$image")
+          find installed -type f
           .github/scripts/installed_size.sh deb "$bytes"
-          .github/scripts/installed_size.sh AppImage "$image_bytes"
-      - name: Installed size (Windows)
+      - name: Install silently (Windows)
+        id: nsis
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $setup = Get-ChildItem target/packages/*.exe | Select-Object -First 1
+          $setup = Get-ChildItem target/packages/*-setup.exe | Select-Object -First 1
           $dir = Join-Path $env:RUNNER_TEMP 'blueprint-installed'
-          Start-Process -Wait -FilePath $setup.FullName -ArgumentList '/S', "/D=$dir"
-          $bytes = (Get-ChildItem -Recurse -File $dir | Measure-Object Length -Sum).Sum
+          $p = Start-Process -Wait -PassThru -FilePath $setup.FullName -ArgumentList '/S', "/D=$dir"
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
           Get-ChildItem -Recurse -File $dir | Select-Object FullName, Length | Format-Table -AutoSize
-          bash .github/scripts/installed_size.sh NSIS $bytes
+          $bytes = (Get-ChildItem -Recurse -File $dir | Measure-Object Length -Sum).Sum
+          "bytes=$bytes" >> $env:GITHUB_OUTPUT
+      - name: Installed size (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .github/scripts/installed_size.sh NSIS "${{ steps.nsis.outputs.bytes }}"
       - uses: actions/upload-artifact@v4
         with:
           name: installers-${{ runner.os }}
           path: |
             target/packages/*.deb
-            target/packages/*.AppImage
             target/packages/*.exe
           if-no-files-found: error
 
@@ -469,6 +480,9 @@ jobs:
             exit-review.md
           if-no-files-found: warn
 
+  # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
+  # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
+  # release; `latest` is not used, so a release never changes CI unannounced.
   fedora:
     name: test (fedora-45)
     runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}

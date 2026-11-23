@@ -23,17 +23,19 @@ Measured on Linux, in a release build with `lto = "fat"`:
 
 - **Tool:** cargo-packager 0.11.8 (MIT/Apache-2.0), used as a CI tool only and never linked. Its configuration is `Packager.toml` at the root.
 - **Packages:**
-  - Linux: a `.deb` (with the libraries the app links and loads as dependencies) and an AppImage.
-  - Windows: an NSIS installer, installed per user. NSIS is zlib-licensed. WiX is MS-RL, which is not on the §8.1 list, so there is no `.msi`.
-  - macOS: a `.dmg`, once macOS CI returns (#133).
-- **Icon:** `packaging/icon.png`, drawn by a script, with three connected boxes on a blueprint grid.
+  - **Linux:** a `.deb`. Its dependencies are the libraries the app links and loads, plus `libc6 (>= 2.39)`, because a binary built on Ubuntu 24.04 needs glibc 2.39 (`pidfd_spawnp`). So Debian 12 and Ubuntu 22.04 are not supported by these packages.
+  - **No AppImage:** its runtime is statically linked with libfuse (LGPL-2.1), a licence outside §8.1, so shipping one is the owner's decision (asked on #159).
+  - **Windows:** an NSIS installer, installed per user, with zlib compression. The default LZMA would embed a decompressor under a licence outside §8.1, and NSIS itself is zlib-licensed. WiX is MS-RL, so there is no `.msi`.
+  - **macOS:** a `.dmg`, once macOS CI returns (#133).
+- **Notices:** the installers redistribute about 650 crates, whose MIT and Apache-2.0 licences ask for their notices to travel with the binary. CI generates `THIRD-PARTY-NOTICES.txt` with cargo-about 0.9.3 (MIT/Apache-2.0, a CI tool), accepting only the §8.1 licences (`packaging/about.toml`), so a crate under any other licence fails the job. The notices and both project licences are installed with the app.
+- **Icon:** `packaging/icon.png`, drawn by a script, with three connected boxes on a blueprint grid. Linux uses it. On Windows, the installer and the `.exe` still have default icons, which needs an `.ico` and a build-script resource.
 - **Installed size:** the job measures it from the real package and fails over 50 MB. See `docs/benchmarks.md`.
 - **Distribution:** packages are workflow artifacts, never releases, until #159 is answered.
 
 ## Measured
 
-- **Linux `.deb`:** installs 37.4 MB (`/usr/bin/blueprint`, a desktop entry and the icon). The package file is 12.7 MB.
-- **Windows and the AppImage:** measured by the first CI run, and recorded on #162.
+- **Linux `.deb`:** installs 37.9 MB (`/usr/bin/blueprint`, a desktop entry, the icon, the licences and 434 KB of notices).
+- **Windows:** measured by CI, and recorded on #162.
 
 ## Revisit when
 

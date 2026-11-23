@@ -19,11 +19,21 @@ icons = ["packaging/icon.png"]
 binaries-dir = "target/release"
 out-dir = "target/packages"
 binaries = [{ path = "blueprint", main = true }]
+# The licences, and the third-party notices CI generates with cargo-about
+# (packaging/about.toml) before packaging: the installers redistribute the
+# app's crates, whose licences ask for their notices to go with it.
+resources = [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "target/notices/THIRD-PARTY-NOTICES.txt",
+]
 
 [deb]
 # What the app links and loads at run time (ldd, and GPUI's Wayland, Vulkan
 # and fontconfig loaders).
 depends = [
+    # Built on Ubuntu 24.04: the binary needs glibc 2.39 or newer.
+    "libc6 (>= 2.39)",
     "libxcb1",
     "libxkbcommon0",
     "libxkbcommon-x11-0",
@@ -36,3 +46,6 @@ section = "devel"
 [nsis]
 # Per-user install: no administrator rights needed.
 installMode = "currentUser"
+# zlib, not the default LZMA, so the installer embeds no decompressor under a
+# licence outside REQUIREMENTS §8.1.
+compression = "zlib"
