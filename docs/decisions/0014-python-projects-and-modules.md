@@ -80,15 +80,15 @@ Python packaging is varied:
 **4. Edges (#157, `l34/edges/python.rs`).** A Python name resolves in its project's modules, then in those of the Python projects it depends on (its L1 edges), as the longest prefix of the path that is a module; what follows is an item. The standard library, third-party packages and projects it does not declare give no edge.
 - **depends-on (L2):**
   - Each `import` gives an edge to the module it resolves to.
-  - A relative import climbs from the importing module's package, one package per dot after the first, in its own project only. An `__init__` module is its own package.
+  - A relative import climbs from the importing module's package, one package per dot after the first, in its own project only, never above the top-level package (unless the project's root is a package). An `__init__` module is its own package.
   - The edge is `exact` when what follows the module is nothing, `*`, or an item of it, and `inferred` otherwise (a re-export or a variable).
-- **extends (L3):** a base class named in the file: a class of its own module, or one it imports (`from m import B`, or `m.B` through `import m`).
+- **extends (L3):** a base class named where the class statement is: a nested class of the enclosing classes, a class of its own module, or one it imports (`from m import B`, or `m.B` through `import m`). `class C(C)` names the earlier `C`.
 - **calls (L4):** through the same names:
   - `f()` and `m.f()` to functions;
   - `C()` to `C.__init__`, and `C.m()` to that method;
-  - `self.m()` to a method of the caller's class or, failing that, of a base this file resolves.
+  - `self.m()` to a method of the caller's class or, failing that, of its first base when this file resolves it and it defines the method. Any other base comes after ancestors this file does not know in the method resolution order, so it gives no edge.
   - Calls through other values need types and give none, as in C#.
-- **Ambiguous imports:** the analyser writes `import a.b` and `from a import b` alike (`["a", "b"]`), so both readings bind their name (`a` and `b`). Code that uses the reading not meant fails with a `NameError`, so the extra binding resolves nothing real.
+- **Ambiguous imports:** the analyser writes `import a.b` and `from a import b` alike (`["a", "b"]`). `b` is bound to the path, and `a` to `["a"]` only when `a.b` is a module (only then can it be `import a.b`). A name that two imports bind differently, where either binding comes from such a path, is not bound: a missing edge is better than an invented one.
 - **Incremental:** an item edit re-resolves every Python file that mentions a changed name, as for C#. A method that comes or goes also reaches the files that mention its class, because `C()` and `self.m()` reach methods through the class.
 
 **5. Index keys.** `ANALYSER_VERSION` went to 5 with the engine slice (#154), because Python systems are new nodes for trees that hold Python files. Stored L1–L4 models are keyed by it too, so it goes to 6 with Python edges (#157): a model stored by version 5 has none.

@@ -8,18 +8,27 @@
 //! - **depends-on (L2):** each `import`. An absolute one (`import a.b`,
 //!   `from a.b import c`) as above; a relative one (`from . import x`,
 //!   `from ..p import y`) from the importing module's package, one package
-//!   up per dot after the first, in its own project only. `exact` when what
+//!   up per dot after the first, in its own project only, and never above
+//!   its top-level package (unless the project's root is a package). `exact` when what
 //!   follows the module is nothing, `*`, or an item of it; `inferred` when
 //!   it names something the module does not define (a re-export, a
 //!   variable).
-//! - **extends (L3):** each base class, by its name in the file: a class of
-//!   the file's own module, else one the file imports (`from m import B`,
-//!   or `m.B` through `import m`).
+//! - **extends (L3):** each base class, by its name where the class
+//!   statement is: a nested class of the enclosing classes, a class of the
+//!   file's own module, else one the file imports (`from m import B`, or
+//!   `m.B` through `import m`). `class C(C)` names the earlier `C`.
 //! - **calls (L4):** the analyser's call paths through the same names: `f()`
 //!   to a function of the module or one it imports, `m.f()`, `C()` to
-//!   `C.__init__`, `C.m()`, and `self.m()` to a method of the caller's class
-//!   or, failing that, of a base class this file resolves. Calls through
-//!   other values need types and give none.
+//!   `C.__init__` (and `Outer.Inner()` to `Outer.Inner.__init__`), `C.m()`,
+//!   and `self.m()` to a method of the caller's class or, failing that, of
+//!   its first base when this file resolves it and it defines the method
+//!   (any other base comes later in the method resolution order than
+//!   ancestors this file does not know). Calls through other values need
+//!   types and give none.
+//! - **Names:** `import a.b` and `from a import b` are both written
+//!   `["a", "b"]`; `b` is bound, and `a` only when `a.b` is a module. A
+//!   name two imports bind differently, where either is such a path, is
+//!   not bound.
 
 use std::collections::{HashMap, HashSet};
 
@@ -148,46 +157,84 @@ fn absolute_path(
     }
 }
 
-/// The names a file binds through its imports: name -> the path written.
-///
-/// The analyser writes `import a.b` and `from a import b` alike, as
-/// `["a", "b"]`: the first binds `a`, the second `b`. Both are bound. A
-/// name bound only by the reading that was not meant is one the code
-/// cannot use without a `NameError`, so it resolves nothing real.
-fn py_names(facts: &FileFacts) -> HashMap<&str, Vec<String>> {
-    let mut bound: HashMap<&str, Vec<String>> = HashMap::new();
-    for r in &facts.references {
-        let Reference::Use {
-            path: written,
-            alias,
-            ..
-        } = r
-        else {
-            continue;
-        };
-        let Some((last, _)) = written.split_last() else {
-            continue;
-        };
-        if last == "*" {
-            continue;
-        }
-        if let Some(a) = alias {
-            bound.insert(a.as_str(), written.clone());
-            continue;
-        }
-        if !last.starts_with('.') {
-            bound.insert(last.as_str(), written.clone());
-        }
-        if let Some(first) = written.first().filter(|f| !f.starts_with('.')) {
-            bound
-                .entry(first.as_str())
-                .or_insert_with(|| vec![first.clone()]);
-        }
-    }
-    bound
-}
-
 impl Resolver<'_> {
+    /// The names a file binds through its imports: name -> the path written.
+    ///
+    /// The analyser writes `import a.b` and `from a import b` alike, as
+    /// `["a", "b"]`. `import a.b` binds `a`, and is only possible when
+    /// `a.b` is a module; `from a import b` binds `b`. So `b` is bound to
+    /// the path, and `a` to `["a"]` only when the whole path is a module.
+    /// A name bound to two different paths when either binding comes from
+    /// such an ambiguous path is not bound at all: a missing edge is better
+    /// than an invented one (§2.3).
+    fn py_names<'f>(
+        &self,
+        path: &RepoPath,
+        system: &SystemKey,
+        module: &[String],
+        facts: &'f FileFacts,
+    ) -> HashMap<&'f str, Vec<String>> {
+        // name -> (path, whether ambiguous)
+        let mut seen: Vec<(&'f str, Vec<String>, bool)> = Vec::new();
+        for r in &facts.references {
+            let Reference::Use {
+                path: written,
+                alias,
+                ..
+            } = r
+            else {
+                continue;
+            };
+            let Some((last, _)) = written.split_last() else {
+                continue;
+            };
+            if last == "*" {
+                continue;
+            }
+            if let Some(a) = alias {
+                seen.push((a.as_str(), written.clone(), false));
+                continue;
+            }
+            let relative = written.first().is_some_and(|f| f.starts_with('.'));
+            if relative {
+                if !last.starts_with('.') {
+                    seen.push((last.as_str(), written.clone(), false));
+                }
+                continue;
+            }
+            let [first, ..] = written.as_slice() else {
+                continue;
+            };
+            if written.len() == 1 {
+                seen.push((first.as_str(), written.clone(), false));
+                continue;
+            }
+            seen.push((last.as_str(), written.clone(), true));
+            let whole_module = self
+                .py_resolve(path, system, module, written)
+                .is_some_and(|(_, _, rest)| rest.is_empty());
+            if whole_module {
+                seen.push((first.as_str(), vec![first.clone()], true));
+            }
+        }
+        let mut bound: HashMap<&'f str, Vec<String>> = HashMap::new();
+        let mut doubtful: HashSet<&'f str> = HashSet::new();
+        let mut ambiguous_names: HashSet<&'f str> = HashSet::new();
+        for (name, target, ambiguous) in &seen {
+            if *ambiguous {
+                ambiguous_names.insert(name);
+            }
+            if let Some(prev) = bound.get(name)
+                && prev != target
+            {
+                doubtful.insert(name);
+            }
+            bound.insert(name, target.clone());
+        }
+        bound.retain(|n, _| !(doubtful.contains(n) && ambiguous_names.contains(n)));
+        bound
+    }
+
     /// Resolves a written import or name path from `system`'s module
     /// `module` (file `path`): the target system, module, and the rest.
     fn py_resolve(
@@ -203,6 +250,11 @@ impl Resolver<'_> {
             full.pop();
         }
         if relative {
+            // Above the top-level package: only a project whose root is a
+            // package (a root `__init__`) has one there.
+            if fixed == 0 && !self.py_projects.is_module(system, &[]) {
+                return None;
+            }
             let (m, rest) = self.py_projects.split(system, &full, fixed)?;
             Some((system.clone(), m, rest.to_vec()))
         } else {
@@ -220,10 +272,11 @@ impl Resolver<'_> {
         module: &[String],
         names: &HashMap<&str, Vec<String>>,
         written: &[String],
+        skip_own: bool,
     ) -> Option<(SystemKey, Vec<String>, Vec<String>)> {
         let (first, rest) = written.split_first()?;
         // The module's own class or function.
-        if self.py_defines(system, module, first) {
+        if !skip_own && self.py_defines(system, module, first) {
             return Some((system.clone(), module.to_vec(), written.to_vec()));
         }
         let target = names.get(first.as_str())?;
@@ -255,7 +308,7 @@ impl Resolver<'_> {
             .map(|k| (k, Confidence::Inferred))
             .collect();
         let from = NodeId::within(Level::Module, system.clone(), file_module.to_vec());
-        let names = py_names(facts);
+        let names = self.py_names(path, system, file_module, facts);
         for r in &facts.references {
             match r {
                 Reference::Use { path: written, .. } => {
@@ -291,7 +344,7 @@ impl Resolver<'_> {
                     if self.model.node(&ty_id).is_none() {
                         continue;
                     }
-                    if let Some(to) = self.py_class(path, system, file_module, &names, r#trait)
+                    if let Some(to) = self.py_base(path, system, file_module, &names, ty, r#trait)
                         && to != ty_id
                     {
                         found.push((
@@ -317,13 +370,53 @@ impl Resolver<'_> {
         module: &[String],
         names: &HashMap<&str, Vec<String>>,
         written: &[String],
+        skip_own: bool,
     ) -> Option<NodeId> {
-        let (s, m, rest) = self.py_lookup(path, system, module, names, written)?;
+        let (s, m, rest) = self.py_lookup(path, system, module, names, written, skip_own)?;
         if rest.is_empty() {
             return None;
         }
         let id = NodeId::within(Level::Component, s, [m, vec![rest.join(".")]].concat());
         self.model.node(&id).is_some().then_some(id)
+    }
+
+    /// The class a base written in class `ty`'s statement names. Python
+    /// evaluates it where the class statement is: in the enclosing classes'
+    /// bodies (`Outer.A` for `class B(A)` inside `Outer`), then the module.
+    /// A base named as the class itself (`class Config(Config)`) is the
+    /// earlier binding of that name, never the class.
+    fn py_base(
+        &self,
+        path: &RepoPath,
+        system: &SystemKey,
+        module: &[String],
+        names: &HashMap<&str, Vec<String>>,
+        ty: &str,
+        written: &[String],
+    ) -> Option<NodeId> {
+        let outer: Vec<&str> = ty.split('.').collect();
+        if let [name] = written {
+            for n in (1..outer.len()).rev() {
+                let nested = format!("{}.{name}", outer[..n].join("."));
+                let id = NodeId::within(
+                    Level::Component,
+                    system.clone(),
+                    [module, &[nested]].concat(),
+                );
+                if self.model.node(&id).is_some() {
+                    return Some(id);
+                }
+            }
+        }
+        let own_name = outer.last().is_some_and(|l| written == [*l]);
+        self.py_class(
+            path,
+            system,
+            module,
+            names,
+            written,
+            own_name && outer.len() == 1,
+        )
     }
 
     /// The `calls` edges of one Python file's functions.
@@ -335,16 +428,17 @@ impl Resolver<'_> {
         facts: &FileFacts,
         node: impl Fn(usize) -> Option<&'n NodeId>,
     ) -> Vec<EdgeKey> {
-        let names = py_names(facts);
-        // Each class's bases this file resolves, for `self.m()`.
-        let mut bases: HashMap<&str, Vec<NodeId>> = HashMap::new();
+        let names = self.py_names(path, system, file_module, facts);
+        // Each class's bases in order, `None` where one does not resolve,
+        // for `self.m()`.
+        let mut bases: HashMap<&str, Vec<Option<NodeId>>> = HashMap::new();
         for r in &facts.references {
             if let Reference::Impl {
                 self_type, r#trait, ..
             } = r
                 && let [ty] = self_type.as_slice()
-                && let Some(b) = self.py_class(path, system, file_module, &names, r#trait)
             {
+                let b = self.py_base(path, system, file_module, &names, ty, r#trait);
                 bases.entry(ty.as_str()).or_default().push(b);
             }
         }
@@ -367,17 +461,20 @@ impl Resolver<'_> {
                         if self.model.node(&own).is_some() {
                             return Some(own);
                         }
-                        bases.get(class).into_iter().flatten().find_map(|b| {
-                            let id = NodeId::within(
-                                Level::Code,
-                                b.system_key().clone(),
-                                [b.path(), std::slice::from_ref(method)].concat(),
-                            );
-                            self.model.node(&id).is_some().then_some(id)
-                        })
+                        // Only the first base can answer for sure: the
+                        // method resolution order visits its ancestors,
+                        // which this file does not know, before the next
+                        // base. An unresolved first base answers nothing.
+                        let first = bases.get(class)?.first()?.as_ref()?;
+                        let id = NodeId::within(
+                            Level::Code,
+                            first.system_key().clone(),
+                            [first.path(), std::slice::from_ref(method)].concat(),
+                        );
+                        self.model.node(&id).is_some().then_some(id)
                     }),
                     written => self
-                        .py_lookup(path, system, file_module, &names, written)
+                        .py_lookup(path, system, file_module, &names, written, false)
                         .and_then(|(s, m, rest)| self.py_callee(&s, &m, &rest)),
                 };
                 if let Some(callee) = callee
@@ -408,11 +505,19 @@ impl Resolver<'_> {
                     [m, &[name.clone(), "__init__".to_owned()]].concat(),
                 ),
             ],
-            [class @ .., method] => vec![NodeId::within(
-                Level::Code,
-                system.clone(),
-                [m, &[class.join("."), method.clone()]].concat(),
-            )],
+            [class @ .., method] => vec![
+                NodeId::within(
+                    Level::Code,
+                    system.clone(),
+                    [m, &[class.join("."), method.clone()]].concat(),
+                ),
+                // `Outer.Inner()`: the nested class's constructor.
+                NodeId::within(
+                    Level::Code,
+                    system.clone(),
+                    [m, &[rest.join("."), "__init__".to_owned()]].concat(),
+                ),
+            ],
         };
         candidates
             .into_iter()
