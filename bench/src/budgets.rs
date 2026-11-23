@@ -109,6 +109,13 @@ pub const BUDGETS: &[Budget] = &[
     },
 ];
 
+/// Budgets measured outside bp-bench, and by what: the report lists them
+/// apart from those not yet measurable.
+pub const MEASURED_ELSEWHERE: &[(&str, &str)] = &[(
+    "installed_size",
+    "by CI's `package` job, which installs each package and fails over the budget (#162, DR 0016)",
+)];
+
 /// Looks up a budget row by id.
 pub fn budget(id: &str) -> Option<&'static Budget> {
     BUDGETS.iter().find(|b| b.id == id)
@@ -129,5 +136,9 @@ mod tests {
             );
         }
         assert_eq!(BUDGETS.len(), 15);
+        // A typo here would leave the budget among the unmeasurable.
+        for (id, _) in MEASURED_ELSEWHERE {
+            assert!(budget(id).is_some(), "unknown budget {id}");
+        }
     }
 }
