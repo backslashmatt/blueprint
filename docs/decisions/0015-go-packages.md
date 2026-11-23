@@ -51,7 +51,13 @@ In Go the unit of code is the **package**: a directory whose files share one nam
   - `T.M()` and `pkg.T.M()`, which are method expressions;
   - `self.m()` to the receiver's type, then to the one embedded type (declared in the same file) that has the method.
   - Calls through values need types and give none.
-- **Names:** an import binds its alias, or its package's directory name (for a module root, the module path's last element without `/vN`). A package whose `package` clause differs from its directory name is not reached through the clause name: a missing edge, never a wrong one. A name two imports bind differently is not bound.
+- **Names:**
+  - An import binds its alias, or its package's `package` clause name. `lang-go` records the clause in `FileFacts::package`, a new optional field, so `FACTS_FORMAT` goes to 2. If a package's files disagree, or none says, nothing is bound: guessing from the directory once bound a name the file used for a variable.
+  - An import from outside the repository still claims the name the go tool would give it, so a local package named alike is not bound in that file (stdlib `log` beside a local `log`). Any name two imports claim is not bound.
+  - Only exported names come through an import or a dot import, so `min` stays the builtin.
+  - An import named `self` turns off `self.m()` resolution in its file.
+- **Confidence:** an import into another module is as sure as the L1 dependency it goes through (`inferred` for a `require` matched only by name). Within a module it is `exact`.
+- **Known imprecision:** a field of function type shadows a promoted method of the same name, which the facts cannot see, so such a `self.m()` still resolves to the method. Calls are `inferred`.
 - `ANALYSER_VERSION` goes to 8 with edges.
 
 ## Measured

@@ -54,7 +54,7 @@ const KIND_FACTS: u8 = 2;
 /// The layout of [`FileFacts`] itself. Bump it whenever `FileFacts` or what
 /// it holds changes shape, so stored facts that would still decode, with
 /// defaults for new fields, are not reused.
-const FACTS_FORMAT: u8 = 1;
+const FACTS_FORMAT: u8 = 2;
 
 /// A tree's whole L1–L4 model (DR 0009). Bytes 25..29 of the key hold the
 /// Rust analyser's version and byte 29 [`codec::FORMAT`], since all three

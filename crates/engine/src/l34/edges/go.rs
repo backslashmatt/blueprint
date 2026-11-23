@@ -16,11 +16,19 @@
 //!   receiver's type, or else of the one type it embeds (in this file) that
 //!   has it. Calls through values need types and give none.
 //!
-//! An import binds its alias, or its package's directory name (for a
-//! module's root package, the module path's last element without a `/vN`
-//! suffix). A package whose `package` clause differs from its directory
-//! name is then not reached through its clause name: a missing edge, never
-//! a wrong one.
+//! An import binds its alias, or the name its package's `package` clause
+//! gives (none when the package's files disagree). An import from outside
+//! the repository still claims the name the go tool would give it, so a
+//! local package named alike is not bound in that file; neither is any
+//! name two imports claim. Only exported names come through an import. An
+//! import named `self` turns off `self.m()` resolution in its file.
+//!
+//! A cross-module import is as sure as the L1 dependency it goes through
+//! (`inferred` for a `require` matched only by name).
+//!
+//! Known imprecision: a field of function type shadows a promoted method of
+//! the same name, which the facts cannot see; such a `self.m()` call still
+//! resolves to the method (calls are `inferred`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +47,12 @@ pub(crate) struct Modules {
     deps: HashMap<SystemKey, Vec<SystemKey>>,
     /// Each module's packages, as paths in the module (`[]` for the root).
     packages: HashMap<SystemKey, HashSet<Vec<String>>>,
+    /// Each package's `package` clause name, when its files agree on one
+    /// (an external `x_test` package aside): what an import binds.
+    names: HashMap<(SystemKey, Vec<String>), Option<String>>,
+    /// How sure each module's L1 dependency on another is: an import into
+    /// it is no surer.
+    dep_confidence: HashMap<(SystemKey, SystemKey), Confidence>,
 }
 
 /// Whether files of `system` are Go.
@@ -66,21 +80,46 @@ impl Modules {
                 && from != to
             {
                 m.deps.entry(from.clone()).or_default().push(to.clone());
+                m.dep_confidence
+                    .insert((from.clone(), to.clone()), e.confidence);
             }
         }
         for v in m.deps.values_mut() {
             v.sort();
             v.dedup();
         }
-        for (_, place, module, _) in parsed {
+        for (_, place, module, facts) in parsed {
             if is_module(&place.system) {
                 m.packages
                     .entry(place.system.clone())
                     .or_default()
                     .insert((*module).clone());
+                let Some(name) = facts.package.as_ref().filter(|n| !n.ends_with("_test")) else {
+                    continue;
+                };
+                let slot = m
+                    .names
+                    .entry((place.system.clone(), (*module).clone()))
+                    .or_insert_with(|| Some(name.clone()));
+                if slot.as_ref() != Some(name) {
+                    *slot = None;
+                }
             }
         }
         m
+    }
+
+    /// How sure an import from `from` into `to` is: `exact` within a
+    /// module, else as sure as the L1 dependency.
+    fn confidence(&self, from: &SystemKey, to: &SystemKey) -> Confidence {
+        if from == to {
+            Confidence::Exact
+        } else {
+            self.dep_confidence
+                .get(&(from.clone(), to.clone()))
+                .copied()
+                .unwrap_or(Confidence::Inferred)
+        }
     }
 
     /// The package an import path names, from `system`: in it or a module
@@ -116,29 +155,44 @@ impl Modules {
             .then_some((s, pkg))
     }
 
-    /// The name an import binds by default: its package's directory name.
+    /// The name an import of a local package binds by default: its
+    /// `package` clause's name. None when its files disagree or no file
+    /// says: guessing from the directory can bind a name the file uses for
+    /// something else.
     fn default_name(&self, system: &SystemKey, pkg: &[String]) -> Option<String> {
-        if let Some(last) = pkg.last() {
-            return Some(last.clone());
-        }
-        let mp = self.paths.get(system)?;
-        let mut parts = mp.rsplit('/');
-        let last = parts.next()?;
-        // `example.com/app/v2` is package `app`.
-        let is_version = last.len() > 1
-            && last.starts_with('v')
-            && last[1..].bytes().all(|b| b.is_ascii_digit());
-        let name = if is_version { parts.next()? } else { last };
-        Some(name.to_owned())
+        self.names.get(&(system.clone(), pkg.to_vec()))?.clone()
     }
+}
+
+/// The name an import outside the repository binds by default, as the go
+/// tool would guess it: the last path element without a `/vN` or `.vN`
+/// version. Only used to see which names the file's other imports claim.
+fn guessed_name(import: &str) -> String {
+    let mut parts = import.rsplit('/');
+    let mut last = parts.next().unwrap_or(import);
+    let is_version =
+        |s: &str| s.len() > 1 && s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit());
+    if is_version(last)
+        && let Some(prev) = parts.next()
+    {
+        last = prev;
+    }
+    let last = match last.rsplit_once('.') {
+        Some((base, v)) if is_version(v) => base,
+        _ => last,
+    };
+    last.strip_prefix("go-").unwrap_or(last).to_owned()
 }
 
 /// What a file's imports bind.
 struct Imports {
     /// name -> (system, package)
     named: HashMap<String, (SystemKey, Vec<String>)>,
-    /// Dot imports: their names are the file's own.
+    /// Dot imports: their exported names are the file's own.
     dot: Vec<(SystemKey, Vec<String>)>,
+    /// An import named `self`: then `self.m()` may be that package, not
+    /// the receiver.
+    self_alias: bool,
 }
 
 impl Resolver<'_> {
@@ -146,12 +200,24 @@ impl Resolver<'_> {
         let mut named: HashMap<String, (SystemKey, Vec<String>)> = HashMap::new();
         let mut doubtful: HashSet<String> = HashSet::new();
         let mut dot = Vec::new();
+        let mut claimed: Vec<String> = Vec::new();
+        let mut self_alias = false;
         for r in &facts.references {
             let Reference::Use { path, alias, .. } = r else {
                 continue;
             };
+            if alias.as_deref() == Some("self") {
+                self_alias = true;
+            }
             let [import] = path.as_slice() else { continue };
             let Some((s, pkg)) = self.go_modules.resolve(system, import) else {
+                // An outside import still claims its name: a local package
+                // named alike must not take calls meant for it.
+                match alias.as_deref() {
+                    Some("_" | ".") => {}
+                    Some(a) => claimed.push(a.to_owned()),
+                    None => claimed.push(guessed_name(import)),
+                }
                 continue;
             };
             let name = match alias.as_deref() {
@@ -174,8 +240,17 @@ impl Resolver<'_> {
             }
             named.insert(name, (s, pkg));
         }
+        for c in claimed {
+            if named.contains_key(&c) {
+                doubtful.insert(c);
+            }
+        }
         named.retain(|n, _| !doubtful.contains(n));
-        Imports { named, dot }
+        Imports {
+            named,
+            dot,
+            self_alias,
+        }
     }
 
     /// One Go file's direct edges.
@@ -198,12 +273,13 @@ impl Resolver<'_> {
                 Reference::Use { path, .. } => {
                     let [import] = path.as_slice() else { continue };
                     if let Some((s, pkg)) = self.go_modules.resolve(system, import) {
+                        let conf = self.go_modules.confidence(system, &s);
                         let key = EdgeKey {
                             from: from.clone(),
                             to: NodeId::within(Level::Module, s, pkg),
                             kind: EdgeKind::DependsOn,
                         };
-                        found.push((key, Confidence::Exact));
+                        found.push((key, conf));
                     }
                 }
                 Reference::Impl {
@@ -242,7 +318,7 @@ impl Resolver<'_> {
     ) -> Option<NodeId> {
         let id = match written {
             [name] => component(system, file_module, name),
-            [pkg, name] => {
+            [pkg, name] if exported(name) => {
                 let (s, p) = imports.named.get(pkg)?;
                 component(s, p, name)
             }
@@ -282,6 +358,7 @@ impl Resolver<'_> {
             };
             for call in &item.calls {
                 let callee = match call.as_slice() {
+                    [s, _] if s == "self" && imports.self_alias => None,
                     [s, m] if s == "self" => receiver.and_then(|ty| {
                         exists(method(system, file_module, ty, m)).or_else(|| {
                             // One promoted method, from the one embedded
@@ -305,9 +382,12 @@ impl Resolver<'_> {
                         })
                     }),
                     [f] => exists(function(system, file_module, f)).or_else(|| {
+                        // Only exported names come through a dot import;
+                        // `min` stays the builtin.
                         let hits: Vec<NodeId> = imports
                             .dot
                             .iter()
+                            .filter(|_| exported(f))
                             .filter_map(|(s, p)| exists(function(s, p, f)))
                             .collect();
                         match hits.as_slice() {
@@ -316,13 +396,14 @@ impl Resolver<'_> {
                         }
                     }),
                     [x, f] => match imports.named.get(x) {
-                        Some((s, p)) => exists(function(s, p, f)),
+                        Some((s, p)) => exported(f).then(|| exists(function(s, p, f))).flatten(),
                         // `T.M(t)`: a method expression on a type here.
                         None => exists(method(system, file_module, x, f)),
                     },
                     [pkg, t, m] => imports
                         .named
                         .get(pkg)
+                        .filter(|_| exported(t) && exported(m))
                         .and_then(|(s, p)| exists(method(s, p, t, m))),
                     _ => None,
                 };
@@ -339,6 +420,12 @@ impl Resolver<'_> {
         }
         out
     }
+}
+
+/// Go's export rule: only a name starting with an upper-case letter is
+/// visible outside its package.
+fn exported(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
 }
 
 fn component(system: &SystemKey, pkg: &[String], name: &str) -> NodeId {

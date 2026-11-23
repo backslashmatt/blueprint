@@ -78,6 +78,10 @@ pub struct FileFacts {
     /// False if the parser had to recover from errors. Items found are kept,
     /// but the engine marks them `inferred`.
     pub clean: bool,
+    /// The package the file declares, where the language has a clause for
+    /// it (Go's `package store`): the name other files import it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
 }
 
 /// One L3 or L4 item.

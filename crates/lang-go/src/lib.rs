@@ -12,7 +12,8 @@
 //!   the signature; the block is the body. Function literals are part of
 //!   their function's body.
 //! - **Packages:** every item's [`Item::module`] is empty: in Go the package
-//!   is the directory, which the engine knows from the file's path.
+//!   is the directory, which the engine knows from the file's path. The
+//!   `package` clause's name is [`FileFacts::package`]: what importers bind.
 //! - **Visibility:** an exported (upper-case) name is public; any other is
 //!   restricted to its package.
 //! - **References:** each import spec is a [`Reference::Use`] whose path is
@@ -86,7 +87,7 @@ impl LanguageAnalyser for Go {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn handles(&self, path: &RepoPath) -> bool {
@@ -136,6 +137,12 @@ pub fn analyse(src: &[u8]) -> FileFacts {
         items: Vec::new(),
         references: Vec::new(),
     };
+    // `package store`: the name importers bind.
+    let package = named_children(root)
+        .into_iter()
+        .find(|c| c.kind() == "package_clause")
+        .and_then(|c| c.named_child(0))
+        .map(|n| text(src, n));
     // Top-level declarations; parser recovery can wrap some in `ERROR`.
     let mut work = vec![root];
     while let Some(list) = work.pop() {
@@ -161,6 +168,7 @@ pub fn analyse(src: &[u8]) -> FileFacts {
         items: out.items.into_iter().map(|(_, i)| i).collect(),
         references: out.references.into_iter().map(|(_, r)| r).collect(),
         clean: !root.has_error(),
+        package,
     }
 }
 
