@@ -125,6 +125,7 @@ pub fn analyse(src: &[u8]) -> FileFacts {
         items: out.items.into_iter().map(|(_, i)| i).collect(),
         references: out.references.into_iter().map(|(_, r)| r).collect(),
         clean: out.clean,
+        package: None,
     }
 }
 

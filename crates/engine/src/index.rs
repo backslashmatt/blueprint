@@ -25,7 +25,7 @@ use crate::l1::Diagnostic;
 /// The version of every analyser's output. Bump it whenever any analyser
 /// would produce a different model for the same files, so that indexes
 /// written by older code are not used.
-pub const ANALYSER_VERSION: u32 = 7;
+pub const ANALYSER_VERSION: u32 = 8;
 
 /// Overrides the cache directory, for tests and for users who keep caches
 /// elsewhere.
@@ -54,7 +54,7 @@ const KIND_FACTS: u8 = 2;
 /// The layout of [`FileFacts`] itself. Bump it whenever `FileFacts` or what
 /// it holds changes shape, so stored facts that would still decode, with
 /// defaults for new fields, are not reused.
-const FACTS_FORMAT: u8 = 1;
+const FACTS_FORMAT: u8 = 2;
 
 /// A tree's whole L1–L4 model (DR 0009). Bytes 25..29 of the key hold the
 /// Rust analyser's version and byte 29 [`codec::FORMAT`], since all three

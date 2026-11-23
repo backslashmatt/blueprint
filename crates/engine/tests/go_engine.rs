@@ -310,3 +310,77 @@ fn a_go_package_beside_a_package_json_stays_in_the_go_module() {
         "{s}"
     );
 }
+
+// Go edges (#166).
+
+fn edge_list(entries: &[(&str, &str)]) -> Vec<String> {
+    let tree = files(entries);
+    let (m, _) = deep(&tree);
+    m.edges()
+        .map(|e| format!("{} -> {} {:?}", e.key.from, e.key.to, e.key.kind))
+        .collect()
+}
+
+#[test]
+fn imports_resolve_through_required_local_modules_and_aliases() {
+    let e = edge_list(&[
+        ("lib/go.mod", "module example.com/lib\n\ngo 1.22\n"),
+        ("lib/util/util.go", "package util\n\nfunc Do() {}\n"),
+        ("lib/lib.go", "package lib\n\nfunc Root() {}\n"),
+        (
+            "app/go.mod",
+            "module example.com/app\n\ngo 1.22\n\nrequire example.com/lib v0.0.0\n\nreplace example.com/lib => ../lib\n",
+        ),
+        (
+            "app/main.go",
+            "package main\n\nimport (\n\tu \"example.com/lib/util\"\n\t\"example.com/lib\"\n\t. \"example.com/lib/util\"\n\t_ \"example.com/lib\"\n\t\"net/http\"\n)\n\nfunc main() { u.Do(); lib.Root(); Do(); http.Get(\"x\") }\n",
+        ),
+    ]);
+    let has = |s: &str| e.iter().any(|x| x.contains(s));
+    assert!(
+        has("L4:go:app#(functions)/main -> L4:go:lib#util/(functions)/Do Calls"),
+        "{e:#?}"
+    );
+    assert!(
+        has("L4:go:app#(functions)/main -> L4:go:lib#(functions)/Root Calls"),
+        "{e:#?}"
+    );
+    assert!(has("L2:go:app# -> L2:go:lib#util DependsOn"), "{e:#?}");
+    assert!(!e.iter().any(|x| x.contains("http")), "{e:#?}");
+}
+
+#[test]
+fn an_unrequired_module_gives_no_edge() {
+    let e = edge_list(&[
+        ("lib/go.mod", "module example.com/lib\n"),
+        ("lib/lib.go", "package lib\n\nfunc Root() {}\n"),
+        ("app/go.mod", "module example.com/app\n"),
+        (
+            "app/main.go",
+            "package main\n\nimport \"example.com/lib\"\n\nfunc main() { lib.Root() }\n",
+        ),
+    ]);
+    assert!(!e.iter().any(|x| x.contains("lib#")), "{e:#?}");
+}
+
+#[test]
+fn go_body_edits_keep_calls_right_in_place() {
+    let mut tree = files(&[
+        ("go.mod", "module example.com/app\n"),
+        ("a/a.go", "package a\n\nfunc F() {}\nfunc G() {}\n"),
+        (
+            "b/b.go",
+            "package b\n\nimport \"example.com/app/a\"\n\nfunc H() { a.F() }\n",
+        ),
+    ]);
+    let mut r = build(&tree);
+    assert_eq!(
+        change(
+            &mut r,
+            &mut tree,
+            "b/b.go",
+            "package b\n\nimport \"example.com/app/a\"\n\nfunc H() { a.G() }\n",
+        ),
+        Update::InPlace
+    );
+}
