@@ -1171,6 +1171,11 @@ fn ui_sessions(app: &Path, checkout: &Path, cache: &Path) -> Result<Vec<Measurem
         gated: false,
     };
     let session = format!("best of {UI_SESSIONS} scripted sessions (`blueprint --timings`)");
+    // On Linux the app always reports its peak; a missing one would drop
+    // the §4 memory row without failing the run.
+    if cfg!(target_os = "linux") && (peak.is_none() || first_peak.is_none()) {
+        return Err("the app reported no peak resident memory".into());
+    }
     let mut out = memory_rows(peak, first_peak);
     out.extend([
         row(
