@@ -300,7 +300,9 @@ fn names(f: &FileFacts) -> Vec<&str> {
 
 #[test]
 fn definitions_under_every_clause_are_items() {
-    let f = py("try:\n import x\nexcept ImportError:\n def f(): pass\nelse:\n def g(): pass\nfinally:\n def h(): pass\nif a:\n pass\nelif b:\n def i(): pass\nelse:\n def j(): pass\nfor _ in y:\n pass\nelse:\n def k(): pass\nmatch v:\n case 1:\n  def l(): pass\n");
+    let f = py(
+        "try:\n import x\nexcept ImportError:\n def f(): pass\nelse:\n def g(): pass\nfinally:\n def h(): pass\nif a:\n pass\nelif b:\n def i(): pass\nelse:\n def j(): pass\nfor _ in y:\n pass\nelse:\n def k(): pass\nmatch v:\n case 1:\n  def l(): pass\n",
+    );
     assert_eq!(names(&f), ["f", "g", "h", "i", "j", "k", "l"]);
     let c = py("class A:\n if X:\n  def m(self): pass\n else:\n  def m(self): pass\n");
     assert_eq!(names(&c), ["A", "m", "m"]);
@@ -320,7 +322,11 @@ fn string_text_counts_even_with_escapes() {
 
 #[test]
 fn nested_scopes_keep_their_names_to_themselves() {
-    assert!(item("def f():\n def g(cb):\n  cb()\n return g\n", "f").calls.is_empty());
+    assert!(
+        item("def f():\n def g(cb):\n  cb()\n return g\n", "f")
+            .calls
+            .is_empty()
+    );
     assert!(
         item("def f():\n class K:\n  def m(self):\n   self.go()\n", "f")
             .calls
@@ -355,7 +361,10 @@ fn match_captures_are_locals() {
 
 #[test]
 fn receiver_rules() {
-    let q = item("class C:\n @builtins.staticmethod\n def m(x):\n  x.run()\n", "m");
+    let q = item(
+        "class C:\n @builtins.staticmethod\n def m(x):\n  x.run()\n",
+        "m",
+    );
     assert!(q.calls.is_empty());
     let d = item("class C:\n def m(self=None):\n  self.go()\n", "m");
     assert_eq!(d.calls, vec![p(&["self", "go"])]);
@@ -395,10 +404,90 @@ fn a_type_alias_rename_keeps_its_signature() {
 #[test]
 fn deep_nesting_is_not_quadratic() {
     let n = 8000;
-    let src = format!("x = {}{}{}\n", "[".repeat(n), "a, ".repeat(n), "]".repeat(n));
+    let src = format!(
+        "x = {}{}{}\n",
+        "[".repeat(n),
+        "a, ".repeat(n),
+        "]".repeat(n)
+    );
     let t = std::time::Instant::now();
     let _ = Python.highlight(src.as_bytes());
     let _ = py(&src);
     // Was 1.5 s in release; generous for debug builds on CI.
     assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+}
+
+// Regressions from the second review (#153).
+
+#[test]
+fn a_walrus_in_a_comprehension_binds_in_the_function() {
+    let f = item(
+        "def f(ps):\n if any((m := match(p)) for p in ps):\n  m.group()\n",
+        "f",
+    );
+    assert_eq!(f.calls, vec![p(&["any"]), p(&["match"])]);
+}
+
+#[test]
+fn class_body_names_are_not_seen_by_its_methods() {
+    let f = item(
+        "def f():\n class C:\n  helper = 1\n  def m(self):\n   helper()\n  x = helper()\n",
+        "f",
+    );
+    // In `m`, `helper` is outside; in the class body it is the class's own.
+    assert_eq!(f.calls, vec![p(&["helper"])]);
+    let g = item(
+        "def f():\n class C:\n  helper = 1\n  ys = [helper() for _ in range(3)]\n",
+        "f",
+    );
+    assert_eq!(g.calls, vec![p(&["helper"]), p(&["range"])]);
+}
+
+#[test]
+fn defaults_and_the_first_iterable_are_evaluated_outside() {
+    for (src, want) in [
+        ("def f():\n def g(make=make()): pass\n", "make"),
+        ("def f():\n return lambda make=make(): 0\n", "make"),
+        ("def f():\n return [items for items in items()]\n", "items"),
+        ("def f():\n def g(x: T = T()) -> R: pass\n", "T"),
+    ] {
+        assert_eq!(item(src, "f").calls, vec![p(&[want])], "{src}");
+    }
+}
+
+#[test]
+fn global_hides_enclosing_function_names() {
+    let f = item(
+        "def f():\n helper = 1\n def g():\n  global helper\n  helper()\n",
+        "f",
+    );
+    assert_eq!(f.calls, vec![p(&["helper"])]);
+    // `nonlocal` still refers to the enclosing function's.
+    let n = item(
+        "def f():\n helper = 1\n def g():\n  nonlocal helper\n  helper()\n",
+        "f",
+    );
+    assert!(n.calls.is_empty());
+}
+
+#[test]
+fn class_and_concatenated_docstrings_ignore_reindenting() {
+    let a = item(
+        "class C:\n    \"\"\"Doc\n    more.\n    \"\"\"\n    x = 1\n",
+        "C",
+    );
+    let b = item(
+        "if x:\n        class C:\n            \"\"\"Doc\n            more.\n            \"\"\"\n            x = 1\n",
+        "C",
+    );
+    assert_eq!(a.body_hash, b.body_hash);
+    let c = item(
+        "def f():\n    \"\"\"Doc\n    more.\n    \"\"\" \"x\"\n    return 1\n",
+        "f",
+    );
+    let d = item(
+        "def f():\n        \"\"\"Doc\n        more.\n        \"\"\" \"x\"\n        return 1\n",
+        "f",
+    );
+    assert_eq!(c.body_hash, d.body_hash);
 }
