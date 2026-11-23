@@ -55,7 +55,7 @@ The **map** (#92), opened from the findings, shows the systems: one level at a t
 - **Nodes** are filled by how they changed: green added, red removed, orange public surface, purple moved or renamed, yellow changed, grey contained or unchanged. An orange outline means something inside changed. `›` means the node has children to drill into.
 - **Edges** are rolled up from the code (§3.2). A dependent is drawn above what it depends on. Green edges are new, red ones are gone, and grey ones are in both.
 - **Layout** follows DR 0010. Base and head share one layout, and going back to a view keeps its nodes where they were.
-- The view is centred on the selected node, which starts as the most changed one; selecting another node recentres it at the same zoom, and drilling resets pan and zoom. Only what is on screen is drawn.
+- A map that fits its area is shown whole and centred. One a little too large is scaled down to fit, to no less than 75%. One larger still is centred on the selected node (at first the most changed one), held so that no empty band shows past its edges. Selecting another node moves the view to it at the same zoom, and drilling resets pan and zoom (#148). Only what is on screen is drawn.
 - The map is built and laid out off the UI thread. A drill only reads its view's edges, which were rolled up once when the map was built: on medium, 0.03 ms on average and 3 ms at worst (`crates/ui/examples/map_measure.rs`).
 - A contained change (body only) does not mark its ancestors, so the map stays quiet about it until you drill down to it (§3.3).
 

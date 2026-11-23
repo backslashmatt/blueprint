@@ -1960,8 +1960,9 @@ fn edge_colour(status: EdgeStatus, dark: bool) -> u32 {
     }
 }
 
-/// The view as positioned boxes and edge segments (quads, DR 0003),
-/// centred on the selected node. Only what falls inside `viewport` is built
+/// The view as positioned boxes and edge segments (quads, DR 0003): the
+/// whole map centred when it fits, else centred on the selected node but
+/// held to the map's edges ([`crate::map::view_centre`], #148). Only what falls inside `viewport` is built
 /// (§4: no layout of off-screen content).
 fn canvas(
     map: &Map,
@@ -1973,14 +1974,35 @@ fn canvas(
 ) -> gpui::Div {
     let m = Metrics::default();
     let (vw, vh) = (area.0.max(1.0), area.1.max(1.0));
-    let centre = map
+    let selected = map
         .selected
         .and_then(|i| l.nodes.get(i))
-        .map_or((l.width / 2.0, l.height / 2.0), |p| {
-            (p.x + m.width / 2.0, p.y + m.height / 2.0)
-        });
-    let z = camera.zoom;
-    let at = |x: f32, y: f32| camera.to_screen((x, y), centre, (vw, vh));
+        .map(|p| (p.x, p.y, m.width, m.height));
+    // What is drawn: every node and every edge point (edge lanes can run
+    // outside the nodes' span).
+    let mut bounds = (0.0f32, 0.0f32, l.width, l.height);
+    for p in &l.nodes {
+        bounds = (
+            bounds.0.min(p.x),
+            bounds.1.min(p.y),
+            bounds.2.max(p.x + m.width),
+            bounds.3.max(p.y + m.height),
+        );
+    }
+    for p in l.edges.iter().flatten() {
+        bounds = (
+            bounds.0.min(p.x),
+            bounds.1.min(p.y),
+            bounds.2.max(p.x),
+            bounds.3.max(p.y),
+        );
+    }
+    // Scaled down a little to fit, if that is all it takes; the camera's
+    // zoom applies on top.
+    let z = camera.zoom * crate::map::fit_scale(bounds, (vw, vh));
+    let centre = crate::map::view_centre(bounds, selected, (vw, vh), z);
+    let view = Camera { zoom: z, ..camera };
+    let at = |x: f32, y: f32| view.to_screen((x, y), centre, (vw, vh));
     let visible = |x: f32, y: f32, w: f32, h: f32| {
         let (sx, sy) = at(x, y);
         sx + w * z >= 0.0 && sx <= vw && sy + h * z >= 0.0 && sy <= vh
