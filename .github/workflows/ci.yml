@@ -205,6 +205,10 @@ jobs:
         run: |
           cargo install cargo-packager --version 0.11.8 --locked
           cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --locked --features cli
+          # The Fedora package (#178): cargo-packager has no rpm format.
+          if [ "$RUNNER_OS" = Linux ]; then
+            cargo install cargo-generate-rpm --version 0.21.1 --locked
+          fi
       # The crates' licences ask for their notices to go with the binary; any licence outside
       # packaging/about.toml's list (REQUIREMENTS §8.1) fails this step.
       - name: Third-party notices
@@ -224,6 +228,10 @@ jobs:
             *) formats=nsis ;;
           esac
           cargo packager --release --formats "$formats"
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Its contents and dependencies are in crates/app/Cargo.toml.
+            cargo generate-rpm -p crates/app -o target/packages/
+          fi
           ls -l target/packages
       # The budget is the installed size: what the installer puts on disk.
       - name: Installed size (Linux)
@@ -269,6 +277,7 @@ jobs:
           name: installers-${{ runner.os }}
           path: |
             target/packages/*.deb
+            target/packages/*.rpm
             target/packages/*.exe
             target/packages/*.dmg
           if-no-files-found: error
@@ -541,6 +550,44 @@ jobs:
             exit-review.json
             exit-review.md
           if-no-files-found: warn
+
+  # The .rpm on the pinned Fedora (#178): installed with dnf, which resolves the dependencies
+  # it declares, sized against the 50 MB budget, and started under a virtual display.
+  rpm-fedora:
+    name: rpm install (fedora-45)
+    needs: package
+    runs-on: ${{ github.event_name != 'pull_request' && vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    container: fedora:45
+    timeout-minutes: 20
+    steps:
+      - name: A virtual display, its window manager and a software Vulkan driver
+        run: dnf install -y -q xorg-x11-server-Xvfb openbox mesa-vulkan-drivers procps-ng
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-Linux
+          path: installers
+      - name: Install the package
+        run: |
+          dnf install -y ./installers/*.rpm
+          rpm -qi blueprint
+          rpm -q --requires blueprint
+      - name: Installed size, with the licences and notices
+        run: |
+          rpm -ql blueprint
+          # A condition of redistribution: they must be installed even without docs.
+          for f in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.txt; do
+            test -s "/usr/share/licenses/blueprint/$f" || { echo "missing $f"; exit 1; }
+          done
+          bytes=$(rpm -ql blueprint | while read -r f; do [ -f "$f" ] && stat -c %s "$f"; done | awk '{ s += $1 } END { print s }')
+          .github/scripts/installed_size.sh rpm "$bytes"
+      - name: The installed app starts
+        run: |
+          timeout 120 spikes/gpui/xvfb-run.sh /usr/bin/blueprint --cold-start-report cold-start.json
+          cat cold-start.json
+      - name: Give the workspace back to the runner's user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora

@@ -24,5 +24,40 @@ gpui_platform.workspace = true
 # dispatch to the end of presenting that frame. Enables --latency-report.
 latency = ["gpui/profiler"]
 
+# The Fedora package (#178, DR 0017), built by cargo-generate-rpm in CI's `package` job
+# from the workspace root (`cargo generate-rpm -p crates/app`), so asset paths are relative
+# to it. The same contents as the .deb (Packager.toml): the stripped app, a desktop entry,
+# the icon, the licences and the third-party notices CI generates with cargo-about.
+[package.metadata.generate-rpm]
+name = "blueprint"
+summary = "Code review by architecture: a change shown as a change to the system's design."
+license = "MIT OR Apache-2.0"
+url = "https://github.com/backslashmatt/blueprint"
+# Dependencies are declared below, not discovered: the build host is Ubuntu.
+auto-req = "no"
+assets = [
+    { source = "target/release/blueprint", dest = "/usr/bin/blueprint", mode = "755" },
+    { source = "packaging/blueprint.desktop", dest = "/usr/share/applications/blueprint.desktop", mode = "644" },
+    { source = "packaging/icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/blueprint.png", mode = "644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/blueprint/LICENSE-MIT", mode = "644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/blueprint/LICENSE-APACHE", mode = "644" },
+    { source = "target/notices/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/licenses/blueprint/THIRD-PARTY-NOTICES.txt", mode = "644" },
+]
+
+# What the app links and loads at run time, in Fedora's package names (the .deb's list).
+[package.metadata.generate-rpm.requires]
+# Built on Ubuntu 24.04: the binary needs glibc 2.39 or newer.
+glibc = ">= 2.39"
+libxcb = "*"
+libxkbcommon = "*"
+libxkbcommon-x11 = "*"
+libwayland-client = "*"
+vulkan-loader = "*"
+fontconfig = "*"
+
+# The app draws with Vulkan; a minimal install may have no driver.
+[package.metadata.generate-rpm.recommends]
+mesa-vulkan-drivers = "*"
+
 [lints]
 workspace = true
