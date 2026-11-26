@@ -54,21 +54,32 @@ pub struct Asset {
 impl Manifest {
     /// The manifest as the release workflow writes it: pretty JSON with a
     /// final newline. These exact bytes are what is signed.
-    #[must_use]
-    pub fn to_json(&self) -> Vec<u8> {
-        // Serialising plain strings, numbers and maps cannot fail.
-        let mut out = serde_json::to_vec_pretty(self).unwrap_or_default();
+    ///
+    /// # Errors
+    /// When it cannot be serialised, so that nothing empty is ever signed.
+    pub fn to_json(&self) -> Result<Vec<u8>, UpdateError> {
+        let mut out = serde_json::to_vec_pretty(self)
+            .map_err(|e| UpdateError::Invalid(format!("the manifest cannot be written: {e}")))?;
         out.push(b'\n');
-        out
+        Ok(out)
     }
 
-    /// Whether every field is something the app may act on: a semver
-    /// version, and assets only under [`RELEASES`] with a 64-digit hash.
+    /// Whether every field is something the app may act on: a stable
+    /// semver version (no prerelease, so an unstable build never reaches
+    /// stable users; no build metadata, which semver would order after the
+    /// same version), and assets only under [`RELEASES`] with a 64-digit
+    /// hash.
     fn check(&self) -> Result<(), UpdateError> {
-        semver::Version::parse(&self.version)
+        let v = semver::Version::parse(&self.version)
             .map_err(|e| UpdateError::Format(format!("version {:?}: {e}", self.version)))?;
+        if !v.pre.is_empty() || !v.build.is_empty() {
+            return Err(UpdateError::Format(format!(
+                "version {}: only stable releases are offered",
+                self.version
+            )));
+        }
         for (platform, a) in &self.assets {
-            if !a.url.starts_with(RELEASES) || a.url.contains("..") {
+            if !release_url(&a.url) {
                 return Err(UpdateError::Format(format!(
                     "{platform}: {} is not under {RELEASES}",
                     a.url
@@ -80,6 +91,25 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+/// Whether `url` is a plain path under [`RELEASES`]: segments of letters,
+/// digits, `.`, `_`, `-` and `+` only, none empty or `.`/`..`. So no
+/// escapes, queries, fragments, userinfo or backslashes, whatever a URL
+/// parser would make of them.
+fn release_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix(RELEASES) else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+        })
 }
 
 /// Why an update was refused.

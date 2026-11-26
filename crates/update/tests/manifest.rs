@@ -32,7 +32,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[test]
 fn a_signed_manifest_verifies_and_round_trips() {
     let (secret, public) = keypair_from_seed(&SEED);
-    let bytes = manifest().to_json();
+    let bytes = manifest().to_json().expect("json");
     let sig = sign(&bytes, &secret);
     let got = verify(&bytes, &sig, &public).expect("verifies");
     assert_eq!(got, manifest());
@@ -41,7 +41,7 @@ fn a_signed_manifest_verifies_and_round_trips() {
 #[test]
 fn any_change_to_the_bytes_or_signature_is_refused() {
     let (secret, public) = keypair_from_seed(&SEED);
-    let bytes = manifest().to_json();
+    let bytes = manifest().to_json().expect("json");
     let sig = sign(&bytes, &secret);
     // One byte of the manifest changed: a version, a URL or a hash.
     let mut tampered = bytes.clone();
@@ -76,7 +76,7 @@ fn a_verified_manifest_must_also_be_well_formed() {
     if let Some(a) = m.assets.get_mut("linux-x86_64-deb") {
         a.url = "https://example.com/blueprint.deb".into();
     }
-    let bytes = m.to_json();
+    let bytes = m.to_json().expect("json");
     assert!(matches!(
         verify(&bytes, &sign(&bytes, &secret), &public),
         Err(UpdateError::Format(_))
@@ -84,7 +84,7 @@ fn a_verified_manifest_must_also_be_well_formed() {
     // Signed, but the version is not semver.
     let mut m = manifest();
     m.version = "two".into();
-    let bytes = m.to_json();
+    let bytes = m.to_json().expect("json");
     assert!(matches!(
         verify(&bytes, &sign(&bytes, &secret), &public),
         Err(UpdateError::Format(_))
@@ -95,6 +95,44 @@ fn a_verified_manifest_must_also_be_well_formed() {
         verify(&huge, &sign(&huge, &secret), &public),
         Err(UpdateError::Format(_))
     ));
+}
+
+#[test]
+fn only_stable_releases_under_this_repositorys_downloads_are_accepted() {
+    let (secret, public) = keypair_from_seed(&SEED);
+    let signed = |m: &Manifest| {
+        let bytes = m.to_json().expect("json");
+        let sig = sign(&bytes, &secret);
+        verify(&bytes, &sig, &public)
+    };
+    // Found in review (#180): a prerelease would reach stable users, and
+    // build metadata would make the same version look newer.
+    for version in ["0.3.0-alpha.1", "0.2.0+build.7"] {
+        let mut m = manifest();
+        m.version = version.into();
+        assert!(
+            matches!(signed(&m), Err(UpdateError::Format(_))),
+            "{version}"
+        );
+    }
+    // URLs that only look like they are under the releases.
+    for url in [
+        "https://github.com/backslashmatt/blueprint/releases/download/../../evil/x",
+        "https://github.com/backslashmatt/blueprint/releases/download/%2e%2e/%2e%2e/evil/x",
+        "https://github.com/backslashmatt/blueprint/releases/download/@evil.com/x",
+        "https://github.com/backslashmatt/blueprint/releases/download/v1/x?y=1",
+        "https://github.com/backslashmatt/blueprint/releases/download/v1/x#y",
+        "https://github.com/backslashmatt/blueprint/releases/download/v1\\x",
+        "https://github.com/backslashmatt/blueprint/releases/download//x",
+        "https://github.com/backslashmatt/blueprint/releases/download/",
+    ] {
+        let mut m = manifest();
+        if let Some(a) = m.assets.get_mut("linux-x86_64-deb") {
+            a.url = url.into();
+        }
+        assert!(matches!(signed(&m), Err(UpdateError::Format(_))), "{url}");
+    }
+    assert!(signed(&manifest()).is_ok());
 }
 
 #[test]
