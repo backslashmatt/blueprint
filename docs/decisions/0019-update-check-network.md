@@ -42,7 +42,7 @@ Auto-update is the app's only network access. REQUIREMENTS §1.5 rules out accou
 ## Measured
 
 - **Binary size:** the `check` example with `net`, stripped, is 2.20 MB, against 0.48 MB for the same crate without the network stack. That is about **1.7 MB** more on the app. Linux packages would install about 39.6 MB of 50 MB.
-- **Live check:** run against GitHub from CI's network, with nothing released, it answers `NoRelease`.
+- **Live check:** run against GitHub from a development container, with nothing released, it answers `NoRelease`.
 
 ## Revisit when
 
