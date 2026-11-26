@@ -1,14 +1,14 @@
 # Installing Blueprint
 
-CI builds installers on every run, as workflow artifacts (`installers-Linux` and `installers-Windows`) of the `package` job (#162). They are **unsigned**, and there are no releases yet: signing, notarisation and the update channel wait on the owner (#159).
+CI builds installers on every run, as workflow artifacts (`installers-Linux`, `installers-Windows` and `installers-macOS`) of the `package` job (#162). They are **unsigned**: the owner chose to set up paid signing last ([decision 0017](decisions/0017-owner-release-decisions.md)). There are no releases yet; updates will come from GitHub Releases.
 
 | Platform | Package | Install |
 |---|---|---|
 | Linux (x64), glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13) | `blueprint_<version>_amd64.deb` | `sudo apt install ./blueprint_<version>_amd64.deb` |
 | Windows (x64) | `blueprint_<version>_x64-setup.exe` | Run it. It installs for the current user, with no administrator rights. Windows SmartScreen warns about an unsigned installer; choose *More info*, then *Run anyway*. |
-| macOS | none yet | Waits on macOS CI (#133) |
+| macOS (Apple silicon) | `Blueprint_<version>_aarch64.dmg` | Open it, accept the licence, and drag Blueprint to Applications. It is not notarised, so macOS blocks the first launch: open System Settings › Privacy & Security and choose *Open Anyway* next to Blueprint. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/Blueprint.app` once. |
 
-There is no AppImage yet: its runtime embeds libfuse, whose LGPL licence needs the owner's decision (#159). Fedora has no package yet either.
+There is no AppImage: its runtime embeds libfuse, whose LGPL licence is outside the allowed list, and the owner chose to leave it out (#159). Fedora's `.rpm` is next (#37).
 
 The installers contain the app, `blueprint`, with its licences (`LICENSE-MIT`, `LICENSE-APACHE`) and the third-party notices of the crates it is built from (`THIRD-PARTY-NOTICES.txt`, in `/usr/lib/blueprint` on Linux and in the install directory on Windows). Nothing else is installed. The `bp` command line is built from source (see [building.md](building.md)): it is the headless front end for tests and benchmarks, and including it would take the install over the 50 MB budget ([decision 0016](decisions/0016-unsigned-installers.md)).
 

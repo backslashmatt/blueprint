@@ -54,10 +54,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS is deferred by the owner (#15, DR 0004); reinstate by adding macos-latest back.
+        # macOS is back (the owner on #133, DR 0017, superseding DR 0004).
         # Ubuntu is pinned to the current LTS, the named Linux target (§5.1, #37).
-        os: [ubuntu-24.04, windows-latest]
-    runs-on: ${{ matrix.os == 'windows-latest' && (github.event_name != 'pull_request' && vars.WINDOWS_RUNNER || 'windows-latest') || (github.event_name != 'pull_request' && vars.LINUX_RUNNER || matrix.os) }}
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os == 'windows-latest' && (github.event_name != 'pull_request' && vars.WINDOWS_RUNNER || 'windows-latest') || matrix.os == 'macos-latest' && 'macos-latest' || (github.event_name != 'pull_request' && vars.LINUX_RUNNER || matrix.os) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -76,6 +76,10 @@ jobs:
             if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
           fi
           rustup toolchain install
+      - name: A timeout command (macOS has none)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: .github/scripts/macos-timeout.sh
       - name: Install the app's libraries and a headless display (see docs/building.md)
         if: runner.os == 'Linux'
         run: |
@@ -158,14 +162,14 @@ jobs:
   # Unsigned installers (#162, DR 0016): the app alone, stripped, with its licences and
   # third-party notices, packaged by cargo-packager (Packager.toml), with its installed size
   # checked against the 50 MB budget (§4). The packages
-  # are workflow artifacts, not releases: publishing and signing wait on the owner (#159), and
-  # macOS packages on macOS CI (#133).
+  # are workflow artifacts, not releases. The owner chose paid signing last and updates from
+  # GitHub Releases (#159, DR 0017).
   package:
     name: package (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -194,7 +198,7 @@ jobs:
       - name: Build the app
         run: cargo build --release --locked -p blueprint-app
       - name: Strip the app
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: strip target/release/blueprint
       - name: Install cargo-packager and cargo-about
         shell: bash
@@ -214,7 +218,11 @@ jobs:
         shell: bash
         run: |
           # No AppImage yet: its runtime embeds libfuse (LGPL-2.1), outside §8.1 (DR 0016).
-          if [ "$RUNNER_OS" = Linux ]; then formats=deb; else formats=nsis; fi
+          case "$RUNNER_OS" in
+            Linux) formats=deb ;;
+            macOS) formats=dmg ;;
+            *) formats=nsis ;;
+          esac
           cargo packager --release --formats "$formats"
           ls -l target/packages
       # The budget is the installed size: what the installer puts on disk.
@@ -242,12 +250,27 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: .github/scripts/installed_size.sh NSIS "${{ steps.nsis.outputs.bytes }}"
+      # What a user installs from the disk image: the .app bundle dragged out of it.
+      - name: Installed size (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dmg=$(ls target/packages/*.dmg)
+          mnt=$(mktemp -d)
+          # The image shows the licence (Packager.toml's license-file) as an agreement to
+          # accept before it mounts: accept it, without a pager.
+          yes | PAGER=cat hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
+          app=$(ls -d "$mnt"/*.app)
+          find "$app" -type f | head -40
+          bytes=$(python3 -c 'import os,sys; print(sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk(sys.argv[1]) for f in fs if not os.path.islink(os.path.join(d,f))))' "$app")
+          hdiutil detach "$mnt"
+          .github/scripts/installed_size.sh "macOS .app" "$bytes"
       - uses: actions/upload-artifact@v4
         with:
           name: installers-${{ runner.os }}
           path: |
             target/packages/*.deb
             target/packages/*.exe
+            target/packages/*.dmg
           if-no-files-found: error
 
   # The §4 interaction budgets on Windows (#95): a release build runs the timed session that
@@ -476,6 +499,44 @@ jobs:
         if: always()
         with:
           name: exit-review-windows
+          path: |
+            exit-review.json
+            exit-review.md
+          if-no-files-found: warn
+
+  exit-test-macos:
+    # The same M4 exit test on macOS (REQUIREMENTS §6: every platform; #133).
+    name: M4 exit test (keyboard-only review, macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The reviewed pull request's base and head are older than a shallow checkout.
+          fetch-depth: 0
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - name: A timeout command (macOS has none)
+        run: .github/scripts/macos-timeout.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-app
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build the app (release)
+        run: cargo build --release --locked -p blueprint-app
+      - name: review #120 by keyboard and export it
+        run: |
+          .github/scripts/exit-test.sh \
+            1169157cbbb84878313606449cb3d59b71b9e2df 9786f409587a9a0295377c9a6c790808106d54a2
+          {
+            echo "### M4 exit test on macOS: the exported review of #120"
+            echo
+            cat exit-review.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exit-review-macos
           path: |
             exit-review.json
             exit-review.md
