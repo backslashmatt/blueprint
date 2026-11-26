@@ -572,9 +572,13 @@ jobs:
           dnf install -y ./installers/*.rpm
           rpm -qi blueprint
           rpm -q --requires blueprint
-      - name: Installed size
+      - name: Installed size, with the licences and notices
         run: |
           rpm -ql blueprint
+          # A condition of redistribution: they must be installed even without docs.
+          for f in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.txt; do
+            test -s "/usr/share/licenses/blueprint/$f" || { echo "missing $f"; exit 1; }
+          done
           bytes=$(rpm -ql blueprint | while read -r f; do [ -f "$f" ] && stat -c %s "$f"; done | awk '{ s += $1 } END { print s }')
           .github/scripts/installed_size.sh rpm "$bytes"
       - name: The installed app starts

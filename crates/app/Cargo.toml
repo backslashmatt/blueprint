@@ -39,9 +39,9 @@ assets = [
     { source = "target/release/blueprint", dest = "/usr/bin/blueprint", mode = "755" },
     { source = "packaging/blueprint.desktop", dest = "/usr/share/applications/blueprint.desktop", mode = "644" },
     { source = "packaging/icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/blueprint.png", mode = "644" },
-    { source = "LICENSE-MIT", dest = "/usr/share/licenses/blueprint/LICENSE-MIT", mode = "644", doc = true },
-    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/blueprint/LICENSE-APACHE", mode = "644", doc = true },
-    { source = "target/notices/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/licenses/blueprint/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/blueprint/LICENSE-MIT", mode = "644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/blueprint/LICENSE-APACHE", mode = "644" },
+    { source = "target/notices/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/licenses/blueprint/THIRD-PARTY-NOTICES.txt", mode = "644" },
 ]
 
 # What the app links and loads at run time, in Fedora's package names (the .deb's list).
@@ -54,6 +54,10 @@ libxkbcommon-x11 = "*"
 libwayland-client = "*"
 vulkan-loader = "*"
 fontconfig = "*"
+
+# The app draws with Vulkan; a minimal install may have no driver.
+[package.metadata.generate-rpm.recommends]
+mesa-vulkan-drivers = "*"
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 Type=Application
 Name=Blueprint
 Comment=Code review by architecture
-Exec=blueprint %f
+Exec=blueprint
 Icon=blueprint
 Terminal=false
 Categories=Development;
