@@ -133,6 +133,7 @@ nodes:
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs  Public
   L2:cargo:xtask#layering/tests  Module  "layering::tests"  Exact  xtask/src/layering.rs  Private
+  L2:cargo:xtask#release  Module  "release"  Exact  xtask/src/release.rs  Public
   L2:cargo:xtask#tests%2F  Directory  "tests/"  Unknown  xtask/tests
   L2:unowned:#docs%2F  Directory  "docs/"  Unknown  docs
   L2:unowned:#packaging%2F  Directory  "packaging/"  Unknown  packaging

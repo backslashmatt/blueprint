@@ -7360,7 +7360,9 @@ version = "0.1.0"
 dependencies = [
  "blueprint-update",
  "getrandom 0.3.4",
+ "hex",
  "serde_json",
+ "sha2",
  "toml 1.2.1+spec-1.1.0",
 ]
 

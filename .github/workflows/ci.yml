@@ -7,12 +7,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # The release workflow runs all of CI first, and publishes only if every job passes (#179).
+  workflow_call:
 
 # Superseded PR runs are cancelled to save minutes (see issue #15).
 concurrency:
   # PR runs share a group per branch, so a new push cancels the old run. Pushes to main get a group
   # per commit, so every commit on main is checked.
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  # The ref is in the key too, so the Release workflow's run of CI on a tag never shares a group
+  # with main's run of the same commit.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Runners: GitHub-hosted by default. Setting the repository variable LINUX_RUNNER (or
@@ -588,6 +592,40 @@ jobs:
       - name: Give the workspace back to the runner's user
         if: always()
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
+
+  # The release's update manifest on every PR (#179, DR 0018), as the Release workflow writes it
+  # from these installers, signed with a throwaway key made in the job. Nothing is published.
+  release-dry-run:
+    name: release manifest (dry run)
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: release
+          merge-multiple: true
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Write and sign the manifest with a throwaway key
+        run: |
+          ls -l release
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "Dry run of $version." > notes.txt
+          cargo run --locked -q -p xtask -- release-manifest "$version" notes.txt \
+            release/*.deb release/*.rpm release/*.exe release/*.dmg
+          # A key pair that exists only in this job, read by label; release-sign checks the
+          # seed against the throwaway public key named here.
+          keys=$(cargo run --locked -q -p xtask -- update-keygen)
+          public=$(echo "$keys" | sed -n 's/^public //p')
+          UPDATE_SIGNING_KEY=$(echo "$keys" | sed -n 's/^secret //p') \
+            cargo run --locked -q -p xtask -- release-sign --expect-public "$public" release/manifest.json
+          cat release/manifest.json release/manifest.json.sig
 
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
