@@ -18,6 +18,9 @@ jobs:
   publish:
     needs: ci
     runs-on: ubuntu-24.04
+    # The owner can require a reviewer for this environment and keep UPDATE_SIGNING_KEY in it
+    # (repository settings), so no release is signed without their approval.
+    environment: release
     permissions:
       contents: write
     env:
@@ -32,6 +35,10 @@ jobs:
           echo "workspace $version, tag $TAG"
           test "v$version" = "$TAG"
           echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: The tagged commit is on main (reviewed and merged)
+        run: |
+          git fetch -q origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: The signing key is set
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
@@ -47,16 +54,22 @@ jobs:
           merge-multiple: true
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
-      - name: Write and sign the update manifest
-        env:
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      # Built without the secret, so no build script ever runs with the key in its environment.
+      - name: Build xtask
+        run: cargo build --locked -q -p xtask
+      - name: Write the update manifest
         run: |
           ls -l release
-          # The tag's message is the release notes.
-          git tag -l --format='%(contents)' "$TAG" > notes.txt
+          # An annotated tag's message is the release notes; otherwise just the version.
+          if [ "$(git cat-file -t "$TAG")" = tag ]; then
+            git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" > notes.txt
+          fi
           [ -s notes.txt ] || echo "Blueprint $VERSION" > notes.txt
-          cargo run --locked -q -p xtask -- release-manifest "$VERSION" notes.txt release/*.deb release/*.rpm release/*.exe release/*.dmg
-          cargo run --locked -q -p xtask -- release-sign release/manifest.json
+          target/debug/xtask release-manifest "$VERSION" notes.txt release/*.deb release/*.rpm release/*.exe release/*.dmg
+      - name: Sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: target/debug/xtask release-sign release/manifest.json
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
