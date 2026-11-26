@@ -591,6 +591,39 @@ jobs:
         if: always()
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
 
+  # The release's update manifest on every PR (#179, DR 0018), as the Release workflow writes it
+  # from these installers, signed with a throwaway key made in the job. Nothing is published.
+  release-dry-run:
+    name: release manifest (dry run)
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: release
+          merge-multiple: true
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Write and sign the manifest with a throwaway key
+        run: |
+          ls -l release
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "Dry run of $version." > notes.txt
+          cargo run --locked -q -p xtask -- release-manifest "$version" notes.txt \
+            release/*.deb release/*.rpm release/*.exe release/*.dmg
+          # A key that exists only in this job: the committed public key, once it exists, is
+          # the real one's, so release-sign is checked against the throwaway pair instead.
+          UPDATE_SIGNING_KEY=$(cargo run --locked -q -p xtask -- update-keygen | sed -n 2p) \
+            UPDATE_ALLOW_UNCOMMITTED_KEY=1 \
+            cargo run --locked -q -p xtask -- release-sign release/manifest.json
+          cat release/manifest.json release/manifest.json.sig
+
   # Fedora, the other named Linux target (§5.1, #37), in a container on the Linux runner. Clippy
   # already runs on Ubuntu, so this job only builds and tests. Move the tag to each new Fedora
   # release; `latest` is not used, so a release never changes CI unannounced.

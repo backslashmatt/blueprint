@@ -99,7 +99,11 @@ fn release_sign() -> Result<(), String> {
         env!("CARGO_MANIFEST_DIR"),
         "/../crates/update/release-key.txt"
     );
-    if let Ok(text) = std::fs::read_to_string(committed) {
+    // CI's dry run signs with a throwaway key, which is not the committed one's pair.
+    let dry_run = std::env::var_os("UPDATE_ALLOW_UNCOMMITTED_KEY").is_some();
+    if let Ok(text) = std::fs::read_to_string(committed)
+        && !dry_run
+    {
         let key = blueprint_update::parse_public_key(&text).map_err(|e| e.to_string())?;
         if key != public {
             return Err(
