@@ -6,7 +6,7 @@ CI builds installers on every run, as workflow artifacts (`installers-Linux`, `i
 |---|---|---|
 | Linux (x64), glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13) | `blueprint_<version>_amd64.deb` | `sudo apt install ./blueprint_<version>_amd64.deb` |
 | Windows (x64) | `blueprint_<version>_x64-setup.exe` | Run it. It installs for the current user, with no administrator rights. Windows SmartScreen warns about an unsigned installer; choose *More info*, then *Run anyway*. |
-| macOS (Apple silicon) | `Blueprint_<version>_aarch64.dmg` | Open it and drag Blueprint to Applications. It is not notarised, so the first time, Control-click the app and choose *Open*, then *Open* again (or allow it in System Settings › Privacy & Security). |
+| macOS (Apple silicon) | `Blueprint_<version>_aarch64.dmg` | Open it, accept the licence, and drag Blueprint to Applications. It is not notarised, so macOS blocks the first launch: open System Settings › Privacy & Security and choose *Open Anyway* next to Blueprint. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/Blueprint.app` once. |
 
 There is no AppImage: its runtime embeds libfuse, whose LGPL licence is outside the allowed list, and the owner chose to leave it out (#159). Fedora's `.rpm` is next (#37).
 
