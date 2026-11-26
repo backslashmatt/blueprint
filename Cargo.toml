@@ -9,6 +9,7 @@ members = [
     "crates/lang-python",
     "crates/lang-go",
     "crates/store",
+    "crates/update",
     "crates/protocol",
     "crates/cli",
     "crates/ui",
@@ -36,6 +37,7 @@ blueprint-lang-csharp = { path = "crates/lang-csharp" }
 blueprint-lang-python = { path = "crates/lang-python" }
 blueprint-lang-go = { path = "crates/lang-go" }
 blueprint-store = { path = "crates/store" }
+blueprint-update = { path = "crates/update" }
 blueprint-protocol = { path = "crates/protocol" }
 blueprint-ui = { path = "crates/ui" }
 # Git object access (DR 0005). Pure-Rust compression; `revision` for rev-parse.
