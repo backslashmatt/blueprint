@@ -1,0 +1,20 @@
+[package]
+name = "blueprint-update"
+description = "Signed update manifests for releases from GitHub Releases (#179, DR 0018): format, signing, verification. Headless; no network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Ed25519 signatures over the manifest (BSD-3-Clause, §8.1).
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "zeroize"] }
+sha2 = "0.10"
+semver = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
