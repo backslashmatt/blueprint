@@ -64,6 +64,16 @@ impl Manifest {
         Ok(out)
     }
 
+    /// Whether every field is something the app may act on, as [`verify`]
+    /// checks after the signature: what the release workflow checks before
+    /// it signs.
+    ///
+    /// # Errors
+    /// [`UpdateError::Format`] for anything [`verify`] would refuse.
+    pub fn validate(&self) -> Result<(), UpdateError> {
+        self.check()
+    }
+
     /// Whether every field is something the app may act on: a stable
     /// semver version (no prerelease, so an unstable build never reaches
     /// stable users; no build metadata, which semver would order after the

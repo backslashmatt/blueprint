@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # The release workflow runs all of CI first, and publishes only if every job passes (#179).
+  workflow_call:
 
 # Superseded PR runs are cancelled to save minutes (see issue #15).
 concurrency:

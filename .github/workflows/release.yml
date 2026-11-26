@@ -1,0 +1,66 @@
+# Releases (#179, DR 0017, DR 0018): on a version tag `v<version>`, all of CI runs, and only if
+# every job passes are the installers published as a GitHub Release, with the update manifest
+# signed by the key in the repository secret UPDATE_SIGNING_KEY. Without that secret, nothing is
+# published. Installers are unsigned until the owner sets up platform signing (DR 0017).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: The tag names the workspace's version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "workspace $version, tag $TAG"
+          test "v$version" = "$TAG"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: The signing key is set
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::The repository secret UPDATE_SIGNING_KEY is not set (#159): nothing is published."
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: release
+          merge-multiple: true
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Write and sign the update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          ls -l release
+          # The tag's message is the release notes.
+          git tag -l --format='%(contents)' "$TAG" > notes.txt
+          [ -s notes.txt ] || echo "Blueprint $VERSION" > notes.txt
+          cargo run --locked -q -p xtask -- release-manifest "$VERSION" notes.txt release/*.deb release/*.rpm release/*.exe release/*.dmg
+          cargo run --locked -q -p xtask -- release-sign release/manifest.json
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "Blueprint $VERSION" --notes-file notes.txt \
+            release/*.deb release/*.rpm release/*.exe release/*.dmg \
+            release/manifest.json release/manifest.json.sig
