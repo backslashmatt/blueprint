@@ -70,15 +70,16 @@ pub fn check(
     platform: &str,
     public: &VerifyingKey,
 ) -> Result<Check, UpdateError> {
-    let net = UpdateError::Network;
-    let Some(bytes) = fetch.get(LATEST, MAX_MANIFEST as u64).map_err(net)? else {
+    // The manifest and its signature are two requests to "latest". If a
+    // release is published between them they belong to different releases
+    // and cannot verify, so a bad signature is read once more, whole.
+    let manifest = match latest(fetch, public) {
+        Err(UpdateError::BadSignature) => latest(fetch, public)?,
+        other => other?,
+    };
+    let Some(manifest) = manifest else {
         return Ok(Check::NoRelease);
     };
-    let sig = fetch
-        .get(&format!("{LATEST}.sig"), 1024)
-        .map_err(net)?
-        .ok_or(UpdateError::BadSignature)?;
-    let manifest = verify(&bytes, &String::from_utf8_lossy(&sig), public)?;
     if !newer(current, &manifest)? {
         return Ok(Check::UpToDate);
     }
@@ -86,6 +87,19 @@ pub fn check(
         Some(asset) => Check::Available { manifest, asset },
         None => Check::UpToDate,
     })
+}
+
+/// The latest release's manifest, verified; `None` if nothing is released.
+fn latest(fetch: &impl Fetch, public: &VerifyingKey) -> Result<Option<Manifest>, UpdateError> {
+    let net = UpdateError::Network;
+    let Some(bytes) = fetch.get(LATEST, MAX_MANIFEST as u64).map_err(net)? else {
+        return Ok(None);
+    };
+    let sig = fetch
+        .get(&format!("{LATEST}.sig"), 1024)
+        .map_err(net)?
+        .ok_or(UpdateError::BadSignature)?;
+    verify(&bytes, &String::from_utf8_lossy(&sig), public).map(Some)
 }
 
 /// Downloads `asset` and checks it against its size and hash, so that what

@@ -1,6 +1,9 @@
 //! HTTPS for the update check (feature `net`, DR 0019): ureq with rustls,
-//! certificates checked by the platform's verifier, HTTPS only, bounded in
-//! time and size. Only GitHub is asked, and nothing is sent but the request.
+//! certificates checked by the platform's verifier, HTTPS only on every
+//! redirect, bounded in time and size. Requests go to github.com, which
+//! redirects downloads to githubusercontent.com; the system's proxy
+//! settings (`HTTPS_PROXY`) are honoured. Nothing is sent but the request,
+//! with `User-Agent: Blueprint/<version>` and `Accept: */*`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +30,12 @@ impl Https {
             .tls_config(tls)
             .https_only(true)
             .max_redirects(5)
-            .timeout_global(Some(Duration::from_secs(300)))
+            // No limit on the whole request: an installer on a slow link takes as long
+            // as it takes. Each phase is bounded instead, and a stalled body fails.
+            .timeout_resolve(Some(Duration::from_secs(30)))
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_per_read(Some(Duration::from_secs(60)))
             .user_agent(format!("Blueprint/{version}"))
             .http_status_as_error(false)
             .build()

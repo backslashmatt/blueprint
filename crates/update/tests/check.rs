@@ -92,7 +92,10 @@ fn a_release_signed_by_another_key_or_a_tampered_download_is_refused() {
     // A manifest without its signature is refused too.
     let mut unsigned = release(1, b"the installer");
     unsigned.0.remove(&format!("{LATEST}.sig"));
-    assert!(check(&unsigned, "0.1.0", "linux-x86_64-deb", &public).is_err());
+    assert_eq!(
+        check(&unsigned, "0.1.0", "linux-x86_64-deb", &public),
+        Err(UpdateError::BadSignature)
+    );
     // The right release, but the host serves other bytes.
     let swapped = release(1, b"evil bytes!!!");
     let Ok(Check::Available { asset, .. }) = check(&swapped, "0.1.0", "linux-x86_64-deb", &public)
@@ -100,4 +103,47 @@ fn a_release_signed_by_another_key_or_a_tampered_download_is_refused() {
         panic!("no update offered");
     };
     assert_eq!(download(&swapped, &asset), Err(UpdateError::BadDownload));
+}
+
+/// Serves the first manifest request from one release and every later
+/// request from another: a release published between the two requests.
+struct Racing {
+    before: Fake,
+    after: Fake,
+    calls: std::cell::Cell<u32>,
+}
+
+impl Fetch for Racing {
+    fn get(&self, url: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
+        let n = self.calls.get();
+        self.calls.set(n + 1);
+        if n == 0 { &self.before } else { &self.after }.get(url, limit)
+    }
+}
+
+#[test]
+fn a_release_published_between_the_two_requests_is_read_again() {
+    let (_, public) = keypair_from_seed(&[1; 32]);
+    // The first request gets the previous release's manifest (other bytes);
+    // the signature request already gets the new release's. The pair cannot
+    // verify, so the check reads both again.
+    let mut before = release(1, b"the installer");
+    let mut old = Manifest {
+        version: "0.1.5".into(),
+        notes: "Older.".into(),
+        assets: Default::default(),
+    };
+    old.assets.clear();
+    if let Ok(bytes) = old.to_json() {
+        before.0.insert(LATEST.to_owned(), bytes);
+    }
+    let racing = Racing {
+        before,
+        after: release(1, b"the installer"),
+        calls: std::cell::Cell::new(0),
+    };
+    assert!(matches!(
+        check(&racing, "0.1.0", "linux-x86_64-deb", &public),
+        Ok(Check::Available { .. })
+    ));
 }
