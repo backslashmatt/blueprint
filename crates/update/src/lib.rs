@@ -25,6 +25,86 @@ pub const RELEASES: &str = "https://github.com/backslashmatt/blueprint/releases/
 /// The largest manifest read, in bytes. A real one is a few hundred.
 pub const MAX_MANIFEST: usize = 64 * 1024;
 
+/// The latest release's manifest. GitHub redirects it to the newest
+/// published release's asset; its signature is at the same URL plus `.sig`.
+pub const LATEST: &str =
+    "https://github.com/backslashmatt/blueprint/releases/latest/download/manifest.json";
+
+/// Where an update check reads from: an HTTPS client in the app (feature
+/// `net`), a fake in tests.
+pub trait Fetch {
+    /// The bytes at `url`, `None` if it is not found (HTTP 404). Refuses a
+    /// body of more than `limit` bytes.
+    ///
+    /// # Errors
+    /// Any other failure, as text for the user.
+    fn get(&self, url: &str, limit: u64) -> Result<Option<Vec<u8>>, String>;
+}
+
+/// What an update check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    /// No release is newer, or the newest has nothing for this platform.
+    UpToDate,
+    /// Nothing has been released yet.
+    NoRelease,
+    /// A newer, signed release with an installer for this platform.
+    Available {
+        /// The release.
+        manifest: Manifest,
+        /// Its installer for this platform.
+        asset: Asset,
+    },
+}
+
+/// Checks [`LATEST`] for a release newer than `current` with an installer
+/// for `platform`. The manifest is trusted only once its signature checks
+/// against `public` ([`verify`]).
+///
+/// # Errors
+/// A network failure, or a manifest that is unsigned, wrongly signed or
+/// not usable.
+pub fn check(
+    fetch: &impl Fetch,
+    current: &str,
+    platform: &str,
+    public: &VerifyingKey,
+) -> Result<Check, UpdateError> {
+    let net = UpdateError::Network;
+    let Some(bytes) = fetch.get(LATEST, MAX_MANIFEST as u64).map_err(net)? else {
+        return Ok(Check::NoRelease);
+    };
+    let sig = fetch
+        .get(&format!("{LATEST}.sig"), 1024)
+        .map_err(net)?
+        .ok_or(UpdateError::BadSignature)?;
+    let manifest = verify(&bytes, &String::from_utf8_lossy(&sig), public)?;
+    if !newer(current, &manifest)? {
+        return Ok(Check::UpToDate);
+    }
+    Ok(match manifest.assets.get(platform).cloned() {
+        Some(asset) => Check::Available { manifest, asset },
+        None => Check::UpToDate,
+    })
+}
+
+/// Downloads `asset` and checks it against its size and hash, so that what
+/// is returned is exactly the installer the signed manifest names.
+///
+/// # Errors
+/// A network failure, or bytes that are not the installer.
+pub fn download(fetch: &impl Fetch, asset: &Asset) -> Result<Vec<u8>, UpdateError> {
+    let bytes = fetch
+        .get(&asset.url, asset.size)
+        .map_err(UpdateError::Network)?
+        .ok_or_else(|| UpdateError::Network(format!("{}: not found", asset.url)))?;
+    check_asset(&bytes, asset)?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "net")]
+pub mod net;
+
 /// One release, as its manifest describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +213,8 @@ pub enum UpdateError {
     BadDownload,
     /// A key or version that cannot be read.
     Invalid(String),
+    /// The release could not be reached.
+    Network(String),
 }
 
 impl fmt::Display for UpdateError {
@@ -146,6 +228,7 @@ impl fmt::Display for UpdateError {
                 f.write_str("the downloaded installer does not match its manifest")
             }
             UpdateError::Invalid(why) => f.write_str(why),
+            UpdateError::Network(why) => write!(f, "cannot reach the releases: {why}"),
         }
     }
 }
