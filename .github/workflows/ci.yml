@@ -256,7 +256,9 @@ jobs:
         run: |
           dmg=$(ls target/packages/*.dmg)
           mnt=$(mktemp -d)
-          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          # The image shows the licence (Packager.toml's license-file) as an agreement to
+          # accept before it mounts: accept it, without a pager.
+          yes | PAGER=cat hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
           app=$(ls -d "$mnt"/*.app)
           find "$app" -type f | head -40
           bytes=$(python3 -c 'import os,sys; print(sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk(sys.argv[1]) for f in fs if not os.path.islink(os.path.join(d,f))))' "$app")
