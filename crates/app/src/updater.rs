@@ -4,11 +4,14 @@
 //! installed from a package, in scripted runs, or with
 //! `BLUEPRINT_NO_UPDATE_CHECK` set.
 
-use std::path::Path;
+use std::cell::Cell;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use blueprint_ui::workspace::Workspace;
-use blueprint_update::{Check, schedule};
+use blueprint_update::{Asset, Check, schedule};
 use gpui::{App, WeakEntity};
 
 /// Turns the update check off when set to anything.
@@ -73,7 +76,129 @@ fn linux_package(exe: &Path, root: &Path) -> Option<&'static str> {
 /// The banner for an available update.
 #[must_use]
 pub fn banner(version: &str, current: &str) -> String {
-    format!("Blueprint {version} is available (this is {current}): {RELEASES_PAGE}")
+    format!(
+        "Blueprint {version} is available (this is {current}). Ctrl+U, or Update in the command palette, downloads and opens its installer."
+    )
+}
+
+/// The installer's file name: the last segment of its URL, which
+/// `blueprint_update::verify` only accepts as letters, digits, `.`, `_`, `-`
+/// and `+`, and only with the extension of `platform`'s installer, so that
+/// nothing else (a `.desktop` file, say) is ever handed to the system.
+#[must_use]
+pub fn file_name<'a>(asset: &'a Asset, platform: &str) -> Option<&'a str> {
+    let ext = match platform {
+        "linux-x86_64-deb" => ".deb",
+        "linux-x86_64-rpm" => ".rpm",
+        "macos-aarch64" => ".dmg",
+        "windows-x86_64" => ".exe",
+        _ => return None,
+    };
+    asset
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|n| n.len() > ext.len() && n.ends_with(ext))
+}
+
+/// How the platform opens a downloaded installer: the package manager's
+/// front end on Linux, Finder on macOS, the NSIS installer itself on
+/// Windows. Nothing is installed without the user going through it.
+#[must_use]
+pub fn installer_command(platform: &str, installer: &Path) -> (OsString, Vec<OsString>) {
+    match platform {
+        "windows-x86_64" => (installer.as_os_str().to_owned(), Vec::new()),
+        "macos-aarch64" => ("open".into(), vec![installer.as_os_str().to_owned()]),
+        _ => ("xdg-open".into(), vec![installer.as_os_str().to_owned()]),
+    }
+}
+
+/// Downloads `asset`, checked against the signed manifest, into
+/// `<data>/updates/`, and opens it with the platform. Blocking: run on its
+/// own thread.
+fn fetch_and_open(
+    asset: &Asset,
+    platform: &str,
+    dir: &Path,
+    current: &str,
+) -> Result<PathBuf, String> {
+    let name = file_name(asset, platform).ok_or("the release has no installer of this kind")?;
+    let https = blueprint_update::net::Https::new(current);
+    let bytes = blueprint_update::download(&https, asset).map_err(|e| e.to_string())?;
+    let updates = dir.join("updates");
+    std::fs::create_dir_all(&updates).map_err(|e| format!("{}: {e}", updates.display()))?;
+    let path = updates.join(name);
+    // Written beside it and renamed into place, so a file planted at the
+    // name is replaced, never written through.
+    let partial = updates.join(format!(".{name}.partial"));
+    let _ = std::fs::remove_file(&partial);
+    std::fs::write(&partial, bytes).map_err(|e| format!("{}: {e}", partial.display()))?;
+    std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (program, args) = installer_command(platform, &path);
+    // Waited for, so a failure to open (no handler for the package, say) is
+    // reported, and the child is reaped. On Windows this waits for the setup.
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "{} could not open {} ({status}); open it yourself",
+            program.to_string_lossy(),
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// The update action: downloads the installer on its own thread and opens
+/// it, saying how it went in the banner. Pressed again while it runs, it
+/// only says so.
+fn install_hook(
+    version: String,
+    asset: Asset,
+    platform: &'static str,
+    dir: PathBuf,
+    current: &'static str,
+) -> blueprint_ui::workspace::UpdateHook {
+    let busy = Rc::new(Cell::new(false));
+    Rc::new(move |w: &mut Workspace, cx| {
+        if busy.get() {
+            w.notice = Some(format!("Blueprint {version} is already downloading."));
+            return;
+        }
+        busy.set(true);
+        w.banner = Some(format!("Downloading Blueprint {version}…"));
+        cx.notify();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let (asset, dir) = (asset.clone(), dir.clone());
+        let spawned = std::thread::Builder::new()
+            .name("update-download".into())
+            .spawn(move || {
+                let _ = tx.send(fetch_and_open(&asset, platform, &dir, current));
+            });
+        if let Err(e) = spawned {
+            busy.set(false);
+            w.banner = Some(format!("Updating failed: {e}. Get it from {RELEASES_PAGE}"));
+            return;
+        }
+        let (busy, version) = (Rc::clone(&busy), version.clone());
+        cx.spawn(async move |ws, cx| {
+            let done = rx.await.unwrap_or_else(|_| Err("the download stopped".into()));
+            let _ = ws.update(cx, |w, cx| {
+                busy.set(false);
+                w.banner = Some(match done {
+                    Ok(path) => format!(
+                        "The installer for Blueprint {version} is open ({}). Quit Blueprint to finish installing.",
+                        path.display()
+                    ),
+                    Err(e) => format!("Updating failed: {e}. Get it from {RELEASES_PAGE}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    })
 }
 
 /// Starts the check if one is due, and shows the banner if it finds an
@@ -98,6 +223,7 @@ pub fn start(ws: WeakEntity<Workspace>, cx: &mut App) {
         return;
     }
     let current = env!("CARGO_PKG_VERSION");
+    let dir_for_install = dir.clone();
     // Its own thread: the requests block, for minutes on a bad network, and
     // GPUI's few background threads are needed for the map.
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -117,9 +243,16 @@ pub fn start(ws: WeakEntity<Workspace>, cx: &mut App) {
         return;
     }
     cx.spawn(async move |cx| match rx.await {
-        Ok(Ok(Check::Available { manifest, .. })) => {
+        Ok(Ok(Check::Available { manifest, asset })) => {
             let _ = ws.update(cx, |w, cx| {
                 w.banner = Some(banner(&manifest.version, current));
+                w.on_update = Some(install_hook(
+                    manifest.version.clone(),
+                    asset,
+                    platform,
+                    dir_for_install,
+                    current,
+                ));
                 cx.notify();
             });
         }
@@ -168,8 +301,64 @@ mod tests {
     }
 
     #[test]
+    fn each_platform_opens_its_installer_its_own_way() {
+        let p = Path::new("/data/updates/x");
+        let (prog, args) = installer_command("linux-x86_64-deb", p);
+        assert_eq!((prog.to_str(), args.len()), (Some("xdg-open"), 1));
+        let (prog, args) = installer_command("linux-x86_64-rpm", p);
+        assert_eq!((prog.to_str(), args.len()), (Some("xdg-open"), 1));
+        let (prog, args) = installer_command("macos-aarch64", p);
+        assert_eq!(
+            (prog.to_str(), args[0].to_str()),
+            (Some("open"), Some("/data/updates/x"))
+        );
+        let (prog, args) = installer_command("windows-x86_64", p);
+        assert_eq!((prog.to_str(), args.len()), (Some("/data/updates/x"), 0));
+    }
+
+    #[test]
+    fn the_installer_keeps_its_released_file_name() {
+        let asset = |url: &str| Asset {
+            url: url.into(),
+            sha256: String::new(),
+            size: 0,
+        };
+        assert_eq!(
+            file_name(
+                &asset(
+                    "https://github.com/backslashmatt/blueprint/releases/download/v0.2.0/blueprint_0.2.0_amd64.deb"
+                ),
+                "linux-x86_64-deb"
+            ),
+            Some("blueprint_0.2.0_amd64.deb")
+        );
+        let r = "https://github.com/backslashmatt/blueprint/releases/download/v0.2.0/";
+        // Only this platform's kind of installer is ever opened.
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.desktop")), "linux-x86_64-deb"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.deb")), "linux-x86_64-rpm"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.dmg")), "macos-aarch64"),
+            Some("x.dmg")
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}.exe")), "windows-x86_64"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset("https://example.com/"), "linux-x86_64-deb"),
+            None
+        );
+    }
+
+    #[test]
     fn the_banner_names_both_versions_and_where_to_get_it() {
         let b = banner("0.2.0", "0.1.0");
-        assert!(b.contains("0.2.0") && b.contains("0.1.0") && b.contains("releases/latest"));
+        assert!(b.contains("0.2.0") && b.contains("0.1.0") && b.contains("Ctrl+U"));
     }
 }
