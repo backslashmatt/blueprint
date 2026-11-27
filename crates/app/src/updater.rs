@@ -83,10 +83,22 @@ pub fn banner(version: &str, current: &str) -> String {
 
 /// The installer's file name: the last segment of its URL, which
 /// `blueprint_update::verify` only accepts as letters, digits, `.`, `_`, `-`
-/// and `+`.
+/// and `+`, and only with the extension of `platform`'s installer, so that
+/// nothing else (a `.desktop` file, say) is ever handed to the system.
 #[must_use]
-pub fn file_name(asset: &Asset) -> Option<&str> {
-    asset.url.rsplit('/').next().filter(|n| !n.is_empty())
+pub fn file_name<'a>(asset: &'a Asset, platform: &str) -> Option<&'a str> {
+    let ext = match platform {
+        "linux-x86_64-deb" => ".deb",
+        "linux-x86_64-rpm" => ".rpm",
+        "macos-aarch64" => ".dmg",
+        "windows-x86_64" => ".exe",
+        _ => return None,
+    };
+    asset
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|n| n.len() > ext.len() && n.ends_with(ext))
 }
 
 /// How the platform opens a downloaded installer: the package manager's
@@ -110,18 +122,32 @@ fn fetch_and_open(
     dir: &Path,
     current: &str,
 ) -> Result<PathBuf, String> {
-    let name = file_name(asset).ok_or("the installer's URL has no file name")?;
+    let name = file_name(asset, platform).ok_or("the release has no installer of this kind")?;
     let https = blueprint_update::net::Https::new(current);
     let bytes = blueprint_update::download(&https, asset).map_err(|e| e.to_string())?;
     let updates = dir.join("updates");
     std::fs::create_dir_all(&updates).map_err(|e| format!("{}: {e}", updates.display()))?;
     let path = updates.join(name);
-    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Written beside it and renamed into place, so a file planted at the
+    // name is replaced, never written through.
+    let partial = updates.join(format!(".{name}.partial"));
+    let _ = std::fs::remove_file(&partial);
+    std::fs::write(&partial, bytes).map_err(|e| format!("{}: {e}", partial.display()))?;
+    std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (program, args) = installer_command(platform, &path);
-    std::process::Command::new(&program)
+    // Waited for, so a failure to open (no handler for the package, say) is
+    // reported, and the child is reaped. On Windows this waits for the setup.
+    let status = std::process::Command::new(&program)
         .args(&args)
-        .spawn()
+        .status()
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "{} could not open {} ({status}); open it yourself",
+            program.to_string_lossy(),
+            path.display()
+        ));
+    }
     Ok(path)
 }
 
@@ -298,12 +324,36 @@ mod tests {
             size: 0,
         };
         assert_eq!(
-            file_name(&asset(
-                "https://github.com/backslashmatt/blueprint/releases/download/v0.2.0/blueprint_0.2.0_amd64.deb"
-            )),
+            file_name(
+                &asset(
+                    "https://github.com/backslashmatt/blueprint/releases/download/v0.2.0/blueprint_0.2.0_amd64.deb"
+                ),
+                "linux-x86_64-deb"
+            ),
             Some("blueprint_0.2.0_amd64.deb")
         );
-        assert_eq!(file_name(&asset("https://example.com/")), None);
+        let r = "https://github.com/backslashmatt/blueprint/releases/download/v0.2.0/";
+        // Only this platform's kind of installer is ever opened.
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.desktop")), "linux-x86_64-deb"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.deb")), "linux-x86_64-rpm"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}x.dmg")), "macos-aarch64"),
+            Some("x.dmg")
+        );
+        assert_eq!(
+            file_name(&asset(&format!("{r}.exe")), "windows-x86_64"),
+            None
+        );
+        assert_eq!(
+            file_name(&asset("https://example.com/"), "linux-x86_64-deb"),
+            None
+        );
     }
 
     #[test]
