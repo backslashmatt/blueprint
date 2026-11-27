@@ -129,6 +129,8 @@ nodes:
   L2:cargo:crates/ui#text_scale/tests  Module  "text_scale::tests"  Exact  crates/ui/src/text_scale.rs  Private
   L2:cargo:crates/ui#workspace  Module  "workspace"  Exact  crates/ui/src/workspace.rs  Public
   L2:cargo:crates/ui#workspace/tests  Module  "workspace::tests"  Exact  crates/ui/src/workspace.rs  Private
+  L2:cargo:crates/update#examples%2F  Directory  "examples/"  Unknown  crates/update/examples
+  L2:cargo:crates/update#net  Module  "net"  Exact  crates/update/src/net.rs  Public
   L2:cargo:crates/update#tests%2F  Directory  "tests/"  Unknown  crates/update/tests
   L2:cargo:xtask#(bin main)  Module  "(bin main)"  Exact  xtask/src/main.rs  Public
   L2:cargo:xtask#layering  Module  "layering"  Exact  xtask/src/layering.rs  Public
