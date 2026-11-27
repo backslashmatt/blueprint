@@ -17,7 +17,7 @@ On Linux the `.deb` depends on `libxcb1`, `libxkbcommon0`, `libxkbcommon-x11-0`,
 
 ## Updates
 
-Once releases are published (see #159), an installed Blueprint checks this repository's [GitHub Releases](https://github.com/backslashmatt/blueprint/releases) for a newer version at most once a day, in the background. When one is available, a banner at the top of the window says so, with where to get it ([decision 0019](decisions/0019-update-check-network.md)).
+Once releases are published (see #159), an installed Blueprint checks this repository's [GitHub Releases](https://github.com/backslashmatt/blueprint/releases) for a newer version at most once a day, in the background. When one is available, a banner at the top of the window says so ([decision 0019](decisions/0019-update-check-network.md)). **Ctrl+U** (Cmd+U on macOS), or *Update Blueprint to the new version* in the command palette, downloads the installer, checks it against the signed manifest, saves it in `updates/` in the data directory and opens it: with the system's package installer on Linux (`xdg-open`), from Finder on macOS, and by running the setup on Windows. You finish the installation there; quit Blueprint first. If anything fails, the banner says why and links to the release page.
 
 - **What is sent:** an HTTPS request for the latest release's update manifest and its signature, with `User-Agent: Blueprint/<version>`. GitHub (and githubusercontent.com, where it redirects downloads) sees your IP address and that version, as for any download. Nothing about you or your repositories is sent.
 - **What is trusted:** only a manifest signed with the project's release key, for a newer version than the one running ([decision 0018](decisions/0018-signed-update-manifest.md)).

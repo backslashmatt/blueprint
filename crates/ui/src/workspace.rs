@@ -133,6 +133,9 @@ pub enum Screen {
     Failed(String),
 }
 
+/// What the update action runs: the app's download and hand-off (#179).
+pub type UpdateHook = Rc<dyn Fn(&mut Workspace, &mut Context<Workspace>)>;
+
 /// The workspace's state and its link to the engine.
 pub struct Workspace {
     /// What is on screen.
@@ -175,6 +178,9 @@ pub struct Workspace {
     /// A standing message from the app, above everything until the app
     /// clears it: that an update is available (#179).
     pub banner: Option<String>,
+    /// What `global.update` does, set by the app while an update is
+    /// available (#179); without it the action says there is none.
+    pub on_update: Option<UpdateHook>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Every review mark stored for the open repository (#115), as the
@@ -229,6 +235,7 @@ impl Workspace {
             note: None,
             notice: None,
             banner: None,
+            on_update: None,
             timed: false,
             pending: None,
             timings: Vec::new(),
@@ -773,9 +780,11 @@ impl Workspace {
             self.note_key(key, typed.as_deref());
             return;
         }
-        // Opening a repository works over the palette too.
-        if actions::for_key(&[Scope::Global], key).is_some_and(|a| a.id == "global.open") {
-            self.run("global.open", cx);
+        // Opening a repository and updating work over the palette too.
+        if let Some(a) = actions::for_key(&[Scope::Global], key)
+            && matches!(a.id, "global.open" | "global.update")
+        {
+            self.run(a.id, cx);
             return;
         }
         let scopes = self.scopes();
@@ -808,6 +817,13 @@ impl Workspace {
             Scope::Global if id == "global.open" => {
                 self.palette = None;
                 self.choose_folder(cx);
+            }
+            Scope::Global if id == "global.update" => {
+                self.palette = None;
+                match self.on_update.clone() {
+                    Some(update) => update(self, cx),
+                    None => self.notice = Some("No update is available.".into()),
+                }
             }
             Scope::Global => self.palette = Some(Palette::new(self.scopes())),
             Scope::List => self.run_list(id),
@@ -2445,7 +2461,9 @@ mod tests {
                         "review.back" | "review.reviewed" | "review.note" | "review.export"
                     )
                 }
-                Scope::Global => matches!(a.id, "global.palette" | "global.open"),
+                Scope::Global => {
+                    matches!(a.id, "global.palette" | "global.open" | "global.update")
+                }
             };
             assert!(handled, "{} has no handler", a.id);
         }

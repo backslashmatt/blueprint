@@ -68,6 +68,12 @@ pub const ACTIONS: &[ActionDef] = &[
         Scope::Global,
         &["ctrl-o", "cmd-o"],
     ),
+    a(
+        "global.update",
+        "Update Blueprint to the new version",
+        Scope::Global,
+        &["ctrl-u", "cmd-u"],
+    ),
     a("list.up", "Review list: previous row", Scope::List, &["up"]),
     a("list.down", "Review list: next row", Scope::List, &["down"]),
     a(
@@ -567,8 +573,8 @@ mod tests {
         let mut p = Palette::new(vec![Scope::Review, Scope::Global]);
         assert_eq!(
             p.matches.len(),
-            5,
-            "back to the list, export, note, mark reviewed, open a repository"
+            6,
+            "back to the list, export, note, mark reviewed, open a repository, update"
         );
         p.rescope(vec![Scope::Map, Scope::Review, Scope::Global]);
         assert!(p.matches.iter().any(|a| a.id == "map.drill_down"));
@@ -610,7 +616,7 @@ mod tests {
         let mut p = Palette::new(vec![Scope::List, Scope::Global]);
         assert_eq!(
             p.matches.len(),
-            9,
+            10,
             "every list action, not the palette itself"
         );
         for k in ["s", "w", "a", "p"] {
