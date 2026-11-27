@@ -627,6 +627,7 @@ dependencies = [
  "blueprint-protocol",
  "blueprint-ui",
  "blueprint-update",
+ "futures",
  "gpui",
  "gpui_platform",
 ]

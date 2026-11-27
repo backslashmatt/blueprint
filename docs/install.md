@@ -19,7 +19,8 @@ On Linux the `.deb` depends on `libxcb1`, `libxkbcommon0`, `libxkbcommon-x11-0`,
 
 Once releases are published (see #159), an installed Blueprint checks this repository's [GitHub Releases](https://github.com/backslashmatt/blueprint/releases) for a newer version at most once a day, in the background. When one is available, a banner at the top of the window says so, with where to get it ([decision 0019](decisions/0019-update-check-network.md)).
 
-- **What is sent:** an HTTPS request for the latest release's update manifest and its signature, with `User-Agent: Blueprint/<version>`. Nothing about you or your repositories is sent.
+- **What is sent:** an HTTPS request for the latest release's update manifest and its signature, with `User-Agent: Blueprint/<version>`. GitHub (and githubusercontent.com, where it redirects downloads) sees your IP address and that version, as for any download. Nothing about you or your repositories is sent.
 - **What is trusted:** only a manifest signed with the project's release key, for a newer version than the one running ([decision 0018](decisions/0018-signed-update-manifest.md)).
-- **Turning it off:** set the environment variable `BLUEPRINT_NO_UPDATE_CHECK` to any value. A build from source never checks.
+- **Turning it off:** set the environment variable `BLUEPRINT_NO_UPDATE_CHECK` to any value. Only an installed app checks: `/usr/bin/blueprint` from the `.deb` or `.rpm`, the app inside `Blueprint.app`, or the app the Windows installer put beside its uninstaller. A build from source never checks.
+- **The banner** comes back at every start until the update is installed; a check that finds nothing new is remembered for a day.
 - **Where it is remembered:** the time of the last check is in `update-check` in the data directory (`~/.local/share/blueprint` on Linux, or `$BLUEPRINT_DATA_DIR`).

@@ -17,6 +17,8 @@ blueprint-engine.workspace = true
 blueprint-protocol.workspace = true
 # The update check (#179, DR 0019).
 blueprint-update = { workspace = true, features = ["net"] }
+# The update check's result, from its own thread (MIT/Apache-2.0; already built for gpui).
+futures = { version = "0.3", default-features = false, features = ["std"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 
