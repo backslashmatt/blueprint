@@ -27,6 +27,23 @@ pub fn set_data_root(dir: PathBuf) -> bool {
     DATA_ROOT.get_or_init(|| dir.clone()) == &dir
 }
 
+/// The app's data directory: the one given to [`set_data_root`] if any, else
+/// `$BLUEPRINT_DATA_DIR` if set, otherwise the platform data directory
+/// (`~/.local/share/blueprint` on Linux). Review marks and the update
+/// check's time live here.
+///
+/// # Errors
+/// If there is no data directory.
+pub fn data_root() -> Result<PathBuf, String> {
+    Ok(match (DATA_ROOT.get(), std::env::var_os(DATA_DIR_ENV)) {
+        (Some(dir), _) => dir.clone(),
+        (None, Some(dir)) if !dir.is_empty() => PathBuf::from(dir),
+        _ => directories::ProjectDirs::from("", "", "blueprint")
+            .map(|d| d.data_dir().to_path_buf())
+            .ok_or("no data directory: set BLUEPRINT_DATA_DIR")?,
+    })
+}
+
 /// The file's layout version.
 const FORMAT: u32 = 1;
 
@@ -60,13 +77,7 @@ impl Reviews {
         let canonical = repo
             .canonicalize()
             .map_err(|e| format!("{}: {e}", repo.display()))?;
-        let root = match (DATA_ROOT.get(), std::env::var_os(DATA_DIR_ENV)) {
-            (Some(dir), _) => dir.clone(),
-            (None, Some(dir)) if !dir.is_empty() => PathBuf::from(dir),
-            _ => directories::ProjectDirs::from("", "", "blueprint")
-                .map(|d| d.data_dir().to_path_buf())
-                .ok_or("no data directory: set BLUEPRINT_DATA_DIR")?,
-        };
+        let root = data_root()?;
         let name = format!(
             "{:016x}.json",
             crate::index::fnv1a(canonical.as_os_str().as_encoded_bytes())

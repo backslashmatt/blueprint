@@ -15,6 +15,8 @@ path = "src/main.rs"
 blueprint-ui.workspace = true
 blueprint-engine.workspace = true
 blueprint-protocol.workspace = true
+# The update check (#179, DR 0019).
+blueprint-update = { workspace = true, features = ["net"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 

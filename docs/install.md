@@ -14,3 +14,12 @@ There is no AppImage: its runtime embeds libfuse, whose LGPL licence is outside 
 The installers contain the app, `blueprint`, with its licences (`LICENSE-MIT`, `LICENSE-APACHE`) and the third-party notices of the crates it is built from (`THIRD-PARTY-NOTICES.txt`, in `/usr/lib/blueprint` from the `.deb`, `/usr/share/licenses/blueprint` from the `.rpm`, inside the app bundle on macOS and in the install directory on Windows). Nothing else is installed. The `bp` command line is built from source (see [building.md](building.md)): it is the headless front end for tests and benchmarks, and including it would take the install over the 50 MB budget ([decision 0016](decisions/0016-unsigned-installers.md)).
 
 On Linux the `.deb` depends on `libxcb1`, `libxkbcommon0`, `libxkbcommon-x11-0`, `libwayland-client0`, `libvulkan1` and `libfontconfig1`, and the `.rpm` on `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, `libwayland-client`, `vulkan-loader` and `fontconfig`, which most desktops already have. The `.rpm` is built with cargo-generate-rpm (MIT), as cargo-packager has no rpm format; its contents and dependencies are in `crates/app/Cargo.toml`.
+
+## Updates
+
+Once releases are published (see #159), an installed Blueprint checks this repository's [GitHub Releases](https://github.com/backslashmatt/blueprint/releases) for a newer version at most once a day, in the background. When one is available, a banner at the top of the window says so, with where to get it ([decision 0019](decisions/0019-update-check-network.md)).
+
+- **What is sent:** an HTTPS request for the latest release's update manifest and its signature, with `User-Agent: Blueprint/<version>`. Nothing about you or your repositories is sent.
+- **What is trusted:** only a manifest signed with the project's release key, for a newer version than the one running ([decision 0018](decisions/0018-signed-update-manifest.md)).
+- **Turning it off:** set the environment variable `BLUEPRINT_NO_UPDATE_CHECK` to any value. A build from source never checks.
+- **Where it is remembered:** the time of the last check is in `update-check` in the data directory (`~/.local/share/blueprint` on Linux, or `$BLUEPRINT_DATA_DIR`).
