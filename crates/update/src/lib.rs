@@ -118,6 +118,15 @@ pub fn download(fetch: &impl Fetch, asset: &Asset) -> Result<Vec<u8>, UpdateErro
 
 #[cfg(feature = "net")]
 pub mod net;
+pub mod schedule;
+
+/// The release public key compiled in from `crates/update/release-key.txt`
+/// (see `build.rs`); `None` until that file is committed, and then the app
+/// does not check for updates.
+#[must_use]
+pub fn release_key() -> Option<VerifyingKey> {
+    option_env!("BLUEPRINT_RELEASE_KEY").and_then(|k| parse_public_key(k).ok())
+}
 
 /// One release, as its manifest describes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

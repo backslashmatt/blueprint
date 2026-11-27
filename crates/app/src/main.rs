@@ -133,6 +133,10 @@ fn main() {
         let stay_open = args.stay_open;
         let timings = args.timings.clone();
         let export = args.export_report.clone();
+        let scripted = !args.script.is_empty()
+            || args.review_report.is_some()
+            || args.cold_start_report.is_some()
+            || args.latency_report.is_some();
         let latency = args.latency_report.clone().map(|path| {
             (
                 path,
@@ -161,6 +165,10 @@ fn main() {
                 let focus = ws.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
                 pump(ws.clone(), replies, Arc::clone(&service), cx);
+                // A person's session only: scripted runs are tests and benchmarks.
+                if !scripted {
+                    blueprint_app::updater::start(ws.downgrade(), cx);
+                }
                 if let Some(path) = review_report {
                     report_review(&ws, path, timings, export, stay_open, cx);
                 }

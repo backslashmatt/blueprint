@@ -172,6 +172,9 @@ pub struct Workspace {
     /// A message about the last action that went wrong outside the engine
     /// (the folder dialog), shown above the screen until the next key.
     pub notice: Option<String>,
+    /// A standing message from the app, above everything until the app
+    /// clears it: that an update is available (#179).
+    pub banner: Option<String>,
     /// Each view's last layout, so a new one keeps nodes in place (DR 0010).
     seeds: HashMap<Option<NodeId>, Seed>,
     /// Every review mark stored for the open repository (#115), as the
@@ -225,6 +228,7 @@ impl Workspace {
             palette: None,
             note: None,
             notice: None,
+            banner: None,
             timed: false,
             pending: None,
             timings: Vec::new(),
@@ -1428,6 +1432,17 @@ impl Workspace {
             .overflow_y_scroll()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text));
+        let root = match &self.banner {
+            Some(b) => root.child(
+                div()
+                    .id("banner")
+                    .role(Role::Status)
+                    .aria_label(b.clone())
+                    .pb_2()
+                    .child(b.clone()),
+            ),
+            None => root,
+        };
         let root = match &self.notice {
             Some(n) => root.child(
                 div()
